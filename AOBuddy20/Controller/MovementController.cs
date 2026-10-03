@@ -81,10 +81,13 @@ public sealed class MovementController : IPacketConsumer
     // the owner's nav/<pf>.json segments are the roads.
     private const int RoadOutSnaps = 2; // a grid way over this many remembered pull-backs is no way out when a road is
     private const float RoadOutNear = 30f; // a road out starts this close
+
     private const float RoadOutFarGoal = 40f; // close by, the geometry line is the exacter instrument
+
     // HOSTILE MOBS (MobDanger): the live picture the route was planned with, and the replans for it - a
     // pack that appears within aggro of the next 150 m gets the leg planned again round them.
     private const int MaxDangerReplans = 3;
+
     // Clean walking, learned as road (LearnedGround.NoteWalk): the bot's own steps, thinned to a line,
     // cut at every real server correction - a stretch with a correction in it is not road.
     private const float WalkBufSpacing = 2f;
@@ -99,7 +102,13 @@ public sealed class MovementController : IPacketConsumer
     private const double SettleSeconds = 0.6;
     private const double ZoneLineWait = 6;
     private const double PadWait = 10;
+
     private const double ObjectWait = 8;
+
+    // A SCOTTY WARP IS A CAST (AOBuddy10: the zone came 26 s after the tell, log 2026-09-24 - a 20 s
+    // wait sent a second tell into a warp already on its way): wait long, ask him twice at most.
+    private const double ScottyWait = 45;
+    private const int ScottyTells = 2;
     private const float PadReach = 0.6f;
     private const float ObjectReach = 2.5f;
 
@@ -299,8 +308,10 @@ public sealed class MovementController : IPacketConsumer
     // stand-up went unheard and nothing ever checked again).
     private volatile bool _seated;
     private volatile bool _standEchoPending; // a stand-up toggle is on the wire, no 0x57 echo yet
+
     private volatile bool _postureGivenUp; // the stand-up budget ran out: walk assumes standing,
-                                           // _seated stays true so the next command re-arms
+
+    // _seated stays true so the next command re-arms
     // What the next 0x57 echo is for: the sit WE sent, the stand we sent, or nothing (an
     // unsolicited echo reads as a stand - the common forced one). The heal's rest cycle hangs
     // its "really seated" proof (SeatedConfirmed) on the sit answer; without the split, the
@@ -312,7 +323,12 @@ public sealed class MovementController : IPacketConsumer
     private double _loginSeenAt = -1; // the walk clock's first tick with a body: the login-mode timeout runs from here
     private double _driftHeldSince = -1; // the drift hold began (the seated signature reads it)
 
-    private enum PostureAwait { None, Sit, Stand }
+    private enum PostureAwait
+    {
+        None,
+        Sit,
+        Stand
+    }
 
     // Published by the update thread, consumed by the walk thread. One immutable snapshot per tick
     // so the walk never sees a torn combination (LocalPlayer is swapped on zone-in).
@@ -408,7 +424,9 @@ public sealed class MovementController : IPacketConsumer
             // that re-set was the 30-plans-a-second loop (Varmint Woods 2026-10-03 14:41). A
             // moved goal, another playfield, or an expired cooldown passes untouched.
             var since = _wetClock.Elapsed.TotalSeconds - _giveUpAt;
-            if (_giveUpPf == playfieldId && since >= 0 && since < GiveUpCooldownSeconds &&
+            if (_giveUpPf == playfieldId &&
+                since >= 0 &&
+                since < GiveUpCooldownSeconds &&
                 Movement.Flat(_giveUpGoal, desiredGoal) < 1f)
             {
                 _logger.LogDebug($"Goal refused for {GiveUpCooldownSeconds - since:0.0} s more: the priority {priority} " +
@@ -754,6 +772,7 @@ public sealed class MovementController : IPacketConsumer
         _running = true;
         Client.OnUpdate += PublishSnapshot;
         Client.PostureToggled += OnPostureToggled;
+        Team.TeamRequest += OnTeamRequest; // the warp service's invite (Scotty legs)
         _thread = new Thread(WalkLoop)
         {
             IsBackground = true,
@@ -773,6 +792,7 @@ public sealed class MovementController : IPacketConsumer
         _running = false;
         Client.OnUpdate -= PublishSnapshot;
         Client.PostureToggled -= OnPostureToggled;
+        Team.TeamRequest -= OnTeamRequest;
         _thread?.Join(TimeSpan.FromSeconds(2));
         _logger.LogInformation("Movement loop stopped.");
     }
@@ -1201,8 +1221,7 @@ public sealed class MovementController : IPacketConsumer
             // them. Not on a road out (roads keep their priority), at most MaxDangerReplans a goal,
             // 5 s apart.
             var nowS = _wetClock.Elapsed.TotalSeconds;
-            if (grid is OverlandGrid && !_roadOut && MobDanger.LiveVersion != _dangerVer
-                && nowS - _dangerAt > 5 && _dangerReplans < MaxDangerReplans)
+            if (grid is OverlandGrid && !_roadOut && MobDanger.LiveVersion != _dangerVer && nowS - _dangerAt > 5 && _dangerReplans < MaxDangerReplans)
             {
                 _dangerVer = MobDanger.LiveVersion;
                 if (MobDanger.ThreatAhead(_pf, _route, _routeIdx, pos, 150f, out var who))
@@ -1269,7 +1288,8 @@ public sealed class MovementController : IPacketConsumer
             {
                 grid.CellsAlong(new Vector3(pos.X + dir.X, 0f, pos.Z + dir.Z),
                     new Vector3(pos.X + dir.X * 3f, 0f, pos.Z + dir.Z * 3f), 1f, _stuckCells);
-                _logger.LogInformation($"Movement: no progress for {StuckSeconds:0} s at ({pos.X:0.0} {pos.Z:0.0}), routing round it ({_stuckCount}/{MaxStuck}).");
+                _logger.LogInformation(
+                    $"Movement: no progress for {StuckSeconds:0} s at ({pos.X:0.0} {pos.Z:0.0}), routing round it ({_stuckCount}/{MaxStuck}).");
                 _movement.Hold(me, SendIntervalMs);
                 PlanRoute(pos, goal.Value.Position, goal.Key);
                 return;
@@ -1360,8 +1380,10 @@ public sealed class MovementController : IPacketConsumer
                 nextY = sf;
             }
         }
-        else if (_movement.Swimming && _nav.Nav?.Ground != null &&
-                 double.IsNaN(_nav.Nav.Ground.SwimY(nx, nz, WadeDepth)) && floorY > pos.Y - 0.6f &&
+        else if (_movement.Swimming &&
+                 _nav.Nav?.Ground != null &&
+                 double.IsNaN(_nav.Nav.Ground.SwimY(nx, nz, WadeDepth)) &&
+                 floorY > pos.Y - 0.6f &&
                  now - _wetYAt > 2)
         {
             // THE FAR BANK (the data-dry river, Varmint Woods 2026-10-03): the floor has risen to
@@ -1462,8 +1484,9 @@ public sealed class MovementController : IPacketConsumer
                     grid.CellsAlong(e.A, e.B, 2f, extra);
                 }
             }
-            else if ((e.Kind == ExitKind.Line || e.Kind == ExitKind.Proxy || e.Kind == ExitKind.Teleport)
-                     && Movement.Flat(e.A, goalPos) > 1.5f && Movement.Flat(e.A, from) > 3.5f)
+            else if ((e.Kind == ExitKind.Line || e.Kind == ExitKind.Proxy || e.Kind == ExitKind.Teleport) &&
+                     Movement.Flat(e.A, goalPos) > 1.5f &&
+                     Movement.Flat(e.A, from) > 3.5f)
             {
                 grid.CellsAlong(e.A, e.A, 3f, extra);
             }
@@ -1483,8 +1506,8 @@ public sealed class MovementController : IPacketConsumer
         grid.CellsAlong(from, from, 3f, unseal);
         extra.ExceptWith(unseal);
 
-        var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why)
-                    ?? grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _);
+        var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why) ??
+                    grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _);
 
         // THE WAY OUT IS A WALKED ROAD (AOBuddy10 TryRoadOut, ported 2026-10-03): no way on the grid -
         // or a way that runs over RoadOutSnaps remembered pull-backs - and a recorded road starts
@@ -1720,10 +1743,19 @@ public sealed class MovementController : IPacketConsumer
                 SetDesiredGoal(hop.A, _pf, ControlPriority.Travel, PadReach);
                 _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - stepping onto the pad at ({hop.A.X:0.0} {hop.A.Z:0.0}).");
                 break;
+            case ExitKind.Scotty:
+                // A Scotty warp is a TELL from wherever we stand (AOBuddy10: "tell from where we stand" -
+                // it works from any playfield): the leg goal is here, so it reads reached at once and the
+                // TravelTick window sends the tell after the settle. No walking, no object.
+                t.LegGoal = CurrentPosition;
+                SetDesiredGoal(t.LegGoal, _pf, ControlPriority.Travel);
+                _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - telling Scotty ({hop.Label ?? hop.Tell}) from where we stand.");
+                break;
             default:
                 t.LegGoal = hop.A;
                 SetDesiredGoal(hop.A, _pf, ControlPriority.Travel, ObjectReach);
-                _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - walking up to the {hop.Kind.ToString().ToLower()} at ({hop.A.X:0.0} {hop.A.Z:0.0}).");
+                _logger.LogInformation(
+                    $"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - walking up to the {hop.Kind.ToString().ToLower()} at ({hop.A.X:0.0} {hop.A.Z:0.0}).");
                 break;
         }
     }
@@ -1822,18 +1854,106 @@ public sealed class MovementController : IPacketConsumer
 
     // The wire-proven use (AOBuddy10 GameCommands.UseObject, capture 20260923-201746): GenericCmd Use
     // on a WORLD object - whompa, grid terminal, lift - Count=1, Temp4=1, the exact bytes the owner's
-    // client sends. Sent from the walk thread; the send lock (the packet id) makes that safe.
+    // client sends. A Scotty exit is no object: the warp is /tell scty <name> from wherever we stand
+    // (AOBuddy10 OverlandController, logMessage false - the chat client's bare wire text of the tell
+    // stays off the console). Sent from the walk thread; the send lock (the packet id) makes that safe.
     private void SendUse(ZoneExit e)
     {
         var me = DynelManager.LocalPlayer;
-        if (me == null || e.ObjInstance == 0)
+        if (me == null)
         {
-            return; // no character, or an exit the data cannot name
+            return; // no character
+        }
+
+        if (e.Kind == ExitKind.Scotty)
+        {
+            // "scty ahanus" -> /tell scty ahanus (the tell names the warp and, after it, the NPC).
+            var tell = e.Tell ?? "";
+            var sp = tell.IndexOf(' ');
+            var to = sp > 0 ? tell[..sp] : "scty";
+            var text = sp > 0 ? tell[(sp + 1)..] : tell;
+            try
+            {
+                Client.Chat.SendPrivateMessage(to, text, false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"TRAVEL: the Scotty tell failed: {ex.Message}");
+                return;
+            }
+
+            _logger.LogInformation($"TRAVEL: /tell {to} {text} - initiating the Scotty warp to {Zoning.Name(e.ToPf)} ({e.Label}).");
+            return;
+        }
+
+        if (e.ObjInstance == 0)
+        {
+            return; // an exit the data cannot name
         }
 
         Client.Send(new GenericCmdMessage
-        { Action = GenericCmdAction.Use, User = me.Identity, Target = new Identity((IdentityType)e.ObjType, e.ObjInstance), Count = 1, Temp4 = 1 });
+        {
+            Action = GenericCmdAction.Use, User = me.Identity, Target = new Identity((IdentityType)e.ObjType, e.ObjInstance), Count = 1, Temp4 = 1
+        });
         _logger.LogInformation($"TRAVEL: used {e.ObjType}:{e.ObjInstance} at ({e.A.X:0.0} {e.A.Y:0.0} {e.A.Z:0.0}).");
+    }
+
+    // True while a Scotty tell is OUTSTANDING: its leg is a Scotty exit and the warp window
+    // (TravelTick's await beat) is still open. The window closes by itself - the wait runs out, the
+    // exit is written off, the plan is cancelled, or the zone lands - so the invite answer needs no
+    // flag lifecycle of its own, and outside the window an invite is never ours to take.
+    private bool AwaitingScottyWarp()
+    {
+        lock (_travelLock)
+        {
+            var t = _travel;
+            if (t?.LegExit == null || t.LegExit.Kind != ExitKind.Scotty || t.AwaitAt < 0)
+            {
+                return false;
+            }
+
+            return _wetClock.Elapsed.TotalSeconds - t.AwaitAt < ScottyWait;
+        }
+    }
+
+    // THE WARP SERVICE'S INVITE (the scty contract: it answers the tell with a team invite, and
+    // joining the team is what takes the warp). Inside a Scotty tell's window only the service's
+    // own toons are accepted - every minion is named "Scotty*"; any OTHER invite is DECLINED, so a
+    // stranger's pending request never sits on the answer that matters (owner, 2026-10-04). Outside
+    // the window nothing is answered here at all - the owner's own invites stay manual. Runs on the
+    // update thread (the packet pump raises Team.TeamRequest), so the DynelManager read is legal here.
+    private void OnTeamRequest(object sender, TeamRequestEventArgs e)
+    {
+        if (!AwaitingScottyWarp())
+        {
+            return;
+        }
+
+        // The inviter's name comes off the invite packet itself (TeamRequestEventArgs.RequesterName) -
+        // the inviter is often a toon the client never streams, so the dynel lists do not hold it. The
+        // dynel lookup stays as the fallback for raisers without a name.
+        var name = e.RequesterName;
+        if (string.IsNullOrEmpty(name) && DynelManager.Find(e.Requester, out SimpleChar requester))
+        {
+            name = requester.Name;
+        }
+
+        var who = name ?? e.Requester.Instance.ToString();
+        if (!string.IsNullOrEmpty(name) && (name.StartsWith("Scotty", StringComparison.OrdinalIgnoreCase) || name.StartsWith("Warp", StringComparison.InvariantCultureIgnoreCase)))
+        {
+            if (Team.IsInTeam)
+            {
+                _logger.LogInformation($"TRAVEL: {who} invited us but we are already in a team - the invite was not accepted.");
+                return;
+            }
+
+            Team.Accept(e.Requester);
+            _logger.LogInformation($"TRAVEL: accepted the warp service's team invite ({who}) - joining is what takes the warp.");
+            return;
+        }
+
+        Team.Decline(e.Requester);
+        _logger.LogInformation($"TRAVEL: declined {who}'s team invite - on a Scotty warp only Scotty's own toons may team us.");
     }
 
     // The leg watchdog. The NORMAL beat is the zone-in above, which advances the plan while the
@@ -1862,14 +1982,17 @@ public sealed class MovementController : IPacketConsumer
         lock (_goallock)
         {
             if (!goals.TryGetValue((int)ControlPriority.Travel, out var g) ||
-                g.PlayfieldId != t.LegPf || Movement.Flat(g.Position, t.LegGoal) > 0.01f || !g.Reached)
+                g.PlayfieldId != t.LegPf ||
+                Movement.Flat(g.Position, t.LegGoal) > 0.01f ||
+                !g.Reached)
             {
                 // Not (any more) standing on the leg goal: restart any window. But a same-playfield
                 // exit that has meanwhile MOVED us to its arrival point has done its job.
                 t.LegReachedAt = -1;
                 t.AwaitAt = -1;
                 var e = t.LegExit;
-                if (e.ToPf == t.LegPf && e.Arrival.HasValue &&
+                if (e.ToPf == t.LegPf &&
+                    e.Arrival.HasValue &&
                     Movement.Flat(CurrentPosition, e.Arrival.Value) < 5f &&
                     Movement.Flat(CurrentPosition, t.LegGoal) > 2f)
                 {
@@ -1898,16 +2021,21 @@ public sealed class MovementController : IPacketConsumer
                     t.AwaitAt = now;
                     t.Tries++;
                     var kind = t.LegExit.Kind;
-                    if (t.LegExit.Back || kind == ExitKind.Teleport || kind == ExitKind.Proxy
-                        || kind == ExitKind.Line && t.Tries >= MaxLegTries)
+                    if (t.LegExit.Back ||
+                        kind == ExitKind.Teleport ||
+                        kind == ExitKind.Proxy ||
+                        kind == ExitKind.Scotty ||
+                        kind == ExitKind.Line && t.Tries >= MaxLegTries)
                     {
-                        SendUse(t.LegExit); // terminals and exit doors are used; a pad only ever on its last stand
+                        SendUse(t.LegExit); // terminals, exit doors and the Scotty tell; a pad only ever on its last stand
                     }
 
                     return; // the window starts
                 }
 
-                var wait = t.LegExit.Back || t.LegExit.Kind == ExitKind.Teleport || t.LegExit.Kind == ExitKind.Proxy ? ObjectWait
+                var budget = t.LegExit.Kind == ExitKind.Scotty ? ScottyTells : MaxLegTries; // don't pester Scotty
+                var wait = t.LegExit.Kind == ExitKind.Scotty ? ScottyWait // a warp is a cast: the zone may take ~26 s
+                    : t.LegExit.Back || t.LegExit.Kind == ExitKind.Teleport || t.LegExit.Kind == ExitKind.Proxy ? ObjectWait
                     : t.LegExit.Kind == ExitKind.Line ? PadWait
                     : ZoneLineWait;
                 if (now - t.AwaitAt < wait)
@@ -1915,9 +2043,9 @@ public sealed class MovementController : IPacketConsumer
                     return; // the zone normally lands long before this
                 }
 
-                if (t.Tries < MaxLegTries)
+                if (t.Tries < budget)
                 {
-                    retry = true; // walk up / over again
+                    retry = true; // walk up / over again, or ask Scotty once more
                 }
                 else
                 {
@@ -1935,7 +2063,7 @@ public sealed class MovementController : IPacketConsumer
 
         if (retry)
         {
-            _logger.LogInformation($"TRAVEL: try {t.Tries + 1}/{MaxLegTries} at {t.LegExit}.");
+            _logger.LogInformation($"TRAVEL: try {t.Tries + 1}/{(t.LegExit.Kind == ExitKind.Scotty ? ScottyTells : MaxLegTries)} at {t.LegExit}.");
             lock (_travelLock)
             {
                 if (_travel == t)
@@ -2064,6 +2192,7 @@ public sealed class MovementController : IPacketConsumer
     private float StepFloor(float x, float y, float z)
     {
         float best = float.NaN;
+
         void Consider(double h)
         {
             if (double.IsNaN(h) || h > y + 0.8f)
@@ -2185,7 +2314,9 @@ public sealed class MovementController : IPacketConsumer
                 // at, from the FOURTH chained pin (every extra second pinned is a second lost).
                 // A real wedge (a fence, a crate) gains nothing from the swim, and its pins keep
                 // chaining while Swimming, so the wedge blacklist at eight still gets its turn.
-                if (_pins >= 4 && _nav.Nav?.Ground != null && !_movement.Swimming &&
+                if (_pins >= 4 &&
+                    _nav.Nav?.Ground != null &&
+                    !_movement.Swimming &&
                     double.IsNaN(_nav.Nav.Ground.SwimY(pos.X, pos.Z, WadeDepth)))
                 {
                     _pins = 0;
@@ -2407,6 +2538,7 @@ public sealed class MovementController : IPacketConsumer
                 bias = 0f;
             }
         }
+
         if (onNav || off >= 10f || !_movement.Moving)
         {
             lock (_poslock)

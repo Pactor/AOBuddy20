@@ -873,7 +873,9 @@ public static class Client
         {
             var teamInviteMsg = (TeamInviteMessage)msg;
 
-            var teamReqArgs = new TeamRequestEventArgs(teamInviteMsg.Requestor);
+            // The packet names the inviter (TeamInviteMessage.Name) - the inviter is often a toon the
+            // client does not stream, so this is the only place the name exists.
+            var teamReqArgs = new TeamRequestEventArgs(teamInviteMsg.Requestor, teamInviteMsg.Name);
             Team.TeamRequest?.Invoke(null, teamReqArgs);
         });
     }

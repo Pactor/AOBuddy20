@@ -33,9 +33,8 @@ namespace AOBuddy20.Nav;
 ///       * it has been used 10 times or is 3 days old (walked roads keep improving the planner; pick
 ///         them up).
 ///     When the start is more than 1 m from the saved start, a short leg is planned to the route's
-///     second point.
-///     AOBuddy10 also counted Scotty warp landings among the fixed ends; Scotty warps are not loaded in
-///     AOBuddy20 yet, so they are simply not cached ends (Zoning.cs).
+///     second point. The fixed ends include the Scotty warp landings (AOBuddy10); a warp without a
+///     stored landing (the Grid's "scty 4h") is no fixed end.
 /// </summary>
 public static class RouteCache
 {
@@ -120,6 +119,16 @@ public static class RouteCache
                     {
                         l.Add(back.Arrival.Value);
                     }
+                }
+            }
+
+            // ...and where the Scotty warps set you down (a pos-less warp - the Grid's "scty 4h" - has
+            // no fixed landing: not a cacheable end).
+            foreach (var s in Zoning.ScottyWarps)
+            {
+                if (s.ToPf == pf && s.Arrival.HasValue)
+                {
+                    l.Add(s.Arrival.Value);
                 }
             }
 

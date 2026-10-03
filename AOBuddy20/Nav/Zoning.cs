@@ -13,6 +13,7 @@
 
 using AOBuddy20.Enums;
 using AOSharp.Clientless;
+using AOSharp.Clientless.Common;
 using AOSharp.Common.GameData;
 using Newtonsoft.Json;
 
@@ -150,7 +151,9 @@ public sealed class ZoneRouteOptions
 ///     are immutable afterwards, so ExitsFrom/FindRoute/CrossLine are pure reads from any thread (the
 ///     _wet table is the one mutable side table, guarded by its lock; SetWet registers the playfield the
 ///     walk currently has nav data for).
-///     Scotty warps (GameData/ScottyWarps.json) are kept in mind but not loaded in AOBuddy20 yet.
+///     Scotty warps (GameData/ScottyWarps.json) are in the plan from any playfield (a tell to scottyboi
+///     works everywhere but RubiKa2019), at their ScottyCost of walking metres; the leg itself is no
+///     walk at all - MovementController sends the tell from wherever we stand and waits the cast out.
 /// </summary>
 public static class Zoning
 {
@@ -189,10 +192,14 @@ public static class Zoning
     public static ZoneRouteOptions RouteOptions(LocalPlayer me) => new ZoneRouteOptions
     {
         Stat = id => me.TryGetStat((Stat)id, out var v) ? v : (int?)null,
-        // No ScottyWarps.json in AOBuddy20 yet (owner, 2026-10-01: keep them in mind). When the file
-        // lands: UseScotty = Client.Dimension != Dimension.RubiKa2019 (AOBuddy10: no Scotty on 2019).
-        UseScotty = false,
+        // RubiKa2019 has no Scotty (AOBuddy10, owner 2026-09-26: "no scotywarp on 2019"). Everywhere
+        // else the warps are in the plan, at their ScottyCost of metres of walking.
+        UseScotty = AOSharp.Clientless.Client.Dimension != AOSharp.Clientless.Common.Dimension.RubiKa2019,
     };
+
+    /// <summary>The Scotty warps (a tell to scottyboi works from any playfield - FromPf 0), for callers
+    /// that need the landings (RouteCache's fixed ends).</summary>
+    public static IReadOnlyList<ZoneExit> ScottyWarps => _scotty;
 
     public static IReadOnlyList<ZoneExit> ExitsFrom(int pf) =>
         _exits.TryGetValue(pf, out var l) ? l : Array.Empty<ZoneExit>();

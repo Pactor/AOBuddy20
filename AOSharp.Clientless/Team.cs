@@ -212,12 +212,18 @@ public static class Team
 
 public class TeamRequestEventArgs : EventArgs
 {
-    public TeamRequestEventArgs(Identity requester)
+    public TeamRequestEventArgs(Identity requester, string requesterName = null)
     {
         Requester = requester;
+        RequesterName = requesterName;
     }
 
     public Identity Requester { get; }
+
+    /// <summary>The inviter's name as the packet carries it (TeamInviteMessage's Name field). The
+    /// inviter is often a toon the client does not stream, so the dynel lists cannot resolve it -
+    /// the wire is the only source. Null when a raiser had no name to give.</summary>
+    public string RequesterName { get; }
 
     public void Accept()
     {
