@@ -113,6 +113,8 @@ public sealed class MissionController : IPacketConsumer
     private const float SearchReach = 3f; // room-centre goals
     private const float TargetReach = 2f; // the last metres to the target
     private const float ButtonReach = 1.5f;
+    private const float DoorThroughMetres = 3.5f; // the door-check hop: this far past the door
+    private const float DoorCheckReach = 1.5f;
     private const float TerminalReach = 0.5f; // the terminal walk: 4 m approach offset + this must stay inside MissionTerminalRadius
     private const int MaxPresses = 12; // button presses per building
     private const double RideWait = 4.0; // a button ride moves us more than RideMetres, in this long
@@ -164,6 +166,8 @@ public sealed class MissionController : IPacketConsumer
     // 2026-10-03: AOBuddy10 had the whole playfield at the entrance - no magic, we were
     // throwing the doors away).
     private readonly List<(short room, short adjoining, Vector3 pos, int pf)> _serverDoors = new();
+    private readonly HashSet<long> _doorKeys = new(); // streamed once each: the same door re-streams on every approach
+    private int _doorKeysPf = -1; // the building _doorKeys was built for
     private readonly Dictionary<int, Vector3> _serverExitByPf = new();
     private Vector3? _serverExit => _serverExitByPf.TryGetValue(_missionPf, out var v) ? v : null;
     private int _doorsApplied = -1;
@@ -179,6 +183,15 @@ public sealed class MissionController : IPacketConsumer
     private readonly HashSet<(int floor, int room)> _searchedRooms = new();
     private int _presses;
     private bool _completed;
+
+    // The room whose doors are being checked, and the doors already crossed for it. A template's
+    // inner sections (its own doors - rooms.json 'doors' entries whose link is the room itself,
+    // e.g. Mine_Lesser4_2 carries two) only stream their dynels once the body stands behind the
+    // door, so the search walks every door of the room before it moves on (owner, 2026-10-03:
+    // the item sat ~9 m from the centre, behind the inner door; the room was marked searched on
+    // setting out, the target never streamed, and the run dropped "nothing left to search").
+    private int _lastSearchRoom = -1;
+    private readonly HashSet<long> _checkedDoors = new();
 
     // Goal bookkeeping (one goal at a time, ControlPriority.Mission).
     private bool _goalSet;
@@ -609,10 +622,27 @@ public sealed class MissionController : IPacketConsumer
             return false;
         }
 
+        // The same door re-streams on every approach; one copy each keeps the corrector's count
+        // honest (it re-applies when the count grows) and the search's door walk deduped. The key
+        // is the door's physical identity (room pair + position), pf-less: the pre-compose copy
+        // carries 0 and the re-stream the real playfield, and they are one door.
+        var key = ((long)(ushort)door.Room << 40) | ((long)(ushort)door.AdjoiningRoom << 24)
+                  | ((long)(ushort)(short)Math.Round(door.Coordinate.X * 2) << 12)
+                  | (ushort)(short)Math.Round(door.Coordinate.Z * 2);
+        if (!_doorKeys.Add(key))
+        {
+            return false;
+        }
+
         _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, door.Playfield));
         if (door.Room == -1)
         {
             _serverExitByPf[door.Playfield] = door.Coordinate;
+        }
+        else
+        {
+            _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} at " +
+                                   $"({door.Coordinate.X:0.0},{door.Coordinate.Z:0.0}) pf {door.Playfield}.");
         }
 
         return false;
@@ -893,7 +923,26 @@ public sealed class MissionController : IPacketConsumer
         {
             // INTO a mission instance.
             _missionPf = (int)Playfield.ModelId;
+            // The burst that landed before this compose (logging in inside the building, the
+            // walk-in burst) carries no playfield yet (0): those doors are THIS building's -
+            // re-key them. Only doors naming another playfield go (owner, 2026-10-03: the
+            // login-inside burst was dropped whole and the search had no doors to check).
+            for (var i = 0; i < _serverDoors.Count; i++)
+            {
+                if (_serverDoors[i].pf == 0)
+                {
+                    var d = _serverDoors[i];
+                    _serverDoors[i] = (d.room, d.adjoining, d.pos, _missionPf);
+                }
+            }
+
             _serverDoors.RemoveAll(x => x.pf != _missionPf); // other instances' doors go
+            if (_doorKeysPf > 0 && _doorKeysPf != _missionPf)
+            {
+                _doorKeys.Clear(); // a new building replays its doors; the same one must not duplicate
+            }
+
+            _doorKeysPf = _missionPf;
             _doorsApplied = -1;
             _navHandedOver = false;
             // The nav is handed over once the server's doors arrived and the layout was
@@ -901,6 +950,8 @@ public sealed class MissionController : IPacketConsumer
             _nav = nav;
             _items.Clear();
             _searchedRooms.Clear();
+            _checkedDoors.Clear();
+            _lastSearchRoom = -1;
             _presses = 0;
             _completed = false;
             _acts = 0;
@@ -1554,6 +1605,14 @@ public sealed class MissionController : IPacketConsumer
             }
         }
 
+        // The room just set out to: behind its doors before the next room. The centre walk streams
+        // the main chamber; an inner section streams only once the body crosses its door.
+        var doorHop = NextDoorHop(pos, myFloor);
+        if (doorHop.pos.HasValue)
+        {
+            return doorHop;
+        }
+
         var next = _nav.Dungeon.Rooms
             .Select((r, i) => (r, i))
             .Where(x => x.r.Floor == myFloor && !_searchedRooms.Contains((x.r.Floor, x.i)))
@@ -1562,6 +1621,7 @@ public sealed class MissionController : IPacketConsumer
         if (next.r != null)
         {
             _searchedRooms.Add((next.r.Floor, next.i)); // setting out counts as searched; FindTarget re-checks every hop
+            _lastSearchRoom = next.i;
             var centre = new Vector3(next.r.Pos[0], next.r.Pos[1], next.r.Pos[2]);
             return (centre, SearchReach, $"search {next.r.PoolName} (floor {next.r.Floor})", Identity.None, false);
         }
@@ -1577,6 +1637,88 @@ public sealed class MissionController : IPacketConsumer
 
         return (null, 0, "", Identity.None, false);
     }
+
+    // The nearest unchecked server door of the room just searched, and the hop through it: a point
+    // 3.5 m past the door on the line out of the room's centre, so the walk crosses the doorway and
+    // whatever it hides streams. The exit door (room -1) is not a search target. Doors the server
+    // has not streamed are not checkable - a room without streamed doors just searches as before.
+    private (Vector3? pos, float reach, string what, Identity button, bool press) NextDoorHop(Vector3 pos, int myFloor)
+    {
+        var rm = _lastSearchRoom >= 0 && _nav?.Dungeon?.Rooms != null && _lastSearchRoom < _nav.Dungeon.Rooms.Count
+            ? _nav.Dungeon.Rooms[_lastSearchRoom]
+            : null;
+        if (rm == null || rm.Floor != myFloor)
+        {
+            return (null, 0, "", Identity.None, false);
+        }
+
+        // Only behind a walk that arrived (the centre, or the previous door). A walk that timed
+        // out or was yank-given-up says nothing about the doors, and checking them from a stuck
+        // position burns a hop timeout per door - the next room is the better move.
+        if (!_movement.IsGoalReached(ControlPriority.Mission))
+        {
+            return (null, 0, "", Identity.None, false);
+        }
+
+        var centre = new Vector3(rm.Pos[0], rm.Pos[1], rm.Pos[2]);
+        Vector3? best = null;
+        var bestDist = float.MaxValue;
+        foreach (var sd in _serverDoors)
+        {
+            if (sd.pf != _missionPf || sd.room == -1 || Math.Abs(sd.pos.Y - rm.Pos[1]) > FloorBand)
+            {
+                continue;
+            }
+
+            var key = DoorKey(sd.pos);
+            if (_checkedDoors.Contains(key) || !RoomCovers(rm, sd.pos))
+            {
+                continue; // not this room's door, or already crossed
+            }
+
+            var d = Movement.Flat(pos, sd.pos);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = sd.pos;
+            }
+        }
+
+        if (!best.HasValue)
+        {
+            return (null, 0, "", Identity.None, false);
+        }
+
+        _checkedDoors.Add(DoorKey(best.Value)); // setting out counts as checked; FindTarget re-checks every hop
+        var outDir = best.Value - centre;
+        outDir.Y = 0;
+        if (outDir.Magnitude < 0.5f)
+        {
+            outDir = pos - best.Value; // door on the centre (never seen yet): cross away from us
+            outDir.Y = 0;
+        }
+
+        outDir = outDir.Normalize();
+        var through = best.Value + outDir * DoorThroughMetres;
+        return (through, DoorCheckReach, $"the door of {rm.PoolName} at ({best.Value.X:0},{best.Value.Z:0})", Identity.None, false);
+    }
+
+    // A door belongs to the room when it stands in the wall around its tiles: the tile rect
+    // (rotation-aware) probed at the door and 2.5 m out along both axes.
+    private bool RoomCovers(NavDungeon.Room rm, Vector3 p)
+    {
+        if (_nav.Dungeon.CellOf(rm, p.X, p.Z, out _, out _))
+        {
+            return true;
+        }
+
+        return _nav.Dungeon.CellOf(rm, p.X + 2.5, p.Z, out _, out _)
+               || _nav.Dungeon.CellOf(rm, p.X - 2.5, p.Z, out _, out _)
+               || _nav.Dungeon.CellOf(rm, p.X, p.Z + 2.5, out _, out _)
+               || _nav.Dungeon.CellOf(rm, p.X, p.Z - 2.5, out _, out _);
+    }
+
+    private static long DoorKey(Vector3 p) => (long)Math.Round(p.X * 2) * 10_000_000 + (int)Math.Round(p.Z * 2);
 
     private Identity NearestButton(Vector3 pos)
     {
