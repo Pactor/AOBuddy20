@@ -643,6 +643,8 @@ public sealed class MissionController : IPacketConsumer
         if (door.Room == -1)
         {
             _serverExitByPf[pf] = door.Coordinate;
+            _logger.LogInformation($"MISSION: exit door at ({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0}," +
+                                   $"{door.Coordinate.Z:0.0}) pf {door.Playfield}->{pf}.");
         }
         else
         {
@@ -940,6 +942,15 @@ public sealed class MissionController : IPacketConsumer
                     var d = _serverDoors[i];
                     _serverDoors[i] = (d.room, d.adjoining, d.pos, _missionPf);
                 }
+            }
+
+            // The -1 door with it: the EXIT, keyed blind (pf 0) in the pre-compose burst like every
+            // other door. _serverExit looks the mission pf up - re-key or it reads "none seen" and
+            // the leaving falls back to the layout's guess (owner, 2026-10-03).
+            if (_serverExitByPf.TryGetValue(0, out var blindExit))
+            {
+                _serverExitByPf.Remove(0);
+                _serverExitByPf[_missionPf] = blindExit;
             }
 
             _serverDoors.RemoveAll(x => x.pf != _missionPf); // other instances' doors go

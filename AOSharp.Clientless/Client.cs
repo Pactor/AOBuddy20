@@ -261,6 +261,17 @@ public static class Client
         Teardown();
     }
 
+    /// <summary>
+    ///     Drops the game-server session WITHOUT tearing the bot down: the state machine's
+    ///     Disconnected entry re-connects (Config.AutoReconnect, ReconnectDelay) and the whole
+    ///     login chain runs again, respawning the body at a server-valid position. The unstick
+    ///     for a body the server has pinned somewhere it refuses every step from.
+    /// </summary>
+    public static void ReconnectSession()
+    {
+        _netSession?.Disconnect();
+    }
+
     public static void SuppressItemDataLoad(bool shouldSuppress = true)
     {
         ItemDataLoaded = !shouldSuppress;

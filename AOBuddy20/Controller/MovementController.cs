@@ -242,6 +242,17 @@ public sealed class MovementController : IPacketConsumer
     private Vector3 _lastPin; // the last correction landing, for the pinned-storm watch
     private double _lastPinAt = -99;
     private int _pins;
+
+    // THE SERVER-PINNED BODY: wedge cycles stacking on the same spot - each blacklists and
+    // re-plans, the next walks straight back into the same refusal. Three cycles in a minute on
+    // one spot is the server holding the body somewhere it refuses every step from (its own
+    // catch-up snapback parked it there). The clean unstick is the gameserver reconnect: the
+    // login respawns the body at a server-valid position (owner, 2026-10-03: pinned at
+    // (279.4,264.4) through the whole leaving walk, wedged cycle after cycle, minutes on end).
+    private int _wedgeCycles;
+    private Vector3 _wedgePos;
+    private double _wedgeLastAt = -99;
+    private bool _reconnectSent;
     private List<Vector3> _route = new();
     private int _routeIdx;
     private int _routePrio = -1; // the priority the route was planned for
@@ -931,6 +942,8 @@ public sealed class MovementController : IPacketConsumer
             _stuckCells.Clear();
             _serverNo.Clear(); // its cells are grid-local keys: last playfield's marks are noise here
             _stuck.Reset();
+            _wedgeCycles = 0;
+            _reconnectSent = false; // the respawn is a new body: a fresh pin may escalate again
             _logger.LogInformation($"Movement: playfield {_pf}, run state cleared (server stopped).");
             lock (_poslock)
             {
@@ -2039,6 +2052,30 @@ public sealed class MovementController : IPacketConsumer
 
                     _logger.LogInformation(
                         $"Movement: the server keeps pinning me at ({pos.X:0.0} {pos.Z:0.0}) - wedged; blacklisted and re-planning (yank {_yanks}/{MaxYanks}).");
+
+                    // The wedge is not a spot the route can dodge: the same spot cycles again and
+                    // again. Three in a minute means the body is server-pinned - reconnect, and
+                    // the login respawns it somewhere the server accepts steps from.
+                    if (Movement.Flat(pos, _wedgePos) < 1.5f && now - _wedgeLastAt < 60)
+                    {
+                        _wedgeCycles++;
+                    }
+                    else
+                    {
+                        _wedgeCycles = 1;
+                        _wedgePos = pos;
+                    }
+
+                    _wedgeLastAt = now;
+                    if (_wedgeCycles >= 3 && !_reconnectSent)
+                    {
+                        _reconnectSent = true;
+                        _logger.LogWarning(
+                            $"Movement: the body is server-pinned at ({pos.X:0.0} {pos.Z:0.0}) - every step refused " +
+                            $"through {_wedgeCycles} wedge cycles. Reconnecting the gameserver: the login respawns me " +
+                            "at a valid position.");
+                        Client.ReconnectSession();
+                    }
                 }
             }
             else
