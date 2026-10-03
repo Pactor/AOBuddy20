@@ -11,6 +11,7 @@
 
 #nullable disable
 
+using AOBuddy20.Components;
 using AOBuddy20.Enums;
 using AOSharp.Common.GameData;
 
@@ -45,10 +46,16 @@ public interface IWalkGrid
 ///     suppressed as a routing floor of that cell and the collision floors (the street) are what remains -
 ///     ground routing stays on the ground; elevated walkways connect only where real triangles carry them.
 ///     SLOPES ARE DIRECTIONAL (owner, 2026-09-25): a slope too steep to climb is still walkable going down,
-///     and there is NO fall damage outdoors — but a drop can only be taken where a recorded road says so, and
-///     the learned-road/danger cost layers of AOBuddy10 (LearnedGround, MobDanger) are NOT ported yet: without
-///     them a drop the MaxRise rule refuses is simply not routed, and paths carry no road/mob weighting.
-///     Nothing here moves the body. IMMUTABLE after Build/Read: any thread may query.
+///     and there is NO fall damage outdoors — but a drop the MaxRise rule refuses is only taken where a
+///     recorded road says so (LearnedGround's drops: the cells of a jump the owner himself walked, both
+///     ends of it).
+///     THE LEARNED LAYERS (AOBuddy10, ported 2026-10-03): the owner's recorded roads (nav/&lt;pf&gt;.json)
+///     cost RoadFactor of normal and the server's remembered pull-back spots (snapbacks.json) add up to
+///     SnapWeight x hits, so the route is planned around yesterday's refusals instead of collecting them
+///     again; hostile-mob spots (MobDanger) cost by aggro circle - never a block, the owner's roads exempt.
+///     Both are RUNTIME layers, rebuilt lazily when their Version changes - never part of the GridCache
+///     file - and only the walk thread's searches rebuild or read them, so they need no lock of their own.
+///     Nothing here moves the body. The stamped geometry is IMMUTABLE after Build/Read: any thread may query.
 /// </summary>
 public sealed class OverlandGrid : IWalkGrid
 {
@@ -82,12 +89,35 @@ public sealed class OverlandGrid : IWalkGrid
     // Water deeper than WadeDepth costs WaterWeight extra per step, so he swims only when it saves a lot.
     private const float WaterWeight = 2f, WadeDepth = 1.0f;
 
+    // LEARNED (LearnedGround, ported 2026-10-03): the owner's recorded roads cost RoadFactor of normal,
+    // the server's remembered snap-back spots add up to SnapWeight x hits within SnapRadius, and a slope
+    // costs SlopeWeight per unit of grade over SlopeFree (downhill half) - the hill loses to the longer
+    // road. A recorded stretch dropping faster than DropGrade is a jump off something (the owner jumps
+    // off ledges by habit): it is not road, and climbing through it costs DropClimbCost extra.
+    private const float RoadFactor = 0.5f, SnapWeight = 2f, SnapRadius = 6f;
+    private const float DropGrade = 1.2f, DropClimbCost = 10f; // = MaxRise: only what can't be walked up is a jump
+
+    // HOSTILE MOBS (MobDanger, ported 2026-10-03): crossing a spot's aggro circle through its middle
+    // costs DetourPerMob x W metres per counted mob, fading to nothing at R - never a block. A cell's
+    // cost is capped at DangerCap so a nest of spots stays a cost the search can still weigh.
+    private const float DangerCap = 100f;
+
     private readonly bool[] _blocked;
     private readonly float[] _ch;
     private readonly NavGround _ground;
     private readonly HashSet<long> _blockedFl = new HashSet<long>(); // (cell << FloorShift) | floor
     private HashSet<int> _terrainTop; // cells whose heightfield level is a structure top: no terrain floor
     private readonly int _w, _h;
+
+    // The learned cost layers (runtime only - see the class note): rebuilt when LearnedGround.Version
+    // or MobDanger's keys change, by the walk thread's own searches. Never written to the GridCache.
+    private bool[] _road, _drop, _ownerRoad;
+    private float[] _learn;
+    private bool _anyRoad;
+    private int _learnVer = -1;
+    private float[] _danger;
+    private int _dangerKey = int.MinValue, _dangerLearnVer = -1, _dangerLiveVer = -1, _dangerSpots, _dangerLive;
+    private readonly List<(int cell, float add)> _liveStamp = new();
 
     // Built by StampClearance at the end of Build/Read (construction only - the grid is immutable
     // once published).
@@ -272,11 +302,14 @@ public sealed class OverlandGrid : IWalkGrid
         }
     }
 
-    internal static OverlandGrid Read(BinaryReader br, NavGround g, int pf)
+    internal static OverlandGrid Read(BinaryReader br, NavGround g, int pf, string pluginDir)
     {
         float cell = br.ReadSingle();
         int w = br.ReadInt32(), h = br.ReadInt32();
         var grid = new OverlandGrid(pf, cell, w, h, g);
+        grid._pluginDir = pluginDir; // GeometryLine/Escape lazy-load walls.bin with it - without the dir
+                                     // a cache-loaded grid refused every geometry line ("no walls.bin")
+                                     // and the blocked-verdict fallbacks were dead on every cache hit
         grid.HasWalls = br.ReadBoolean();
         int i = 0;
         while (i < grid._blocked.Length)
@@ -580,6 +613,240 @@ public sealed class OverlandGrid : IWalkGrid
         int cx = CellX(x), cz = CellZ(z);
         return _water != null && cx >= 0 && cz >= 0 && cx < _w && cz < _h && _water[cz * _w + cx];
     }
+
+    // ---- the learned cost layers (walk thread only; see the class note) -------------------
+
+    // Stamp the ROADS, DROPS and SNAP-BACK costs from LearnedGround whenever its Version moved. The
+    // owner's recorded roads (nav/<pf>.json) and the bot's own clean walks (walked.json) mark their
+    // cells: road for the planner, the owner's also trusted for a recorded drop. The remembered
+    // pull-back spots add cost round themselves - the hill the server refused twice is not "walkable",
+    // it is "expensive", and the longer way round wins (AOBuddy10 EnsureLearned).
+    private void EnsureLearned()
+    {
+        LearnedGround.RefreshRoads();
+        if (_learnVer == LearnedGround.Version)
+        {
+            return;
+        }
+
+        _learnVer = LearnedGround.Version;
+        _road = new bool[_w * _h];
+        _drop = new bool[_w * _h];
+        _learn = new float[_w * _h];
+        _anyRoad = false;
+        bool OnFloor(Vector3 p)
+        {
+            var cx = CellX(p.X);
+            var cz = CellZ(p.Z);
+            if (!In(cx, cz))
+            {
+                return false;
+            }
+
+            var c = cz * _w + cx;
+            for (var f = 0; f < FloorCount(c); f++)
+            {
+                if (Math.Abs(FloorH(c, f) - p.Y) < 3f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var cells = new HashSet<int>();
+        var drops = new HashSet<int>();
+        var owner = new HashSet<int>();
+        var ownerRoads = LearnedGround.RoadsIn(Pf);
+        var ownerSet = new HashSet<List<Vector3>>(ownerRoads);
+        foreach (var road in ownerRoads.Concat(LearnedGround.WalksIn(Pf)))
+        {
+            for (var i = 0; i + 1 < road.Count; i++)
+            {
+                var a = road[i];
+                var b = road[i + 1];
+                if (Vector3.Distance(a, b) > 40f || !OnFloor(a) || !OnFloor(b))
+                {
+                    continue; // a zone jump, or another zone's walk
+                }
+
+                var flat = Movement.Flat(a, b);
+                // A drop is allowed only where the OWNER walked it (his recorded roads), never from the
+                // bot's own walks (2026-09-28: his glitch off a ridge, saved as one of the bot's walks,
+                // let a route drop off it).
+                if (flat > 0.1f && Math.Abs(b.Y - a.Y) / flat > DropGrade)
+                {
+                    if (ownerSet.Contains(road))
+                    {
+                        CellsAlong(a, b, 2.5f, drops);
+                    }
+
+                    continue;
+                }
+
+                CellsAlong(a, b, 1.5f, cells);
+                if (ownerSet.Contains(road))
+                {
+                    CellsAlong(a, b, 1.5f, owner);
+                }
+            }
+        }
+
+        foreach (var c in drops)
+        {
+            cells.Remove(c);
+        }
+
+        foreach (var c in cells)
+        {
+            _road[c] = true;
+            _anyRoad = true;
+        }
+
+        _ownerRoad = new bool[_w * _h];
+        foreach (var c in owner)
+        {
+            _ownerRoad[c] = true;
+        }
+
+        foreach (var c in drops)
+        {
+            _drop[c] = true;
+        }
+
+        var R = (int)Math.Ceiling(SnapRadius / Cell);
+        foreach (var sp in LearnedGround.SnapsIn(Pf))
+        {
+            var sx = CellX(sp.X);
+            var sz = CellZ(sp.Z);
+            for (var dz = -R; dz <= R; dz++)
+            {
+                for (var dx = -R; dx <= R; dx++)
+                {
+                    if (!In(sx + dx, sz + dz))
+                    {
+                        continue;
+                    }
+
+                    var dist = (float)Math.Sqrt(dx * dx + dz * dz) * Cell;
+                    if (dist > SnapRadius)
+                    {
+                        continue;
+                    }
+
+                    _learn[(sz + dz) * _w + sx + dx] += SnapWeight * Math.Min(sp.N, 6) * (1f - dist / SnapRadius);
+                }
+            }
+        }
+    }
+
+    /// <summary>The hostile-mob cost layer, current for the atlas, his level, the owner's roads and the live mobs
+    /// (AOBuddy10 EnsureDanger, ported 2026-10-03).</summary>
+    private void EnsureDanger()
+    {
+        var key = MobDanger.Key(Pf);
+        if (key != _dangerKey || _learnVer != _dangerLearnVer)
+        {
+            _dangerKey = key;
+            _dangerLearnVer = _learnVer;
+            _liveStamp.Clear();
+            _dangerLiveVer = -1;
+            var spots = MobDanger.AtlasSpots(Pf);
+            _dangerSpots = spots.Count;
+            if (spots.Count == 0)
+            {
+                _danger = null;
+            }
+            else
+            {
+                if (_danger == null)
+                {
+                    _danger = new float[_w * _h];
+                }
+                else
+                {
+                    Array.Clear(_danger, 0, _danger.Length);
+                }
+
+                foreach (var s in spots)
+                {
+                    StampSpot(s, null);
+                }
+            }
+        }
+
+        if (MobDanger.LiveVersion != _dangerLiveVer)
+        {
+            _dangerLiveVer = MobDanger.LiveVersion;
+            if (_danger != null)
+            {
+                foreach (var (c, add) in _liveStamp)
+                {
+                    _danger[c] = Math.Max(0f, _danger[c] - add);
+                }
+            }
+
+            _liveStamp.Clear();
+            var live = MobDanger.LiveSpots(Pf);
+            _dangerLive = live.Count;
+            if (live.Count > 0 && _danger == null)
+            {
+                _danger = new float[_w * _h];
+            }
+
+            foreach (var s in live)
+            {
+                StampSpot(s, _liveStamp);
+            }
+        }
+    }
+
+    // Crossing the spot's aggro circle through its middle costs DetourPerMob x W metres; its cost fades
+    // to nothing at R. The owner's recorded roads get none: they keep their priority.
+    private void StampSpot(MobDanger.Spot s, List<(int, float)> undo)
+    {
+        if (s.R <= 0 || s.W <= 0)
+        {
+            return;
+        }
+
+        var k = MobDanger.DetourPerMob / s.R * s.W;
+        var sx = CellX(s.X);
+        var sz = CellZ(s.Z);
+        var R = (int)Math.Ceiling(s.R / Cell) + 1;
+        for (var dz = -R; dz <= R; dz++)
+        {
+            for (var dx = -R; dx <= R; dx++)
+            {
+                var x = sx + dx;
+                var z = sz + dz;
+                if (!In(x, z))
+                {
+                    continue;
+                }
+
+                float ex = (x + 0.5f) * Cell - s.X, ez = (z + 0.5f) * Cell - s.Z;
+                var d = (float)Math.Sqrt(ex * ex + ez * ez);
+                if (d >= s.R)
+                {
+                    continue;
+                }
+
+                var c = z * _w + x;
+                if (_blocked[c] || (_ownerRoad != null && _ownerRoad[c]))
+                {
+                    continue;
+                }
+
+                var add = k * (1f - d / s.R);
+                _danger[c] += add;
+                undo?.Add((c, add));
+            }
+        }
+    }
+
+    private float DangerAt(int cell) => _danger == null ? 0f : Math.Min(DangerCap, _danger[cell]);
 
     // A floor with another one just above it (under a deck, inside a slab — FloorGrid's rule) is no
     // place to stand. Considers the terrain floor as one of the stack - except on structure-top cells,
@@ -976,11 +1243,35 @@ public sealed class OverlandGrid : IWalkGrid
     /// <summary>Same, with a goal HEIGHT: the path must arrive on a floor within 2.5 m of goalY (a wall-top, a walkway) instead of on whichever level touches the goal cell first. NaN goalY = any level.</summary>
     public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why, float goalY)
     {
-        // AOBuddy10 kept a RouteCache between two fixed objects (whompahs, grids, doors) and checked the
-        // saved route against the hostile-mob layer; neither is ported yet, so every call searches
-        // (owner, 2026-10-01).
+        // Between two fixed objects (whompahs, grids, doors) the route is planned once and kept
+        // (RouteCache, ported 2026-10-03). A saved route was planned without today's mobs: through a
+        // hostile spot, plan it afresh.
+        why = "";
+        var saved = RouteCache.Get(this, a, b, reach, goalY, extra, (p, q) => Search(p, q, extra, snap, 1.5f, false, out _, float.NaN));
+        if (saved != null)
+        {
+            var (sHit, sAll, sNear) = MobDanger.Along(Pf, saved);
+            if (sHit == 0)
+            {
+                return saved;
+            }
+
+            MobDanger.Log($"OVERLAND: the saved route passes {sHit} of {sAll} hostile-mob spot(s) (closest {sNear:0} m); planning afresh.");
+        }
+
         // In sight of b first; if that walks nowhere (b's pocket is closed off), on distance alone.
         var route = Search(a, b, extra, snap, reach, true, out why, goalY) ?? Search(a, b, extra, snap, reach, false, out _, goalY);
+        if (route != null)
+        {
+            RouteCache.Put(this, a, b, reach, goalY, route);
+        }
+
+        if (route != null && _danger != null)
+        {
+            var (hit, all, near) = MobDanger.Along(Pf, route);
+            MobDanger.Log($"OVERLAND: routing round {_dangerSpots} hostile-mob spot(s){(_dangerLive > 0 ? $" and {_dangerLive} live hostile(s)" : "")} in {Zoning.Name(Pf)}: {route.Count} points; passes {hit} of {all} within aggro range, closest {near:0} m.");
+        }
+
         return route;
     }
 
@@ -1047,7 +1338,9 @@ public sealed class OverlandGrid : IWalkGrid
         var parent = new Dictionary<long, long>();
         var closed = new HashSet<long>();
         var open = new PriorityQueue<long, float>();
-        const float hScale = 1.2f; // the estimate stays under a straight step's cost
+        EnsureLearned();
+        EnsureDanger();
+        float hScale = _anyRoad ? RoadFactor : 1.2f; // the estimate stays under a road step's cost
         float H(int x, int z)
         {
             int dx = Math.Abs(x - bx), dz = Math.Abs(z - bz);
@@ -1104,21 +1397,24 @@ public sealed class OverlandGrid : IWalkGrid
                     int ncell = nz * _w + nx;
                     float d = (dx != 0 && dz != 0 ? 1.4142f : 1f) * Cell;
                     float len1 = dx != 0 && dz != 0 ? 1.4142f : 1f;
-                    float baseMul = 1f + WallCost(ncell) + (_water != null && _water[ncell] ? WaterWeight : 0f);
+                    float baseMul = 1f + WallCost(ncell) + (_water != null && _water[ncell] ? WaterWeight : 0f)
+                                    + (_learn != null ? _learn[ncell] : 0f) + DangerAt(ncell);
+                    float roadMul = _road != null && _road[ncell] ? RoadFactor : 1f;
                     for (int j = 0; j < FloorCount(ncell); j++)
                     {
                         // The one-way rule per floor pair: climbing onto the next floor must stay under
                         // MaxRise; dropping onto it is free (no fall damage outdoors, owner 2026-09-25).
-                        // AOBuddy10 also allowed a big drop where the OWNER had walked one (a recorded
-                        // road or jump); the learned layer is not ported, so a drop this steep is simply
-                        // not taken (owner, 2026-10-01).
+                        // NO JUMPING OFF (AOBuddy10, owner 2026-09-27: "no more trying to drop off the top
+                        // of mountain"): a drop the MaxRise rule refuses is taken only where the OWNER
+                        // walked it - a recorded road or jump, BOTH cells on it (a drop onto a road cell
+                        // from anywhere once let the way to a town's entrance go off its ridge).
                         float rise = FloorH(ncell, j) - fh;
                         if (rise > MaxRise * d)
                         {
                             continue;
                         }
 
-                        if (-rise > MaxRise * d)
+                        if (-rise > MaxRise * d && !(_drop != null && _drop[ncell] && _drop[curCell]))
                         {
                             continue;
                         }
@@ -1126,7 +1422,12 @@ public sealed class OverlandGrid : IWalkGrid
                         float grade = Math.Abs(rise) / d;
                         const float slopeWeight = 4f, slopeFree = 0.15f;
                         float slope = grade > slopeFree ? slopeWeight * (grade - slopeFree) * (rise < 0 ? 0.5f : 1f) : 0f;
-                        float stepCost = gc + len1 * (baseMul + slope);
+                        if (rise > 0.2f && _drop != null && _drop[ncell])
+                        {
+                            slope += DropClimbCost; // climbing back through a recorded jump is a last resort
+                        }
+
+                        float stepCost = gc + len1 * (baseMul + slope) * roadMul;
                         long nn = ((long)ncell << FloorShift) | j;
                         if (closed.Contains(nn) || !FloorOpen(ncell, j))
                         {
@@ -1400,6 +1701,12 @@ public sealed class OverlandGrid : IWalkGrid
         // No closer to a wall than the ends are (up to ClearKeep): the pull would otherwise lay the line back
         // along the wall the search's wall cost kept it off. A narrow gate passes, its ends are narrow too.
         float keep = Math.Min(ClearKeep, Math.Min(ClearAt(c0), ClearAt(c1)));
+        // Nor off the road it was planned on, nor across a remembered bad spot, nor through a hostile spot
+        // the search went round (the pull would cut the corner off the road over the spot the server resets,
+        // AOBuddy10 2026-09-26).
+        bool onRoad = _road != null && _road[c0] && _road[c1];
+        float learnEnds = _learn == null ? 0f : Math.Max(_learn[c0], _learn[c1]);
+        float dangerEnds = Math.Max(DangerAt(c0), DangerAt(c1));
         for (int i = 1; i < n; i++)
         {
             float t = i / (float)n;
@@ -1438,6 +1745,21 @@ public sealed class OverlandGrid : IWalkGrid
 
             int sc = (int)Math.Floor(z) * _w + (int)Math.Floor(x);
             if (ClearAt(sc) < keep)
+            {
+                return false;
+            }
+
+            if (onRoad && !_road[sc])
+            {
+                return false;
+            }
+
+            if (_learn != null && _learn[sc] > learnEnds + 1f)
+            {
+                return false;
+            }
+
+            if (DangerAt(sc) > dangerEnds + 1f)
             {
                 return false;
             }

@@ -74,6 +74,22 @@ public sealed class MovementController : IPacketConsumer
     private const double StuckSeconds = 4;
     private const int MaxStuck = 4; // re-routes around a stuck spot per goal
 
+    // THE LEARNED WAY (AOBuddy10 OverlandController, ported 2026-10-03): no way on the grid - or a way
+    // that runs over remembered pull-backs - and a recorded road starts close by and leads away: walk
+    // the road out, then plan the leg again from its end. LearnedGround's snap-backs price the refused
+    // ground for every plan after the first yank; its walked.json (the bot's own clean stretches) and
+    // the owner's nav/<pf>.json segments are the roads.
+    private const int RoadOutSnaps = 2; // a grid way over this many remembered pull-backs is no way out when a road is
+    private const float RoadOutNear = 30f; // a road out starts this close
+    private const float RoadOutFarGoal = 40f; // close by, the geometry line is the exacter instrument
+    // HOSTILE MOBS (MobDanger): the live picture the route was planned with, and the replans for it - a
+    // pack that appears within aggro of the next 150 m gets the leg planned again round them.
+    private const int MaxDangerReplans = 3;
+    // Clean walking, learned as road (LearnedGround.NoteWalk): the bot's own steps, thinned to a line,
+    // cut at every real server correction - a stretch with a correction in it is not road.
+    private const float WalkBufSpacing = 2f;
+    private const int WalkBufCap = 150;
+
     // TRAVEL legs (AOBuddy10 OverlandController): stand still a moment before using (the server must
     // have our stop before we use from where it has us), wait per kind for the zone, and give each exit
     // a try budget before it is written off and the plan re-routes round it. Booths, grid exits and lift
@@ -253,6 +269,17 @@ public sealed class MovementController : IPacketConsumer
     private Vector3 _wedgePos;
     private double _wedgeLastAt = -99;
     private bool _reconnectSent;
+
+    // WHAT WALKING TAUGHT (LearnedGround): the bot's own clean steps (no server correction in between)
+    // are road for the planner's next trips, and every yank or pin-storm landing is a remembered
+    // pull-back spot - priced on the grid across restarts, so tomorrow's route is planned around
+    // today's refusals instead of collecting them again.
+    private readonly List<Vector3> _walkBuf = new(); // the clean stretch being walked right now
+    private readonly List<Vector3> _roadOutFrom = new(); // where each road out began: the road back in is never the next way "out"
+    private bool _roadOut; // the current route IS a recorded road out: the walk's own replans stay off it
+    private int _dangerVer = -1; // the MobDanger.LiveVersion the route was planned with
+    private int _dangerReplans;
+    private double _dangerAt = -99;
     private List<Vector3> _route = new();
     private int _routeIdx;
     private int _routePrio = -1; // the priority the route was planned for
@@ -920,6 +947,7 @@ public sealed class MovementController : IPacketConsumer
             // done, the bot just runs on"). Movement.Stop sends the FullStop while Moving still
             // says so; Reset then clears the rest.
             var prevPf = _pf;
+            FlushWalkBuf(); // the stretch ends at the zone line (LearnedGround.NoteWalk, under the old pf)
             Vector3? legExitPos = null; // the object exit we crossed through, for the proxy origin
             lock (_travelLock)
             {
@@ -944,6 +972,9 @@ public sealed class MovementController : IPacketConsumer
             _stuck.Reset();
             _wedgeCycles = 0;
             _reconnectSent = false; // the respawn is a new body: a fresh pin may escalate again
+            _roadOutFrom.Clear(); // its spots were the last zone's roads' beginnings
+            _roadOut = false;
+            _dangerVer = -1;
             _logger.LogInformation($"Movement: playfield {_pf}, run state cleared (server stopped).");
             lock (_poslock)
             {
@@ -1100,6 +1131,7 @@ public sealed class MovementController : IPacketConsumer
         var dist = Movement.Flat(pos, goal.Value.Position);
         if (dist <= goal.Value.ArriveRadius)
         {
+            FlushWalkBuf(); // the walk's own arrival ends the clean stretch too (LearnedGround.NoteWalk)
             _movement.Hold(me, SendIntervalMs);
             if (!goal.Value.Reached)
             {
@@ -1162,6 +1194,47 @@ public sealed class MovementController : IPacketConsumer
             {
                 _routeIdx++;
                 _stuck.Reset();
+            }
+
+            // A PACK ON THE WAY (MobDanger, AOBuddy10's WalkTick): the live hostiles changed and one
+            // stands within its aggro range of the next 150 m - plan the leg again, the grid now prices
+            // them. Not on a road out (roads keep their priority), at most MaxDangerReplans a goal,
+            // 5 s apart.
+            var nowS = _wetClock.Elapsed.TotalSeconds;
+            if (grid is OverlandGrid && !_roadOut && MobDanger.LiveVersion != _dangerVer
+                && nowS - _dangerAt > 5 && _dangerReplans < MaxDangerReplans)
+            {
+                _dangerVer = MobDanger.LiveVersion;
+                if (MobDanger.ThreatAhead(_pf, _route, _routeIdx, pos, 150f, out var who))
+                {
+                    _dangerAt = nowS;
+                    _dangerReplans++;
+                    _logger.LogInformation($"Movement: {who} - planning this leg again round them ({_dangerReplans}/{MaxDangerReplans}).");
+                    _movement.Hold(me, SendIntervalMs);
+                    PlanRoute(pos, target, goal.Key);
+                    return;
+                }
+            }
+
+            if (_routeIdx >= _route.Count && Movement.Flat(pos, target) > WaypointLastRange)
+            {
+                // THE ROUTE IS WALKED OUT and the goal is beyond its last point's stand-in radius: plan
+                // the next leg from here (a road out's far end, an escape leg's landing) instead of
+                // beelining at the goal across whatever the grid refused - the beeline is the old bug
+                // the no-route holds removed (AOBuddy10 re-planned each leg the same way).
+                PlanRoute(pos, target, goal.Key);
+                if (_route.Count == 0)
+                {
+                    _movement.Hold(me, SendIntervalMs); // no way on from here: the plan counters say when to stop
+                    return;
+                }
+
+                while (_routeIdx < _route.Count &&
+                       Movement.Flat(pos, _route[_routeIdx]) <= (_routeIdx == _route.Count - 1 ? WaypointLastRange : WaypointRange))
+                {
+                    _routeIdx++;
+                    _stuck.Reset();
+                }
             }
 
             if (_routeIdx < _route.Count)
@@ -1303,7 +1376,42 @@ public sealed class MovementController : IPacketConsumer
         }
 
         var want = Movement.SafeLook(dir, me.MovementComponent.Heading);
-        _movement.Advance(me, new Vector3(nx, nextY, nz), want, run: true, dt, SendIntervalMs);
+        var stepPos = new Vector3(nx, nextY, nz);
+        _movement.Advance(me, stepPos, want, run: true, dt, SendIntervalMs);
+
+        // CLEAN STEPS ARE ROAD (LearnedGround.NoteWalk): the bot's own walked points, thinned, become
+        // road for the next trip's planner. Flushes: a real server correction, a zone change, a walk
+        // arrival - a stretch with a correction in it is not road.
+        if (_walkBuf.Count == 0 || Movement.Flat(_walkBuf[_walkBuf.Count - 1], stepPos) >= WalkBufSpacing)
+        {
+            _walkBuf.Add(stepPos);
+            if (_walkBuf.Count >= WalkBufCap)
+            {
+                FlushWalkBuf(keepLast: true);
+            }
+        }
+    }
+
+    // Hand the current clean stretch to LearnedGround (it keeps only 20 m+ ones). keepLast leaves the
+    // final point as the seed of the next stretch, so a cut never double-counts a corner.
+    private void FlushWalkBuf(bool keepLast = false)
+    {
+        if (_walkBuf.Count == 0)
+        {
+            return;
+        }
+
+        var pts = new List<Vector3>(_walkBuf);
+        _walkBuf.Clear();
+        if (keepLast)
+        {
+            _walkBuf.Add(pts[pts.Count - 1]);
+        }
+
+        if (pts.Count >= 2)
+        {
+            LearnedGround.NoteWalk(_pf, pts);
+        }
     }
 
     // Plan the grid route to a goal (AOBuddy10 OverlandController.BeginLeg): every zone line is a
@@ -1320,6 +1428,8 @@ public sealed class MovementController : IPacketConsumer
         _routeIdx = 0;
         _stuckCount = 0;
         _stuck.Reset();
+        _roadOut = false;
+        _dangerReplans = 0;
         _route.Clear();
 
         var grid = _nav.Grid;
@@ -1375,6 +1485,59 @@ public sealed class MovementController : IPacketConsumer
 
         var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why)
                     ?? grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _);
+
+        // THE WAY OUT IS A WALKED ROAD (AOBuddy10 TryRoadOut, ported 2026-10-03): no way on the grid -
+        // or a way that runs over RoadOutSnaps remembered pull-backs - and a recorded road starts
+        // within RoadOutNear and leads away: walk it to its far end, then plan this leg again from
+        // there (the exhausted-route replan in GoalWalk). Only for a far goal; close by, the geometry
+        // line below is the exacter instrument. A road is never taken when it runs over at least as
+        // many pull-backs as the grid's way - the road out of the corner where they were recorded is
+        // the road back in (AOBuddy10, Borealis reclaim 2026-10-01).
+        if (grid is OverlandGrid && Movement.Flat(from, goalPos) > RoadOutFarGoal && _nav.Nav?.Ground != null)
+        {
+            int gridSnaps = 0;
+            var dirty = route != null;
+            if (dirty)
+            {
+                gridSnaps = LearnedGround.SnapHitsAlong(_pf, route);
+                dirty = gridSnaps >= RoadOutSnaps;
+            }
+
+            if (dirty || route == null)
+            {
+                var ground = _nav.Nav.Ground;
+                var road = LearnedGround.RoadOut(_pf, from, RoadOutNear, end =>
+                {
+                    var h = ground.HeightAt(end.X, end.Z);
+                    return double.IsNaN(h) || Math.Abs(h - end.Y) < 3; // the far end on this zone's ground
+                });
+                if (road != null && route != null)
+                {
+                    var withStart = new List<Vector3> { from };
+                    withStart.AddRange(road);
+                    if (LearnedGround.SnapHitsAlong(_pf, withStart) >= gridSnaps)
+                    {
+                        road = null; // the road is no cleaner than the grid's way
+                    }
+                }
+
+                if (road != null && _roadOutFrom.All(b => Movement.Flat(b, road[road.Count - 1]) > RoadOutNear))
+                {
+                    _roadOutFrom.Add(from);
+                    _roadOut = true;
+                    _noRoute = 0;
+                    _escapes = 0;
+                    _route = new List<Vector3> { from };
+                    _route.AddRange(road);
+                    _routeIdx = 0;
+                    _logger.LogInformation(
+                        $"Movement: {(route != null ? $"the grid's way to the goal runs over {gridSnaps} remembered pull-back(s)" : $"no grid route ({why})")} - " +
+                        $"walking out by the recorded road: {road.Count} points, from ({road[0].X:0.0} {road[0].Z:0.0}) to " +
+                        $"({road[road.Count - 1].X:0.0} {road[road.Count - 1].Z:0.0}); then on to the goal from there.");
+                    return;
+                }
+            }
+        }
 
         // THE GEOMETRY OUTRANKS THE GRID AT CLOSE RANGE (owner, 2026-10-03): a plan that found no
         // route may still be a straight walk the cells never saw. Within reach of the goal the
@@ -1462,6 +1625,7 @@ public sealed class MovementController : IPacketConsumer
         _noRoute = 0;
         _escapes = 0;
         _route = route;
+        _dangerVer = MobDanger.LiveVersion; // the plan saw the live hostiles as they are now
         _logger.LogInformation($"Movement: {route.Count}-point route to the priority {priority} goal.");
     }
 
@@ -1953,6 +2117,13 @@ public sealed class MovementController : IPacketConsumer
             _wetYAt = _wetClock.Elapsed.TotalSeconds;
         }
 
+        // A REAL CORRECTION BREAKS THE CLEAN WALK (LearnedGround.NoteWalk): anything from 2 m up is the
+        // server overriding a step, and a stretch with an override in it is not road.
+        if (Movement.Flat(me.MovementComponent.Position, pos) >= WalkBufSpacing)
+        {
+            FlushWalkBuf();
+        }
+
         if (yank && _movement.Moving)
         {
             // A YANK while walking: the server overrode a big drift. Stop, and let the route
@@ -1982,6 +2153,11 @@ public sealed class MovementController : IPacketConsumer
 
                 grid.CellsAlong(pos, walked, 1f, _serverNo);
             }
+
+            // THE SPOT IS REMEMBERED (LearnedGround.NoteSnap): across restarts, so the next session's
+            // first plan already prices this ground instead of collecting the same yank again - the
+            // session-only _serverNo above starts every zone from nothing, snapbacks.json does not.
+            LearnedGround.NoteSnap(_pf, pos.X, pos.Z);
             _holdWalkUntil = _wetClock.Elapsed.TotalSeconds + YankReholdSeconds;
             _movement.Hold(me, SendIntervalMs);
             _logger.LogInformation($"Movement: the server yanked the walk {yankDist:0.0} m - holding and re-planning (yank {_yanks}/{MaxYanks}).");
@@ -2050,6 +2226,7 @@ public sealed class MovementController : IPacketConsumer
                         grid.CellsAlong(a, b, 2f, _serverNo);
                     }
 
+                    LearnedGround.NoteSnap(_pf, pos.X, pos.Z); // the pin storm's spot is refused ground too
                     _logger.LogInformation(
                         $"Movement: the server keeps pinning me at ({pos.X:0.0} {pos.Z:0.0}) - wedged; blacklisted and re-planning (yank {_yanks}/{MaxYanks}).");
 

@@ -86,7 +86,7 @@ public static class GridCache
             using (var br2 = new BinaryReader(zs))
             {
                 IWalkGrid g = br2.ReadByte() == 1
-                    ? OverlandGrid.Read(br2, nav?.Ground, pf)
+                    ? OverlandGrid.Read(br2, nav?.Ground, pf, pluginDir)
                     : FloorGrid.Read(br2, pf);
                 log?.Invoke($"GRIDCACHE: pf {pf} loaded from cache ({sw.ElapsedMilliseconds} ms).");
                 return g;

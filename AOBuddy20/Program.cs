@@ -175,6 +175,12 @@ internal class Program
         // loaded data is immutable from here on.
         Zoning.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         ItemValues.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        // WHAT WALKING TAUGHT (AOBuddy10, ported 2026-10-03): the owner's recorded roads, the bot's own
+        // clean walks and the remembered pull-back spots (LearnedGround), saved routes between fixed
+        // objects (RouteCache) and the hostile-mob picture (MobDanger) - the overland planner's memory.
+        LearnedGround.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        RouteCache.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        MobDanger.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
 
         Client.SuppressItemDataLoad();
 

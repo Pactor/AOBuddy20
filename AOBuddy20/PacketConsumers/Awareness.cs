@@ -11,6 +11,7 @@
 
 using AOBuddy20.Enums;
 using AOBuddy20.Interfaces;
+using AOBuddy20.Nav;
 using AOBuddy20.Network;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
@@ -49,6 +50,7 @@ public sealed class Awareness : IPacketConsumer
     private readonly HashSet<Identity> _petIds = new(); // our pets this scan (summons come and go)
     private readonly Dictionary<Identity, double> _onBot = new(); // mob -> clock of its last blow/lock on the bot
     private readonly Dictionary<Identity, double> _onPets = new(); // mob -> clock of its last blow/lock on a pet
+    private readonly HashSet<Identity> _firstSeen = new(); // the monsters sighted this stay (MobDanger's atlas book)
 
     private double _clock;
     private double _at = -1; // last scan
@@ -109,6 +111,7 @@ public sealed class Awareness : IPacketConsumer
             _pf = pf;
             _onBot.Clear();
             _onPets.Clear();
+            _firstSeen.Clear(); // re-entry sights the monsters again - a new atlas line per stay
             _lastSummary = "";
         }
 
@@ -189,6 +192,34 @@ public sealed class Awareness : IPacketConsumer
 
         Near = near.OrderBy(s => s.Dist).ToList();
 
+        // MOBDANGER'S ATLAS (mob spawn places, ported 2026-10-03): each monster's FIRST position - where
+        // it stood when it came into view, before it could chase anything. Once per instance per stay;
+        // one JSONL line each, binned by MobDanger when the grid prices its spots.
+        me.TryGetStat(Stat.Level, out var myLvl);
+        MobDanger.SetMyLevel(myLvl);
+        foreach (var n in DynelManager.Npcs)
+        {
+            if (n == null || n.Owner.HasValue)
+            {
+                continue;
+            }
+
+            if (!_firstSeen.Add(n.Identity))
+            {
+                continue;
+            }
+
+            n.TryGetStat(Stat.Level, out var slvl);
+            MobDanger.NoteSighting(pf, n.Identity.Instance.ToString(), n.Name, slvl, n.Transform.Position);
+        }
+
+        // ...and the live picture: hostile kinds in view that are NOT on us (the ones on us are past
+        // routing) - the walk re-plans round these the moment the picture changes.
+        MobDanger.SetLive(pf, Near
+            .Where(s => s.Mob != null && !s.OnBot && !s.OnPets && MobDanger.IsHostile(s.Mob.Name))
+            .Select(s => new MobDanger.LiveMob(s.Mob.Name, s.Level, s.Mob.Transform.Position))
+            .ToList());
+
         var now = Summary();
         if (now != _lastSummary && (_clock - _lastLogAt > 2 || OnBotCount + OnPetsCount > 0))
         {
@@ -214,6 +245,31 @@ public sealed class Awareness : IPacketConsumer
         var d = DynelManager.LocalPlayer?.DistanceFrom(mob) ?? 0f;
         mob.TryGetStat(Stat.Level, out var lvl);
         _logger.LogInformation($"AGGRO: '{mob.Name}' lvl {lvl} ({d:0} m) {what}.");
+
+        // MOBDANGER (ported 2026-10-03): a kind that turns on us UNPROVOKED outdoors is hostile from now
+        // on (hostile_mobs.json, kept across restarts, with the spot we stood at). Provoked = one of OUR
+        // PETS was already fighting it - the bot itself never opens a fight. Mission playfields are out:
+        // everything in there attacks, that is the building's business.
+        var me = DynelManager.LocalPlayer;
+        var aggroPf = (int)Playfield.ModelId;
+        if (me != null && aggroPf >= 0 && aggroPf < 100000 && !ProvokedByOurPets(me, mob))
+        {
+            MobDanger.NoteAggro(aggroPf, mob.Name, lvl, d, me.Transform.Position);
+        }
+    }
+
+    // True when one of our pets has this monster locked: the mob answered the pet, it did not start it.
+    private static bool ProvokedByOurPets(LocalPlayer me, NpcChar mob)
+    {
+        foreach (var p in me.Pets)
+        {
+            if (DynelManager.Find(p.Identity, out NpcChar pet) && pet.FightingIdentity == mob.Identity)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Out of the book when it sat out the linger, died, or despawned - silently; the counts speak.
