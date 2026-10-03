@@ -634,15 +634,21 @@ public sealed class MissionController : IPacketConsumer
             return false;
         }
 
-        _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, door.Playfield));
+        // The packet's playfield field is the server's own naming and NOT our instance id (owner,
+        // 2026-10-03: 2151467 while the building is 14624436 - the pf filter dropped every door and
+        // the search never checked one). What names the building is OUR compose: store doors under
+        // it once composed, under 0 in the pre-compose blind window (OnZoneIn re-keys those).
+        var pf = _missionPf >= 0 ? _missionPf : 0;
+        _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, pf));
         if (door.Room == -1)
         {
-            _serverExitByPf[door.Playfield] = door.Coordinate;
+            _serverExitByPf[pf] = door.Coordinate;
         }
         else
         {
             _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} at " +
-                                   $"({door.Coordinate.X:0.0},{door.Coordinate.Z:0.0}) pf {door.Playfield}.");
+                                   $"({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0},{door.Coordinate.Z:0.0}) " +
+                                   $"pf {door.Playfield}->{pf}.");
         }
 
         return false;
@@ -2636,6 +2642,12 @@ public sealed class MissionController : IPacketConsumer
             dump.AppendLine($"server exit: {(_serverExitByPf.TryGetValue(_missionPf, out var sx) ? $"{sx.X:0.0},{sx.Z:0.0}" : "none seen")}");
             dump.AppendLine($"target: {(TryGetTargetPos(out var tp) ? $"{tp.X:0.0},{tp.Z:0.0}" : "not seen")}");
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"mission-layout-{_missionPf}.txt"), dump.ToString());
+            // the zone-in bytes beside it: LoadMission replays them offline, so the composed
+            // dungeon - and its grid - can be rebuilt byte-exact without logging the bot in
+            if (_zoneInRaw != null)
+            {
+                File.WriteAllBytes(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"mission-zonein-{_missionPf}.bin"), _zoneInRaw);
+            }
         }
         catch
         {

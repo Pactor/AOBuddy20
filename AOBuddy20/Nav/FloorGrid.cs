@@ -30,10 +30,16 @@ public sealed class FloorGrid : IWalkGrid
     public const float Cell = 0.5f;
 
     private const float Merge = 0.6f; // surfaces this close are one floor (a deck's top and underside)
-    private const float MaxStep = 0.4f; // rise between neighbouring cells (0.5 m): ~40 degrees
+    private const float StaticStep = 0.4f; // rise between neighbouring cells (0.5 m): ~40 degrees
+    private const float MissionStep = 0.8f; // missions: the composed rock slopes step up to this and the
+                                            // walk claims climbs of +0.8 (StepFloor), so the planner may
+                                            // too - the wall-edge test still refuses every real wall
+                                            // (owner, 2026-10-03: the item stood on Grey Caves' rock at
+                                            // y 7.2 and the route died at the 5.0 floor world's rim)
     private const float BodyLow = 0.3f, BodyHigh = 1.9f;
     private const int MaxFloors = 8;
     private const int MaxExpand = 1_000_000;
+    private float _maxStep = StaticStep; // missions raise this in UseComposedGeometry
 
     private readonly Dictionary<int, float[]> _floors = new Dictionary<int, float[]>(); // cell -> floor heights, ascending
     private readonly HashSet<long> _blocked = new HashSet<long>(); // cell * 8 + floor index
@@ -532,6 +538,7 @@ public sealed class FloorGrid : IWalkGrid
         // collision.bin first: it carries the walkable truth (54,400 flat + 1,549 ramp triangles in
         // pool 320 alone); walls.bin is steep-only and would sample nothing. Every triangle is still
         // classified by its own normal, so a misfiled one lands where it belongs either way.
+        _maxStep = MissionStep;
         Classify(surfaces);
         Classify(walls);
         BuildEdges();
@@ -592,27 +599,72 @@ public sealed class FloorGrid : IWalkGrid
         }
     }
 
-    // The triangle is walkable ground: every sub-cell its projection covers gets a level at the
+    // The triangle is walkable ground: EVERY 0.5 m cell its projection touches gets a level at the
     // triangle's own height there - that is how a ramp becomes a slope instead of one 2 m tile step.
+    // The old 0.4 m point lattice sampled the triangle too: a sliver between sample points left its
+    // cells empty, and 1-2 cell cracks shattered continuous rock into small islands the A* dies at
+    // (Grey Caves' item rock, owner 2026-10-03: y 7.2 unreachable from the 5.0 floor world,
+    // "explored 11535 cells" - and ~100 from above).
     private void SampleSurface(float[] v, int o)
     {
         float x0 = Math.Min(v[o], Math.Min(v[o + 3], v[o + 6])), x1 = Math.Max(v[o], Math.Max(v[o + 3], v[o + 6]));
         float z0 = Math.Min(v[o + 2], Math.Min(v[o + 5], v[o + 8])), z1 = Math.Max(v[o + 2], Math.Max(v[o + 5], v[o + 8]));
-        for (float z = z0; z <= z1; z += 0.4f)
+        for (int j = CellZ(z0); j <= CellZ(z1); j++)
         {
-            for (float x = x0; x <= x1; x += 0.4f)
+            for (int i = CellX(x0); i <= CellX(x1); i++)
             {
-                if (!TriContains(v, o, x, z, out var h))
+                if (!In(i, j))
                 {
                     continue;
                 }
 
-                int k = Key(x, z);
-                if (k >= 0)
+                float cx = (i + _x0 + 0.5f) * Cell, cz = (j + _z0 + 0.5f) * Cell;
+                if (!TriClosest(v, o, cx, cz, out var px, out var pz) ||
+                    px < (i + _x0) * Cell || px >= (i + 1 + _x0) * Cell ||
+                    pz < (j + _z0) * Cell || pz >= (j + 1 + _z0) * Cell)
                 {
-                    AddLevel(k, h);
+                    continue; // the triangle never reaches this cell
+                }
+
+                if (TriContains(v, o, px, pz, out var h))
+                {
+                    AddLevel(j * _w + i, h);
                 }
             }
+        }
+    }
+
+    // The closest point of the triangle's projection to (px, pz); false for a degenerate triangle.
+    private static bool TriClosest(float[] v, int o, float px, float pz, out float qx, out float qz)
+    {
+        if (TriContains(v, o, px, pz, out _))
+        {
+            qx = px;
+            qz = pz;
+            return true;
+        }
+
+        float ax = v[o], az = v[o + 2], bx = v[o + 3], bz = v[o + 5], cx = v[o + 6], cz = v[o + 8];
+        qx = qz = 0f;
+        var best = float.MaxValue;
+        ClosestOnEdge(ax, az, bx, bz, px, pz, ref qx, ref qz, ref best);
+        ClosestOnEdge(bx, bz, cx, cz, px, pz, ref qx, ref qz, ref best);
+        ClosestOnEdge(cx, cz, ax, az, px, pz, ref qx, ref qz, ref best);
+        return best < float.MaxValue;
+    }
+
+    private static void ClosestOnEdge(float sx, float sz, float ex, float ez, float px, float pz,
+        ref float qx, ref float qz, ref float best)
+    {
+        float dx = ex - sx, dz = ez - sz, len2 = dx * dx + dz * dz;
+        float t = len2 < 1e-12f ? 0f : Math.Clamp(((px - sx) * dx + (pz - sz) * dz) / len2, 0f, 1f);
+        float x = sx + dx * t, z = sz + dz * t;
+        float d = (px - x) * (px - x) + (pz - z) * (pz - z);
+        if (d < best)
+        {
+            best = d;
+            qx = x;
+            qz = z;
         }
     }
 
@@ -688,7 +740,7 @@ public sealed class FloorGrid : IWalkGrid
                 {
                     for (int nf = 0; nf < nfl.Length; nf++)
                     {
-                        if (Math.Abs(nfl[nf] - kv.Value[f]) > MaxStep)
+                        if (Math.Abs(nfl[nf] - kv.Value[f]) > _maxStep)
                         {
                             continue;
                         }
@@ -973,7 +1025,7 @@ public sealed class FloorGrid : IWalkGrid
         {
             double t = (double)s / n;
             int k = Key((float)(a.X + dx * t), (float)(a.Z + dz * t));
-            int f = FloorAt(k, y, MaxStep, null);
+            int f = FloorAt(k, y, _maxStep, null);
             if (f < 0)
             {
                 why = $"no floor {t * len:0.0} m along the line (a hole or a level change)";
@@ -1215,7 +1267,7 @@ public sealed class FloorGrid : IWalkGrid
                     }
 
                     int nk = (j + dj) * _w + i + di;
-                    int f = FloorAt(nk, y, MaxStep, extra);
+                    int f = FloorAt(nk, y, _maxStep, extra);
                     if (f < 0)
                     {
                         continue;
@@ -1225,7 +1277,7 @@ public sealed class FloorGrid : IWalkGrid
                     {
                         // no squeezing past a corner: both orthogonal steps must exist AND be clear
                         int kx = j * _w + i + di, kz = (j + dj) * _w + i;
-                        int fx = FloorAt(kx, y, MaxStep, extra), fz = FloorAt(kz, y, MaxStep, extra);
+                        int fx = FloorAt(kx, y, _maxStep, extra), fz = FloorAt(kz, y, _maxStep, extra);
                         if (fx < 0 || fz < 0 ||
                             EdgeBlocked(k, ff, di, 0, fx) || EdgeBlocked(k, ff, 0, dj, fz))
                         {
@@ -1361,7 +1413,7 @@ public sealed class FloorGrid : IWalkGrid
         for (int s = 1; s <= n; s++)
         {
             float t = s / (float)n, x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t;
-            int f = FloorAt(Idx(x, z), y, MaxStep, extra);
+            int f = FloorAt(Idx(x, z), y, _maxStep, extra);
             if (f < 0)
             {
                 return false;
@@ -1369,7 +1421,7 @@ public sealed class FloorGrid : IWalkGrid
 
             y = _floors[Idx(x, z)][f];
             floors.Add(y);
-            if (FloorAt(Idx(x + px, z + pz), y, MaxStep, extra) < 0 || FloorAt(Idx(x - px, z - pz), y, MaxStep, extra) < 0)
+            if (FloorAt(Idx(x + px, z + pz), y, _maxStep, extra) < 0 || FloorAt(Idx(x - px, z - pz), y, _maxStep, extra) < 0)
             {
                 return false;
             }
