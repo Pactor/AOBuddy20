@@ -3,12 +3,13 @@
 // Project: AOBuddy20
 // Filename: HealController.cs
 //
-// Last modified: 2026-10-02
+// Last modified: 2026-10-04
 // Created:       2026-10-02
 //
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using AOBuddy20.Brains;
 using AOBuddy20.Configuration;
 using AOBuddy20.Enums;
 using AOBuddy20.Utils;
@@ -20,46 +21,64 @@ using Serilog.Events;
 namespace AOBuddy20.Controlling;
 
 /// <summary>
-///     LOW HEALTH / NANO EMERGENCY (<see cref="ControlPriority.LowHealthNanoEmergency" />): pop the
-///     heal items the bot already carries, in two scenarios.
-///     IN COMBAT (attacking, fought, or hurt in the last CombatLingerSeconds) - Health and Nano Stims:
-///       - nano under HealNanoCombatPct of max, or
-///       - health, as soon as one stim's heal capacity no longer covers the missing health - from then
-///         on every cooldown pops another until the wound is closed.
-///     OUT OF COMBAT - Health and Nano Rechargers, when any health is missing or more than 30% of the
-///     nano is (under HealNanoOutOfCombatPct of max). The recharger is SIT-ONLY and its healing ticks
-///     run while seated, so it goes through the rest cycle (AOBuddy10 SupportController's, wire-proven):
-///     sit, WAIT for the server's echo of the sit (MovementController.SeatedConfirmed - the only
-///     reliable seated proof there is; stat 173 never updates after login), use once, KEEP SITTING
-///     while the ticks run, and stand when the thresholds are met - or on combat, a stall, or
-///     HealRestMaxSeconds. The walk the rest interrupted resumes on the stand-up (goals were kept);
-///     a blitz never sits (SuppressCombat). No arbiter control: the posture track holds the body
-///     while seated. A convenience top-up, not an emergency.
-///     The deficits above are NET of what the BUFFING controllers report (SetRegen): the combined
-///     heal-over-time and nano-over-time of all running buffs, valid for the rest of the shortest
-///     one. In combat only one cooldown's worth of that regen counts (the next item may go in when
-///     the timer is up, so regen beyond it does not argue against this one); out of combat the whole
-///     rest of the buffs counts - a long HoT that will close a wound on its own is exactly the case
-///     the recharger is not for. Thresholds stay owner config: buffs change the need, not the rules,
-///     and the forecast decays with the tick, so a buff side that stops reporting fades out by itself.
-///     An in-combat episode holds the ControlArbiter at the priority until the wounds are closed - the
-///     cooldowns between the stims of one episode included. (ReleaseControl, like resupply's and sell's,
-///     writes None unconditionally: a system above us that took control meanwhile re-takes its own.)
-///     Stims and rechargers sit on the game's shared stim timer, so one gate covers both. The names
-///     come from the resupply config (ResupplyStimName / ResupplyRechargerName), and stock is counted
-///     through HealItems - shopping and spending agree on what a stim is.
-///     The decision tick runs on the update thread (BotLoop), the same one the packet handlers run on.
+///     LOW HEALTH / NANO EMERGENCY (<see cref="ControlPriority.LowHealthNanoEmergency" />): the
+///     in-combat heal decision and the out-of-combat recharger rest.
+///     IN COMBAT the higher heal wins, and the priority is MOMENTARY - it holds the arbiter only
+///     for as long as a healing action occupies the body, never between uses. The candidates:
+///       - the stim, after its First-Aid lock: one use costs LockSkill(123, 40) - 40 s by the
+///         item's own record, shortened by stat 382 (SkillLockModifier) through
+///         <see cref="AccountInfo.SkillLockFactor" /> (retail applies the lock client-side and
+///         omnicell not at all, so the clock is ours and the factor is an owner knob at 0). The
+///         use is an instant item: take, send, release inside one tick - the lock then runs
+///         released, because a locked stim is a clock, not an emergency.
+///       - the best learned one-shot heal nano (SpellList ∩ NanoLibrary, the 643 heal stat on,
+///         the 8 duration stat off: a one-shot has no duration, every HoT and timed buff does -
+///         fixer long/short, doctor combos, all excluded by construction). Castable when no cast
+///         is running, the nano-cast recharge lockout has passed and the pool can pay stat 407.
+///         A cast DOES occupy the body (it lands only after its attack time, and moving
+///         interrupts it): take, send, HOLD until the wire says it landed - CastNanoSpell set
+///         IsCasting, FinishNanoCasting clears it - then release and arm the recharge lock
+///         (stat 210, a full nano-cast lockout, server-enforced but never echoed, so it lives
+///         on our clock). A send the server never acknowledged (the echo window) or one lost
+///         mid-flight (the guard window) is abandoned without a recharge - a refused cast was
+///         never on the wire, and the server only starts the recharge after a real land.
+///     NOTHING AVAILABLE - stim locked, nano recharging or unaffordable, packs empty - releases
+///     immediately and says so once: the chain walks out while the timers run. The wound does
+///     not have to close for the hold to end; waiting for that is how the body died standing.
+///     OUT OF COMBAT the recharger REST CYCLE, wire-proven from AOBuddy10's SupportController:
+///     sit, WAIT for the server's echo of the sit (MovementController.SeatedConfirmed - the
+///     only reliable seated proof there is; stat 173 never updates after login), use once, KEEP
+///     SITTING while the ticks run, and stand when the thresholds are met - or on combat, a
+///     stall, or HealRestMaxSeconds. The rest takes the arbiter for its duration ("stay sitting
+///     until fully healed" is the body's job; a stage timer of a lower system must not run out
+///     from under a seated bot). The walk the rest interrupted resumes on the stand-up (goals
+///     were kept); a blitz never sits (SuppressCombat). Stims and rechargers sit on the game's
+///     shared stim timer (one gate covers both, so a stim just fired delays the next rest use).
+///     The deficits are NET of what the BUFFING controllers report (SetRegen): the combined
+///     heal-over-time and nano-over-time of all running buffs. In combat only one cooldown's
+///     worth counts; out of combat the whole rest of the buffs. The rates never FIRE a trigger.
+///     The decision tick runs on the update thread (BotLoop), the same one the packet handlers
+///     run on. (ReleaseControl, like resupply's and sell's, writes None unconditionally: a
+///     system above us that took control meanwhile re-takes its own.)
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class HealController
 {
     // Stims and rechargers share the game's 20 s stim timer; +1 s so a use the server put on the
-    // last tick of its timer cannot race this gate.
+    // last tick of its timer cannot race this gate. The COMBAT stim lock is separate (40 s, the
+    // item's own LockSkill) - _stimLockedUntil.
     private const double UseCooldownSeconds = 21.0;
 
     // The fight is not over when the last blow lands: blows in flight, dots ticking, the mob still
     // swinging. A drop in health keeps "in combat" alive this long after the drop.
     private const double CombatLingerSeconds = 10.0;
+
+    // A cast send that never lit IsCasting within this window was refused (not enough nano, still
+    // recharging - the server answers a refuse with FinishNanoCasting(0), which clears a cast
+    // state that was never set). And a confirmed cast running this long is lost (zoned mid-cast
+    // and the like): abandon it WITHOUT a recharge - only a real land starts that lock.
+    private const double CastEchoSeconds = 2.0;
+    private const double CastGuardSeconds = 30.0;
 
     // THE REST CYCLE timings, from AOBuddy10's wire-proven SupportController: a sit whose echo was
     // lost gets one hopeful use after this long; a rest whose health AND nano stopped climbing for
@@ -84,8 +103,22 @@ public sealed class HealController
     private double _lastHurtAt = double.NegativeInfinity;
     private int _pf = -1;
 
-    private bool _holding; // an in-combat episode: arbiter held at LowHealthNanoEmergency
-    private bool _loggedShort; // "none usable" once per episode, not once per tick
+    private bool _holding; // the arbiter is ours: a recharger rest, or a heal cast in flight
+
+    // The in-combat heal clocks. _stimLockedUntil: the First-Aid lock one stim use costs (the
+    // item's own LockSkill(123,40), the factor knob aside). _nanoRechargeUntil: the nano-cast
+    // lockout one landed cast costs (stat 210). Both server truths without a wire echo - ours.
+    private double _stimLockedUntil = double.NegativeInfinity;
+    private double _nanoRechargeUntil = double.NegativeInfinity;
+
+    // A heal cast we sent, from the send to the land: confirmed when the wire lights IsCasting,
+    // resolved on the clear (land - recharge) or by the windows above (refusal / loss - none).
+    private bool _ourCastInFlight;
+    private double _castSentAt;
+    private bool _castConfirmed;
+    private double _castRecharge; // stat 210 of the cast nano, seconds - armed on the land
+
+    private bool _loggedShort; // "nothing usable" once per drought, not once per tick
 
     // The rest cycle's state (out of combat, recharger): we sat for it, when, and what the body
     // has gained since - the stall guard reads the peaks, not the tick-to-tick deltas.
@@ -127,8 +160,8 @@ public sealed class HealController
     }
 
     /// <summary>
-    ///     The decision tick. True while an IN-COMBAT episode is open - the wounds not yet closed,
-    ///     the cooldown waits between its stims included.
+    ///     The decision tick. True while the arbiter is ours - a heal cast in flight, or a
+    ///     recharger rest (BotLoop claims Tasks.Heal and nothing lower ticks).
     /// </summary>
     public bool Tick(LocalPlayer me, double dt)
     {
@@ -157,11 +190,13 @@ public sealed class HealController
         var pf = (int)Playfield.ModelId;
         if (pf != _pf)
         {
-            // A zone change ends every fight and every wound count we were tracking - and a rest:
-            // the body arrives wherever the server put it, its posture the track's business again.
+            // A zone change ends every fight and every wound count we were tracking - and a rest,
+            // and any cast of ours (the body arrives wherever the server put it; a mid-flight cast
+            // did not follow).
             _pf = pf;
             _lastHealth = -1;
             _lastHurtAt = double.NegativeInfinity;
+            AbandonCast("zoned");
             DropRest();
         }
 
@@ -189,26 +224,33 @@ public sealed class HealController
 
         _lastHealth = health;
 
+        // A cast we sent owns the tick, combat or not: the heal is committed, the body is rooted
+        // until it lands, and the hold runs until the wire resolves it (or the windows do).
+        if (_ourCastInFlight)
+        {
+            return HealCastTick(me);
+        }
+
         var missingHealth = maxHealth - health;
         var nanoPct = nano * 100.0 / maxNano;
         var combat = me.IsAttacking || FoughtOver(me) || _clock - _lastHurtAt < CombatLingerSeconds;
 
         if (_resting && combat)
         {
-            // The fight interrupts the rest: up and onto the stims - a seated body cannot move.
+            // The fight interrupts the rest: up and onto the heals - a seated body cannot move.
             EndRest("combat interrupts the rest");
         }
 
-        // THE WANT, per scenario: in combat stims, out of combat rechargers. Both deficits are NET
-        // of the buffs' regen: what the running HoTs pour in over the horizon we care about is need
-        // we do not have to spend an item on.
+        // THE WANT, per scenario: in combat stim-or-nano, out of combat rechargers. Both deficits
+        // are NET of the buffs' regen: what the running HoTs pour in over the horizon we care
+        // about is need we do not have to spend an item on.
         string reason;
         bool want;
         if (combat)
         {
-            // In combat the horizon is one cooldown: the next item may go in when the timer is up,
-            // so regen beyond it does not argue against this one.
-            var horizon = Math.Min(_regenRemaining, UseCooldownSeconds);
+            // In combat the horizon is one lock: the next stim may go in when its lock is up, so
+            // regen beyond it does not argue against this one.
+            var horizon = Math.Min(_regenRemaining, _config.StimLockSeconds);
             var missingNet = missingHealth - _regenHealth * horizon;
             var nanoShortNet = _config.HealNanoCombatPct / 100.0 * maxNano - nano - _regenNano * horizon;
             want = nanoShortNet > 0 || (missingNet > 0 && HealCapacity(me) < missingNet);
@@ -246,37 +288,7 @@ public sealed class HealController
 
         if (combat)
         {
-            if (!_holding)
-            {
-                // The episode takes the arbiter at its priority, so lower systems yield while the
-                // wounds are being closed - resupply's walk home, a sale in flight.
-                _holding = true;
-                _controlArbiter.TakeControl(ControlPriority.LowHealthNanoEmergency);
-                _logger.LogInformation($"HEAL: episode opens - {reason}.");
-            }
-
-            if (_cooldownLeft > 0)
-            {
-                return _holding; // mid-episode, the timer runs
-            }
-
-            var stim = BestUsable(Kind.Stim, me);
-            if (stim == null)
-            {
-                if (!_loggedShort)
-                {
-                    _loggedShort = true;
-                    _logger.LogInformation(
-                        $"HEAL: want {Name(Kind.Stim)} ({reason}) but none usable in the packs - resupply stocks them.");
-                }
-
-                return _holding;
-            }
-
-            stim.Use();
-            _cooldownLeft = UseCooldownSeconds;
-            _logger.LogInformation($"HEAL: used {stim.Name} QL {stim.Ql} ({reason}); {Carry(Kind.Stim, me) - 1} left.");
-            return _holding;
+            return CombatHealTick(me, reason, stimHealNow: HealCapacity(me));
         }
 
         // OUT OF COMBAT: the recharger REST CYCLE. The item is sit-only and the server checks
@@ -292,7 +304,7 @@ public sealed class HealController
         if (_resting)
         {
             RestTick(me);
-            return false;
+            return _holding;
         }
 
         if (!_movement.Standing || _restCooldownLeft > 0)
@@ -300,6 +312,10 @@ public sealed class HealController
             return false; // a stand-up is in flight (the login one, say) or a rest just ended: no sit races it
         }
 
+        // The rest takes the arbiter for its duration: "stay sitting until fully healed" is the
+        // body's job, and a lower system's stage timer must not run out from under a seated bot.
+        _holding = true;
+        _controlArbiter.TakeControl(ControlPriority.LowHealthNanoEmergency);
         _movement.Sit("recharger");
         _resting = true;
         _restStartedAt = _clock;
@@ -309,11 +325,193 @@ public sealed class HealController
         _sitHopefulLogged = false;
         _loggedShort = false;
         _logger.LogInformation($"HEAL: sitting for a recharger ({reason}).");
+        return _holding;
+    }
+
+    // ── The combat heal decision ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    ///     The higher heal wins, and the priority is momentary: the stim is take-send-release in
+    ///     this tick (its lock then runs released); the nano is take-send-HOLD, the hold running
+    ///     until the wire lands the cast (HealCastTick). Nothing available: release at once - a
+    ///     locked stim or a recharging cast is a clock, not an emergency, and the chain walks.
+    /// </summary>
+    private bool CombatHealTick(LocalPlayer me, string reason, int stimHealNow)
+    {
+        var stim = _clock >= _stimLockedUntil ? BestUsable(Kind.Stim, me) : null;
+        int nanoHeal = 0, nanoCost = 0;
+        var nano = _clock >= _nanoRechargeUntil ? BestHealNano(me, out nanoHeal, out nanoCost) : null;
+
+        if (stim == null && nano == null)
+        {
+            if (!_loggedShort)
+            {
+                _loggedShort = true;
+                _logger.LogInformation(_clock < _stimLockedUntil
+                    ? "HEAL: want a heal but the stim is locked and no castable heal nano - riding the lock out."
+                    : "HEAL: want a heal but nothing usable in the packs - resupply stocks them.");
+            }
+
+            return _holding;
+        }
+
+        // The tie goes to the stim: it is instant, and a nano's heal only lands after its cast.
+        if (stim != null && stimHealNow >= nanoHeal)
+        {
+            var lockSeconds = StimLockSeconds(me);
+            _controlArbiter.TakeControl(ControlPriority.LowHealthNanoEmergency);
+            stim.Use();
+            _cooldownLeft = UseCooldownSeconds; // the shared stim timer still gates the next recharger
+            _stimLockedUntil = _clock + lockSeconds; // the First-Aid lock, from the item's own data
+            _loggedShort = false;
+            _logger.LogInformation($"HEAL: used {stim.Name} QL {stim.Ql} ({reason}; heals {stimHealNow}); " +
+                                   $"{Carry(Kind.Stim, me) - 1} left, First Aid locked {lockSeconds:0}s.");
+            _controlArbiter.ReleaseControl();
+            return false;
+        }
+
+        // THE NANO CAST: the hold IS the cast. Send it, hold until the land - the heal applies
+        // only there - then release and let the recharge clock gate the next one.
+        _holding = true;
+        _controlArbiter.TakeControl(ControlPriority.LowHealthNanoEmergency);
+        me.Cast(me.Identity, nano.NanoId);
+        _ourCastInFlight = true;
+        _castSentAt = _clock;
+        _castConfirmed = false;
+        _castRecharge = nano.Stat(210) / 100.0; // hundredths of seconds, per the server's own ×10 ms
+        _loggedShort = false;
+        _logger.LogInformation($"HEAL: casting {NanoLibrary.NameOf(nano.NanoId)} ({reason}; heals {nanoHeal}, " +
+                               $"cost {nanoCost}, recharge {_castRecharge:0.#}s) - holding until it lands.");
+        return true;
+    }
+
+    /// <summary>
+    ///     One tick of a heal cast we sent. The wire resolves it: CastNanoSpell lit IsCasting
+    ///     (confirmed), FinishNanoCasting clears it (landed - the heal applies, the recharge
+    ///     lockout starts). A send that never lit within the echo window was refused - abandon
+    ///     without a recharge; a confirmed cast still running past the guard window was lost
+    ///     (zoned mid-cast) - same. Interrupts read as lands: the server only recharges a real
+    ///     land, but the SDK's path merges InterruptNanoCasting into the same clear, and while
+    ///     we hold the body nothing below us can move it into one.
+    /// </summary>
+    private bool HealCastTick(LocalPlayer me)
+    {
+        var elapsed = _clock - _castSentAt;
+
+        if (me == null)
+        {
+            AbandonCast("we are gone");
+            return false;
+        }
+
+        if (me.IsCasting)
+        {
+            _castConfirmed = true;
+            if (elapsed > CastGuardSeconds)
+            {
+                AbandonCast("the cast never landed");
+                return false;
+            }
+
+            return _holding; // the hold runs on - the heal applies only at the land
+        }
+
+        if (!_castConfirmed)
+        {
+            if (elapsed < CastEchoSeconds)
+            {
+                return _holding; // the echo may still be in flight - hold a moment longer
+            }
+
+            AbandonCast("the server refused the cast");
+            return false;
+        }
+
+        // THE LAND: the nano's heal is on, and the recharge lockout starts - a full nano-cast
+        // lock, server-enforced (a cast sent while recharging is refused) but never echoed, so
+        // it lives on our clock.
+        _ourCastInFlight = false;
+        _nanoRechargeUntil = _clock + _castRecharge;
+        _holding = false;
+        _controlArbiter.ReleaseControl();
+        _logger.LogInformation($"HEAL: cast landed - recharge {_castRecharge:0.#}s.");
         return false;
+    }
+
+    private void AbandonCast(string why)
+    {
+        if (!_ourCastInFlight)
+        {
+            return;
+        }
+
+        _ourCastInFlight = false;
+        _holding = false;
+        _controlArbiter.ReleaseControl();
+        _logger.LogInformation($"HEAL: cast abandoned - {why}.");
+    }
+
+    /// <summary>The First-Aid lock one stim use costs: the stims' own LockSkill(123, 40), cut by
+    /// stat 382 through the owner's factor knob (retail's formula never told us; 0 = flat lock,
+    /// which never fires a stim into a real lock).</summary>
+    private double StimLockSeconds(LocalPlayer me)
+    {
+        var modifier = me.TryGetStat(Stat.SkillLockModifier, out var v) ? v : 0;
+        return Math.Max(0, _config.StimLockSeconds - modifier * _config.SkillLockFactor);
+    }
+
+    /// <summary>
+    ///     The best learned one-shot heal we can cast right now, out for its heal amount and cost:
+    ///     learned (SpellList) ∩ the library, the 643 heal stat on and the 8 duration stat off -
+    ///     a one-shot has no duration, every HoT and timed buff does, whichever profession's line
+    ///     it rides - and the current pool must pay the 407 cost (the server charges stat 407 and
+    ///     refuses a cast it cannot afford with FinishNanoCasting(0)). Highest heal wins; stacking
+    ///     does not matter for one-shots.
+    /// </summary>
+    private NanoProfile? BestHealNano(LocalPlayer me, out int heal, out int cost)
+    {
+        heal = 0;
+        cost = 0;
+        if (me.SpellList == null || !me.TryGetStat(Stat.CurrentNano, out var pool))
+        {
+            return null;
+        }
+
+        NanoProfile? best = null;
+        foreach (var id in me.SpellList)
+        {
+            var n = NanoLibrary.Find(id);
+            if (n == null)
+            {
+                continue;
+            }
+
+            var h = n.Stat(643);
+            if (h <= 0 || n.Stat(8) != 0)
+            {
+                continue; // flat heals only: a heal amount, no duration
+            }
+
+            var c = n.Stat(407);
+            if (c > pool)
+            {
+                continue; // the pool cannot pay
+            }
+
+            if (best == null || h > heal)
+            {
+                best = n;
+                heal = h;
+                cost = c;
+            }
+        }
+
+        return best;
     }
 
     private void EndEpisode()
     {
+        AbandonCast("episode closed");
         if (_holding)
         {
             _holding = false;
@@ -400,15 +598,16 @@ public sealed class HealController
                                $"{Carry(Kind.Recharger, me) - 1} left - staying seated while it ticks.");
     }
 
-    // The rest is over on purpose: up, and a cooldown so the next want does not re-sit on the spot
-    // (the sit/stand loop guard). The stand goes through the echo-driven campaign, never blind.
+    // The rest is over on purpose: up, the arbiter back, and a cooldown so the next want does not
+    // re-sit on the spot (the sit/stand loop guard). The stand goes through the echo-driven
+    // campaign, never blind.
     private void EndRest(string why)
     {
         _resting = false;
+        ReleaseHold($"rest over - {why}");
         _restCooldownLeft = RestCooldownSeconds;
         _loggedShort = false;
         _movement.Stand("rest over: " + why);
-        _logger.LogInformation($"HEAL: rest over - {why}.");
     }
 
     // The rest dies without a stand (dead, zoned, stats unreadable): the posture is the track's
@@ -421,9 +620,23 @@ public sealed class HealController
         }
 
         _resting = false;
+        ReleaseHold("rest dropped");
         _restCooldownLeft = RestCooldownSeconds;
         _loggedShort = false;
-        _logger.LogInformation("HEAL: rest dropped.");
+    }
+
+    // The arbiter is ours (a rest, or a cast in flight): let it go. Writes None unconditionally -
+    // a system above us that took control meanwhile re-takes its own.
+    private void ReleaseHold(string why)
+    {
+        if (!_holding)
+        {
+            return;
+        }
+
+        _holding = false;
+        _controlArbiter.ReleaseControl();
+        _logger.LogInformation($"HEAL: hold released ({why}).");
     }
 
     // Someone is fighting US - not near us, not fighting the owner: their FightingIdentity points at us.
@@ -496,11 +709,6 @@ public sealed class HealController
         return it.Modifiers.TryGetValue(SpellListType.Use, out var mods) && mods.TryGetValue(Stat.HealthChange, out var v)
             ? v
             : 0;
-    }
-
-    private static string Name(Kind kind)
-    {
-        return kind == Kind.Stim ? "stim" : "recharger";
     }
 
     // The regen context for a fire line, only when a forecast is live (why the recharger/stim was

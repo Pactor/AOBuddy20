@@ -43,13 +43,19 @@ public class AccountInfo
     // playfield MODEL is 1187). The way back is not resupply's: follow/mission own the body next.
     // 0 = shop locally only.
 
-    // --- Heal (ControlPriority.LowHealthNanoEmergency): popping the carried stims/rechargers.
-    // Which item and when: in combat Health and Nano Stims, out of combat Health and Nano Rechargers
-    // (names from ResupplyStimName/ResupplyRechargerName above). Health in combat fires as soon as one
-    // stim's heal capacity no longer covers the missing health.
-    public int HealNanoCombatPct = 50; // in combat: stim when nano falls under this % of max
+    // --- Heal (ControlPriority.LowHealthNanoEmergency): the in-combat heal decision and the
+    // out-of-combat recharger rest. In combat the higher heal wins - the stim (locked 40 s per
+    // use, its own LockSkill(123,40)) or the best learned one-shot heal nano (cast held until
+    // it lands, then the nano-cast recharge lockout). Out of combat the recharger rest cycle.
+    public int HealNanoCombatPct = 50; // in combat: heal when nano falls under this % of max
     public int HealNanoOutOfCombatPct = 70; // out of combat: recharger when nano is under this % (more than 30% missing)
     public float HealRestMaxSeconds = 60f; // the recharger rest never sits longer than this, healed or not
+    public float StimLockSeconds = 40f; // the stims' own record says LockSkill(FirstAid 123, 40) - the
+    // First-Aid lock one stim use costs. Applied client-side in retail and nowhere in omnicell, so
+    // this clock is ours alone.
+    public float SkillLockFactor = 0f; // how much stat 382 (SkillLockModifier) shortens the stim lock:
+    // lock = StimLockSeconds - SkillLockModifier * SkillLockFactor. The retail factor is unverified
+    // (client-side, no capture) - 0 runs the flat lock, which never fires a stim into a real lock.
 
     // --- Mission run (blitz mode, no combat): roll at a mission terminal, take a find-item /
     // find-person mission, walk in, select the target, pocket the reward in a loot bag, walk out.
