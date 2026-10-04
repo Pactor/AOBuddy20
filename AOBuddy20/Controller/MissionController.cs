@@ -22,6 +22,7 @@ using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
 using Serilog.Events;
 using SmokeLounge.AOtomation.Messaging.GameData;
 using SmokeLounge.AOtomation.Messaging.Messages;
@@ -1965,6 +1966,74 @@ public sealed class MissionController : IPacketConsumer
 
     // The floor we stand on: the room whose tile height is nearest our Y among the rooms covering
     // this spot; none covering, the nearest room by flat distance.
+    // ── /nav for the monitor (AOBuddy10 MissionRun.NavJson's mission object) ─────────────
+
+    // The monitor composes the IDENTICAL floor plan from its own GameData pool files via
+    // NavData.ComposeMission - the zone-in placement is a handful of ints per room and changes
+    // never, so only it travels the API. Served on the update thread (BotApiService.BuildNav),
+    // where every piece of this state is written.
+    public bool NavInMission => _nav != null && (int)Playfield.ModelId == _missionPf;
+
+    /// <summary>The /nav "mission" object: the current mission, the building's placement, the
+    /// server's doors and the floor the body stands on. Null when there is nothing to draw.</summary>
+    public JObject NavMissionJson(Vector3? mePos)
+    {
+        var mj = new JObject();
+        if (_current != null)
+        {
+            mj["line"] = $"{TypeName(_current.MissionIcon)} in {Zoning.Name(_current.Playfield.Instance)} " +
+                         $"({_current.Location.X:0},{_current.Location.Z:0})";
+            mj["pf"] = _current.Playfield.Instance;
+            mj["door"] = new JArray(Math.Round(_current.Location.X, 1), Math.Round(_current.Location.Y, 1), Math.Round(_current.Location.Z, 1));
+        }
+
+        if (_nav?.Layout == null)
+        {
+            return mj.Count > 0 ? mj : null;
+        }
+
+        var lay = _nav.Layout;
+        mj["layout"] = new JObject
+        {
+            ["instance"] = lay.Instance,
+            ["poolPf"] = lay.TemplatePlayfield,
+            ["width"] = lay.Width,
+            ["height"] = lay.Height,
+            ["worldHeight"] = lay.WorldHeight,
+            ["land"] = new JArray(Math.Round(lay.LandX, 1), Math.Round(lay.LandY, 1), Math.Round(lay.LandZ, 1)),
+            ["rooms"] = new JArray(lay.Rooms.Select(r => new JArray(r[0], r[1], r[2], r[3], r[4]))),
+        };
+
+        mj["floors"] = new JArray(_nav.Dungeon.Rooms.Select(r => r.Floor).Distinct().OrderBy(f => f).Select(f => new JValue(f)));
+
+        // The server's own doors (DoorFullUpdate/DoorStatusUpdate), re-keyed with the compose's pf
+        // like the planner's - the monitor draws them on the plan. AOBuddy20 tracks no lock/open
+        // state on them (the planner walks up and uses), so only the placement travels.
+        var doors = new JArray();
+        var doorNo = 0;
+        foreach (var d in _serverDoors.Where(x => x.pf == _missionPf))
+        {
+            doors.Add(new JObject
+            {
+                ["id"] = d.adjoining >= 0 ? $"r{d.room}~r{d.adjoining}#{doorNo}" : $"r{d.room}#{doorNo}",
+                ["pos"] = new JArray(Math.Round(d.pos.X, 2), Math.Round(d.pos.Y, 2), Math.Round(d.pos.Z, 2)),
+                ["room"] = (int)d.room,
+                ["adjoiningRoom"] = (int)d.adjoining,
+                ["floor"] = FloorAt(d.pos),
+            });
+            doorNo++;
+        }
+
+        mj["doors"] = doors;
+
+        if (mePos.HasValue && NavInMission)
+        {
+            mj["floor"] = FloorAt(mePos.Value);
+        }
+
+        return mj;
+    }
+
     private int FloorAt(Vector3 pos)
     {
         var best = 0;

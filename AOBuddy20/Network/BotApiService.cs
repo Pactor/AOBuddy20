@@ -52,6 +52,7 @@ public sealed class BotApiService
     private readonly OwnerChat _ownerChat;
     private readonly Awareness _awareness;
     private readonly MovementController _movement;
+    private readonly MissionController _mission;
     private readonly LootBagStore _lootBags;
     private readonly BotLoop _botLoop;
     private readonly ILogger<BotApiService> _logger;
@@ -70,11 +71,12 @@ public sealed class BotApiService
     private int _opened;
 
     public BotApiService(AccountInfo config, OwnerChat ownerChat, Awareness awareness, MovementController movement,
-        LootBagStore lootBags, BotLoop botLoop, ApiLogRing logRing, ILogger<BotApiService> logger)
+        MissionController mission, LootBagStore lootBags, BotLoop botLoop, ApiLogRing logRing, ILogger<BotApiService> logger)
     {
         _ownerChat = ownerChat;
         _awareness = awareness;
         _movement = movement;
+        _mission = mission;
         _lootBags = lootBags;
         _botLoop = botLoop;
         _logger = logger;
@@ -221,11 +223,21 @@ public sealed class BotApiService
             var pf = (int)Playfield.ModelId;
             o["pf"] = pf;
             o["zone"] = "" + Playfield.Name;
-            o["inMission"] = false;
+            o["inMission"] = _mission.NavInMission;
 
             var travelPf = _movement.TravelTargetPf;
             o["active"] = travelPf != 0;
             o["phase"] = travelPf != 0 ? $"travel to {Zoning.Name(travelPf)}" : _movement.DescribeState();
+
+            // The mission map's whole feed (AOBuddy10 MissionRun.NavJson's mission object): the
+            // building's zone-in placement, which the monitor recomposes from its own pool files
+            // (NavData.ComposeMission), the server's doors and the body's floor. Without it the
+            // monitor drew the plain coordinate grid over a mission (owner, 2026-10-04).
+            var mj = _mission.NavMissionJson(me?.Transform.Position);
+            if (mj != null)
+            {
+                o["mission"] = mj;
+            }
 
             if (me == null)
             {

@@ -27,6 +27,22 @@ if (args.Length > 0 && args[0] == "mission")
     return MissionSweep.Run(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "wallfit")
+{
+    // gridprobe wallfit <pluginDir> <poolPf> <layout.txt> - per placed room, how the monitor's
+    // drawn layers line up: the wall-line span (nav.Walls, the outlines) against the tile
+    // footprint span (CellOf inverse, the ground tiles), today's tiles and the pre-2026-10-02
+    // (+0.5 cell) ones. Answers "outlines offset from ground tiles" with numbers.
+    return WallFit.Run(args[1], args[2], args[3], args.Length > 4 ? args[4] : null);
+}
+
+if (args.Length > 0 && args[0] == "poolfit")
+{
+    // gridprobe poolfit <pluginDir> <poolPf> - the same two layers in the POOL's own frame
+    // (rooms placed as the extractor wrote them): walls.bin span vs CellOf tile span per room.
+    return WallFit.RunPool(args[1], args[2]);
+}
+
 if (args.Length > 0 && args[0] == "overland")
 {
     return OverlandProbe.Run(args[1], args);
@@ -479,6 +495,247 @@ internal static class OverlandProbe
             }
             Console.WriteLine(fails == 0 ? "  no failing start in the lattice" : $"  {fails} failing start(s)");
         }
+        return 0;
+    }
+}
+
+// Per placed room of a saved mission layout: how far apart the monitor's two drawn layers sit.
+// The outlines are nav.Walls (PlaceBin: pool wall verts relative pr.Pos, turned pool->mission,
+// + GeomPos); the ground tiles are the monitor Walk's painted blocks (today: CellOf's inverse
+// footprint [x, x+cell]; before 2026-10-02: from (a+0.5-ccx), half a cell east/south). If the
+// offsets are not ~wall thickness, the plan draws outlines off its own floor.
+internal static class WallFit
+{
+    public static int Run(string pluginDir, string poolPfArg, string layoutPath, string detail = null)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        int poolPf = int.Parse(poolPfArg, inv);
+        var pool = AOBuddyNav.Load(pluginDir, poolPf) ?? throw new Exception($"no pool data for pf {poolPf}");
+        var byName = new Dictionary<string, NavDungeon.Room>();
+        foreach (var r in pool.Dungeon.Rooms) byName[r.Name] = r;
+
+        // the dump MissionSweep reads: room N <PoolName> fF centre (cx,cz) y Y rot R (de-DE commas)
+        var rooms = new List<(string name, double cx, double cz, int rot)>();
+        foreach (var line in System.IO.File.ReadAllLines(layoutPath))
+        {
+            var mt = System.Text.RegularExpressions.Regex.Match(line,
+                @"room (\d+) (\S+) f(-?\d+) centre \(([\d,]+)\) y ([\d,]+) rot (\d)");
+            if (!mt.Success) continue;
+            double D(string s) => double.Parse(s.Replace(',', '.'), inv);
+            var parts = mt.Groups[4].Value.Split(',');
+            double cx = parts.Length >= 4 ? D(parts[0] + "." + parts[1]) : D(parts[0]);
+            double cz = parts.Length >= 4 ? D(parts[^2] + "." + parts[^1]) : D(parts[^1]);
+            rooms.Add((mt.Groups[2].Value, cx, cz, int.Parse(mt.Groups[6].Value)));
+        }
+
+        if (rooms.Count == 0) { Console.WriteLine("no rooms parsed from " + layoutPath); return 1; }
+
+        // invert ComposeMission's placement (MissionSweep's math): ox = cx - tx - tw + 1, oz = cz - tz - th - 1
+        var tw = new int[rooms.Count];
+        var th = new int[rooms.Count];
+        var ox = new double[rooms.Count];
+        var oz = new double[rooms.Count];
+        for (var i = 0; i < rooms.Count; i++)
+        {
+            if (!byName.TryGetValue(rooms[i].name, out var pr)) { Console.WriteLine($"pool has no room '{rooms[i].name}'"); return 1; }
+            int w = pr.Rect[2] - pr.Rect[0] + 1, h = pr.Rect[3] - pr.Rect[1] + 1;
+            tw[i] = rooms[i].rot % 2 == 0 ? w : h;
+            th[i] = rooms[i].rot % 2 == 0 ? h : w;
+            int turns = ((-rooms[i].rot) % 4 + 4) % 4;
+            double tx = 1, tz = 1;
+            for (var k = 0; k < turns; k++) (tx, tz) = (-tz, tx);
+            ox[i] = rooms[i].cx - tx - tw[i] + 1;
+            oz[i] = rooms[i].cz - tz - th[i] - 1;
+        }
+
+        int bestH = -1;
+        double bestErr = double.MaxValue;
+        for (var H = 1; H <= 256; H++)
+        {
+            double err = 0;
+            for (var i = 0; i < rooms.Count; i++)
+            {
+                err += Math.Abs(ox[i] / 10 - Math.Round(ox[i] / 10));
+                err += Math.Abs(H - (oz[i] + 2 * th[i]) / 10 - Math.Round(H - (oz[i] + 2 * th[i]) / 10));
+            }
+            if (err < bestErr) { bestErr = err; bestH = H; }
+        }
+
+        if (bestErr > rooms.Count * 0.15) { Console.WriteLine($"slot reconstruction failed (err {bestErr:0.00})"); return 1; }
+        var m = new AOBuddyNav.MissionLayout
+        {
+            Instance = 14624428, TemplatePlayfield = poolPf, Width = 64, Height = bestH, WorldHeight = 12,
+        };
+        for (var i = 0; i < rooms.Count; i++)
+        {
+            m.Rooms.Add(new[] { byName[rooms[i].name].Index, 0,
+                (int)Math.Round(ox[i] / 10), (int)Math.Round(bestH - (oz[i] + 2 * th[i]) / 10), rooms[i].rot });
+        }
+
+        var nav = AOBuddyNav.ComposeMission(pluginDir, m);
+        if (nav == null || nav.Dungeon?.Rooms == null) { Console.WriteLine("compose failed"); return 1; }
+
+        string wp = System.IO.Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "walls.bin");
+        if (!System.IO.File.Exists(wp)) { Console.WriteLine("pool has no walls.bin"); return 1; }
+        var byRoom = new Dictionary<int, List<float[]>>();
+        foreach (var c in NavCollision.Read(wp).Chunks)
+        {
+            int idx = c.Instance & 0xFFFF;
+            if (!byRoom.TryGetValue(idx, out var l)) byRoom[idx] = l = new List<float[]>();
+            l.Add(c.Verts);
+        }
+
+        float cell = nav.Dungeon.Cell;
+        Console.WriteLine("pool " + poolPf + ", " + rooms.Count + " rooms, cell " + cell + " m; spans in world m (x / z), offsets = tile - wall (detail room: " + (detail ?? "-") + ")");
+        Console.WriteLine($"{"room",-28} {"rot",3} {"w x h",7} | {"wall span",26} | {"tiles now",26} | off now           | off pre-eb4fbdd");
+        foreach (var rm in nav.Dungeon.Rooms)
+        {
+            if (rm.PoolIndex < 0 || !byRoom.TryGetValue(rm.PoolIndex, out var chunks)) continue;
+            var pr = pool.Dungeon.Rooms[rm.PoolIndex];
+
+            // walls: PlaceBin's transform (GeomPos pivot)
+            double wminx = double.MaxValue, wmaxx = double.MinValue, wminz = double.MaxValue, wmaxz = double.MinValue;
+            int turns = ((((-pr.Rot) % 4 + 4) % 4) - ((((-rm.Rot) % 4 + 4) % 4)) + 4) % 4;
+            foreach (var v in chunks)
+                for (int i = 0; i + 2 < v.Length; i += 3)
+                {
+                    double dx = v[i] - pr.Pos[0], dz = v[i + 2] - pr.Pos[2];
+                    for (int t = 0; t < turns; t++) { double s = dx; dx = dz; dz = -s; }
+                    double wx = rm.GeomPos[0] + dx, wz = rm.GeomPos[2] + dz;
+                    wminx = Math.Min(wminx, wx); wmaxx = Math.Max(wmaxx, wx);
+                    wminz = Math.Min(wminz, wz); wmaxz = Math.Max(wmaxz, wz);
+                }
+
+            // tiles: the monitor Walk, painted block [x, x+cell] - today (turned footprint's min
+            // corner) and the pre-eb4fbdd (+0.5 cell, turned low corner) convention
+            double ccx = (rm.Rect[0] + rm.Rect[2] + 1) / 2.0, ccz = (rm.Rect[1] + rm.Rect[3] + 1) / 2.0;
+            int turnsT = ((-rm.Rot) % 4 + 4) % 4;
+            double nminx = double.MaxValue, nmaxx = double.MinValue, nminz = double.MaxValue, nmaxz = double.MinValue;
+            double ominx = double.MaxValue, omaxx = double.MinValue, ominz = double.MaxValue, omaxz = double.MinValue;
+            for (int row = 0; row < rm.Tile.Length; row++)
+                for (int col = 0; col < rm.Tile[row].Length; col++)
+                {
+                    if (rm.Tile[row][col] == 0) continue;
+                    int a = rm.Rect[0] + col, b = rm.Rect[1] + row;
+                    {
+                        double dx0 = (a - ccx) * cell, dz0 = (b - ccz) * cell;
+                        double dx1 = dx0 + cell, dz1 = dz0 + cell;
+                        for (int t = 0; t < turnsT; t++)
+                        {
+                            double s = dx0; dx0 = -dz0; dz0 = s;
+                            s = dx1; dx1 = -dz1; dz1 = s;
+                        }
+                        double x0 = rm.Pos[0] + Math.Min(dx0, dx1), z0 = rm.Pos[2] + Math.Min(dz0, dz1);
+                        nminx = Math.Min(nminx, x0); nmaxx = Math.Max(nmaxx, x0 + cell);
+                        nminz = Math.Min(nminz, z0); nmaxz = Math.Max(nmaxz, z0 + cell);
+                    }
+                    {
+                        double dx = (a + 0.5 - ccx) * cell, dz = (b + 0.5 - ccz) * cell;
+                        for (int t = 0; t < turnsT; t++) { double s = dx; dx = -dz; dz = s; }
+                        double x0 = rm.Pos[0] + dx, z0 = rm.Pos[2] + dz;
+                        ominx = Math.Min(ominx, x0); omaxx = Math.Max(omaxx, x0 + cell);
+                        ominz = Math.Min(ominz, z0); omaxz = Math.Max(omaxz, z0 + cell);
+                    }
+                }
+
+            int w = pr.Rect[2] - pr.Rect[0] + 1, h = pr.Rect[3] - pr.Rect[1] + 1;
+            string span(double a, double b, double c, double d) => $"({a,6:0.0}..{b,6:0.0})/({c,6:0.0}..{d,6:0.0})";
+            string off(double a, double b, double c, double d) => $"({a,+4:0.0},{b,+4:0.0}) ({c,+4:0.0},{d,+4:0.0})";
+            Console.WriteLine($"{rm.PoolName,-28} {rm.Rot,3} {w,3}x{h,-3} | {span(wminx, wmaxx, wminz, wmaxz)} | {span(nminx, nmaxx, nminz, nmaxz)}" +
+                $" | {off(nminx - wminx, nmaxx - wmaxx, nminz - wminz, nmaxz - wmaxz)} | {off(ominx - wminx, omaxx - wmaxx, ominz - wminz, omaxz - wmaxz)}");
+            if (detail == rm.PoolName)
+            {
+                Console.WriteLine($"    detail: pr.Rot {pr.Rot}, pr.Pos ({pr.Pos[0]:0.##},{pr.Pos[2]:0.##}), rect [{rm.Rect[0]},{rm.Rect[1]},{rm.Rect[2]},{rm.Rect[3]}]," +
+                    $" mr.Pos ({rm.Pos[0]:0.###},{rm.Pos[2]:0.###}), mr.GeomPos ({rm.GeomPos[0]:0.###},{rm.GeomPos[2]:0.###})," +
+                    $" turnsT {turnsT}, wall turns {turns}");
+                Console.WriteLine($"    wall span rel pool pr.Pos (placed world - pool pos): x [{wminx - pr.Pos[0]:0.##}..{wmaxx - pr.Pos[0]:0.##}], z [{wminz - pr.Pos[2]:0.##}..{wmaxz - pr.Pos[2]:0.##}]");
+                int rmin = -1, rmax = -1, cmin = -1, cmax = -1;
+                for (int row = 0; row < rm.Tile.Length; row++)
+                    for (int col = 0; col < rm.Tile[row].Length; col++)
+                        if (rm.Tile[row][col] != 0)
+                        {
+                            if (rmin < 0 || row < rmin) rmin = row;
+                            if (row > rmax) rmax = row;
+                            if (cmin < 0 || col < cmin) cmin = col;
+                            if (col > cmax) cmax = col;
+                        }
+                Console.WriteLine($"    mask nonzero: rows {rmin}..{rmax}, cols {cmin}..{cmax} of {rm.Tile.Length}x{rm.Tile[0].Length}");
+                for (int row = rmin; row <= rmax; row++)
+                    for (int col = cmin; col <= cmax; col++)
+                    {
+                        if (rm.Tile[row][col] == 0) continue;
+                        int a = rm.Rect[0] + col, b = rm.Rect[1] + row;
+                        double dx = (a - ccx) * cell, dz = (b - ccz) * cell;
+                        double tdx = dx, tdz = dz;
+                        for (int t = 0; t < turnsT; t++) { double s = tdx; tdx = -tdz; tdz = s; }
+                        Console.WriteLine($"      cell r{row} c{col} -> a {a} b {b}: local ({dx:0.#},{dz:0.#}) turned ({tdx:0.#},{tdz:0.#}) world ({rm.Pos[0] + tdx:0.##},{rm.Pos[2] + tdz:0.##})");
+                    }
+            }
+        }
+
+        return 0;
+    }
+
+    // The pool itself: walls.bin placed where the extractor wrote it vs the CellOf tile frame.
+    // This is the ground truth the mission compose must preserve (walls and tiles of one room
+    // keep their mutual offset through GeomPos/Pos - or they do not, and the monitor's two
+    // layers split).
+    public static int RunPool(string pluginDir, string poolPfArg)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        int poolPf = int.Parse(poolPfArg, inv);
+        var pool = AOBuddyNav.Load(pluginDir, poolPf) ?? throw new Exception($"no pool data for pf {poolPf}");
+        var d = pool.Dungeon;
+        string wp = System.IO.Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "walls.bin");
+        if (!System.IO.File.Exists(wp)) { Console.WriteLine("pool has no walls.bin"); return 1; }
+        var byRoom = new Dictionary<int, List<float[]>>();
+        foreach (var c in NavCollision.Read(wp).Chunks)
+        {
+            int idx = c.Instance & 0xFFFF;
+            if (!byRoom.TryGetValue(idx, out var l)) byRoom[idx] = l = new List<float[]>();
+            l.Add(c.Verts);
+        }
+
+        float cell = d.Cell;
+        Console.WriteLine($"pool {poolPf}, cell {cell:0.#} m; offsets relative to the full rect's CellOf footprint (pool frame, world m)");
+        Console.WriteLine($"{"room",-30} {"rot",3} {"w x h",7} {"Pos",14} | wall span (x..x, z..z)   | tile span (x..x, z..z)   | mask");
+        foreach (var rm in d.Rooms)
+        {
+            if (!byRoom.TryGetValue(rm.Index, out var chunks)) continue;
+            double wminx = double.MaxValue, wmaxx = double.MinValue, wminz = double.MaxValue, wmaxz = double.MinValue;
+            foreach (var v in chunks)
+                for (int i = 0; i + 2 < v.Length; i += 3)
+                {
+                    wminx = Math.Min(wminx, v[i]); wmaxx = Math.Max(wmaxx, v[i]);
+                    wminz = Math.Min(wminz, v[i + 2]); wmaxz = Math.Max(wmaxz, v[i + 2]);
+                }
+
+            double ccx = (rm.Rect[0] + rm.Rect[2] + 1) / 2.0, ccz = (rm.Rect[1] + rm.Rect[3] + 1) / 2.0;
+            int turns = ((-rm.Rot) % 4 + 4) % 4;
+            double tminx = double.MaxValue, tmaxx = double.MinValue, tminz = double.MaxValue, tmaxz = double.MinValue;
+            int n = 0, rows = rm.Tile.Length, cols = rm.Tile.Length > 0 ? rm.Tile[0].Length : 0;
+            for (int row = 0; row < rm.Tile.Length; row++)
+                for (int col = 0; col < rm.Tile[row].Length; col++)
+                {
+                    if (rm.Tile[row][col] == 0) continue;
+                    n++;
+                    int a = rm.Rect[0] + col, b = rm.Rect[1] + row;
+                    double dx = (a - ccx) * cell, dz = (b - ccz) * cell;
+                    for (int t = 0; t < turns; t++) { double s = dx; dx = -dz; dz = s; }
+                    double x0 = rm.Pos[0] + dx, z0 = rm.Pos[2] + dz, x1 = x0 + cell, z1 = z0 + cell;
+                    tminx = Math.Min(tminx, x0); tmaxx = Math.Max(tmaxx, x1);
+                    tminz = Math.Min(tminz, z0); tmaxz = Math.Max(tmaxz, z1);
+                }
+
+            // both spans relative to the full rect's CellOf footprint (the slot frame the compose maps)
+            double rminx = rm.Pos[0] + (rm.Rect[0] - ccx) * cell, rmaxx = rm.Pos[0] + (rm.Rect[2] + 1 - ccx) * cell;
+            double rminz = rm.Pos[2] + (rm.Rect[1] - ccz) * cell, rmaxz = rm.Pos[2] + (rm.Rect[3] + 1 - ccz) * cell;
+            string sp(double a, double b, double c, double e) => $"({a - rminx,+5:0.#}..{b - rmaxx,+5:0.#})({c - rminz,+5:0.#}..{e - rmaxz,+5:0.#})";
+            Console.WriteLine($"{rm.Name,-30} {rm.Rot,3} {rm.Rect[2] - rm.Rect[0] + 1,3}x{rm.Rect[3] - rm.Rect[1] + 1,-3}" +
+                $" ({rm.Pos[0],5:0.#},{rm.Pos[2],5:0.#})" +
+                $" | {sp(wminx, wmaxx, wminz, wmaxz)} | {sp(tminx, tmaxx, tminz, tmaxz)} | {cols}x{rows}, {n} cells");
+        }
+
         return 0;
     }
 }

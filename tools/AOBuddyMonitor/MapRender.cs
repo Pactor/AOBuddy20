@@ -245,10 +245,15 @@ namespace AOBuddyMonitor
                 var d = nav?.Dungeon;
                 if (d == null || d.Rooms.Count == 0) return null;
 
-                // cell → world, the exact inverse of NavDungeon.CellOf (and the same transform the
-                // bot's StampRoomFloors stamps by): tile centre = pos + turned((x1+col-mx)*cell,
-                // (z1+row-mz)*cell). The +0.5 cell an earlier version added here painted every room
-                // 1 m east and south of where the bot walks it — the "offset corridors" (1187).
+                // cell → world, the exact inverse of NavDungeon.CellOf: CellOf un-turns the world
+                // offset then floors, so cell (a,b) owns the footprint turn([a-mx, a+1-mx)*cell) —
+                // and a 90° turn that NEGATES an axis maps [low, low+cell) to [−low−cell, −low),
+                // one cell before the turned low corner. Paint from the min of the turned corners,
+                // not from the turned low corner: that painted every rotated room's floor one cell
+                // (2 m) off its wall outlines per negated axis — rot 1 off in z, rot 3 in x, rot 2
+                // in both — while rot 0 sat flush (owner, "outlines offset from the ground tiles",
+                // 2026-10-04; the +0.5 cell before THAT painted every room a uniform 1 m off, the
+                // "offset corridors" of 1187).
                 float cell = d.Cell;
                 void Walk(NavDungeon.Room rm, Action<int, int, double, double> cellAt)
                 {
@@ -259,9 +264,14 @@ namespace AOBuddyMonitor
                         {
                             if (rm.Tile[row][col] == 0) continue;
                             int a = rm.Rect[0] + col, b = rm.Rect[1] + row;
-                            double dx = (a - ccx) * cell, dz = (b - ccz) * cell;
-                            for (int i = 0; i < turns; i++) { double t = dx; dx = -dz; dz = t; }
-                            cellAt(a, b, rm.Pos[0] + dx, rm.Pos[2] + dz);
+                            double dx0 = (a - ccx) * cell, dz0 = (b - ccz) * cell;
+                            double dx1 = dx0 + cell, dz1 = dz0 + cell;
+                            for (int i = 0; i < turns; i++)
+                            {
+                                double t = dx0; dx0 = -dz0; dz0 = t;
+                                t = dx1; dx1 = -dz1; dz1 = t;
+                            }
+                            cellAt(a, b, rm.Pos[0] + Math.Min(dx0, dx1), rm.Pos[2] + Math.Min(dz0, dz1));
                         }
                 }
 
