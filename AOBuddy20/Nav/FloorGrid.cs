@@ -42,6 +42,10 @@ public sealed class FloorGrid : IWalkGrid
     private float _maxStep = StaticStep; // missions raise this in UseComposedGeometry
 
     private readonly Dictionary<int, float[]> _floors = new Dictionary<int, float[]>(); // cell -> floor heights, ascending
+    private readonly HashSet<(int k, float h)> _tileStamp = new HashSet<(int, float)>(); // mission grids: floors the
+    // room-tile stamp laid down, so SuppressBuriedTiles can tell them from the placed mesh's own floors
+    private readonly HashSet<(int k, float h)> _meshStamp = new HashSet<(int, float)>(); // mission grids: floors the
+    // placed mesh sampled in (SampleSurface -> AddLevel)
     private readonly HashSet<long> _blocked = new HashSet<long>(); // cell * 8 + floor index
     private readonly int _x0, _z0, _w, _h;
     private NavCollision _walls; // static dungeons: the zone's walls.bin, for GeometryLine (missions use _wallTris)
@@ -153,6 +157,14 @@ public sealed class FloorGrid : IWalkGrid
         return g;
     }
 
+    // Probe-only switch (gridprobe missionx): build the mission grid WITHOUT the room-tile stamp,
+    // to measure how much of the floor map the placed mesh alone carries.
+    public static bool DebugSkipRoomTiles;
+
+    // Probe-only: how many cells SuppressBuriedTiles stripped of their tile floor - missionx
+    // prints it after Build.
+    public static int DebugBuriedCells;
+
     public static FloorGrid Build(string pluginDir, int pf, AOBuddyNav nav, Action<string> log)
     {
         if (nav == null || nav.Ground != null)
@@ -175,7 +187,6 @@ public sealed class FloorGrid : IWalkGrid
             }
 
             var msw = System.Diagnostics.Stopwatch.StartNew();
-            mgrid.StampRoomFloors(nav.Dungeon);
             mgrid.StampDoorways(nav.MissionDoorways);
             if (nav.Walls != null && nav.Walls.Length >= 9)
             {
@@ -187,7 +198,18 @@ public sealed class FloorGrid : IWalkGrid
                 // only ever forbids the EDGE a wall physically crosses - no cell is poisoned
                 // wholesale, so no sealed pockets and no keep-open patches. Furniture is render
                 // data and was never exported: no version of this knows a crate is there.
-                mgrid.UseComposedGeometry(nav.Walls, nav.Surfaces);
+                // THE MESH SAMPLES BEFORE THE TILES (Subway ramp room, 2026-10-04): the tile fold
+                // keeps the FIRST height, and with the tiles first the ramp's low footing folded
+                // into the tile's flat floor - both doors of the ramp room then tested as walled
+                // (the ramp's rising body crossed a floor-level band) and the phantom floor tunnel
+                // ran under the whole stairway. Mesh first: the ramp keeps its own heights, the
+                // tiles fold into them, and where the mesh has nothing the tiles still lay the
+                // room floor (the mesh does NOT carry it - a no-tile build collapses to NO PATH).
+                mgrid.UseComposedGeometry(nav.Walls, nav.Surfaces, nav.Dungeon);
+            }
+            else if (!DebugSkipRoomTiles)
+            {
+                mgrid.StampRoomFloors(nav.Dungeon);
             }
 
             log?.Invoke($"FLOORGRID: mission grid for pf {pf} ({nav.Name}): {mw}x{mh} cells of {Cell} m, " +
@@ -415,6 +437,7 @@ public sealed class FloorGrid : IWalkGrid
                             }
 
                             int k = j * _w + i;
+                            _tileStamp.Add((k, h));
                             if (!_floors.TryGetValue(k, out var fl))
                             {
                                 _floors[k] = new[] { h };
@@ -533,16 +556,85 @@ public sealed class FloorGrid : IWalkGrid
     private readonly Dictionary<long, float> _wallHug = new Dictionary<long, float>(); // missions: cells within a step of a wall cost extra
     private readonly Dictionary<long, List<float[]>> _wallTris = new Dictionary<long, List<float[]>>();
 
-    public void UseComposedGeometry(float[] walls, float[] surfaces)
+    public void UseComposedGeometry(float[] walls, float[] surfaces, NavDungeon rooms)
     {
         // collision.bin first: it carries the walkable truth (54,400 flat + 1,549 ramp triangles in
         // pool 320 alone); walls.bin is steep-only and would sample nothing. Every triangle is still
-        // classified by its own normal, so a misfiled one lands where it belongs either way.
+        // classified by its own normal, so a misfiled one lands where it belongs either way. The
+        // room tiles fold INTO the mesh's heights (the mesh's ramp footing must survive the fold),
+        // then the walls are bucketed, the buried tile floors go, and the edge verdicts run on the
+        // final floor arrays.
         _maxStep = MissionStep;
         Classify(surfaces);
+        if (!DebugSkipRoomTiles)
+        {
+            StampRoomFloors(rooms);
+        }
+
         Classify(walls);
+        SuppressBuriedTiles();
         BuildEdges();
         BuildWallHugCost();
+    }
+
+    // The room-tile stamp lays its flat floor into EVERY tiled cell - including the cells the placed
+    // mesh built a stairway on (the Subway ramp room, 2026-10-04: the tile's flat floor under every
+    // tread, and a floor-10 line straight under the whole stairway reading "clear" - the A* walked
+    // the bot INTO the stairs and the server yanked it back out). So after the mesh is in, every
+    // tile-stamped floor that has the mesh's own structure - its steep triangles: risers, soffits,
+    // stringers - crossing the body band right above it is buried: not a floor at all. The tread
+    // ladder stays, the ramp is the way up, and its low end sits within MissionStep of the room
+    // floor, so the climb starts where the stairs start. A floor under open air keeps standing -
+    // the deck 8 m over the Subway floor never touches the band, and the server has confirmed
+    // under-deck walking (2026-10-04 01:00 run: SetPos held the body at floor level beneath it).
+    // The test is the tight half-cell cross through the cell centre, so a floor beside a wall
+    // survives, and only tile-stamped floors can die - mesh floors and doorway bridges never.
+    private void SuppressBuriedTiles()
+    {
+        if (_tileStamp.Count == 0)
+        {
+            return;
+        }
+
+        var buried = new List<(int k, float h)>();
+        foreach (var kv in _floors)
+        {
+            int k = kv.Key;
+            if (_doorways.Contains(k))
+            {
+                continue; // a doorway cell: the frame triangles over its floor are the door, not a wall
+            }
+
+            float cx = (k % _w + _x0 + 0.5f) * Cell, cz = (k / _w + _z0 + 0.5f) * Cell;
+            foreach (float f in kv.Value)
+            {
+                if (!_tileStamp.Contains((k, f)))
+                {
+                    continue;
+                }
+
+                if (LineHitsWall(cx - 0.25f, cz, cx + 0.25f, cz, _ => f) ||
+                    LineHitsWall(cx, cz - 0.25f, cx, cz + 0.25f, _ => f))
+                {
+                    buried.Add((k, f));
+                }
+            }
+        }
+
+        DebugBuriedCells = buried.Count;
+        foreach (var (k, f) in buried)
+        {
+            _tileStamp.Remove((k, f));
+            var kept = _floors[k].Where(v => v != f).ToArray(); // exact float: the stored value
+            if (kept.Length == 0)
+            {
+                _floors.Remove(k);
+            }
+            else
+            {
+                _floors[k] = kept;
+            }
+        }
     }
 
     // Routes through the middle of the room: cells whose body band stands within a step of a
@@ -693,6 +785,7 @@ public sealed class FloorGrid : IWalkGrid
 
     private void AddLevel(int k, float h)
     {
+        _meshStamp.Add((k, h));
         if (!_floors.TryGetValue(k, out var fl))
         {
             _floors[k] = new[] { h };
@@ -979,6 +1072,48 @@ public sealed class FloorGrid : IWalkGrid
     ///     no headroom rule, no doorway exception pending - the doorway keep-open is already baked in).
     /// </summary>
     public bool WalkableAt(float x, float z, float y, float tol) => FloorAt(Key(x, z), y, tol, null) >= 0;
+
+    /// <summary>
+    ///     The raw floor levels recorded for the cell at (x, z) - what SampleSurface, the room tiles
+    ///     and the doorway bridges stacked there - for probes and renderers. Empty when the cell is
+    ///     void. The per-level blocked verdict is not included; WalkableAt answers that for a height.
+    /// </summary>
+    public float[] FloorsAt(float x, float z)
+    {
+        int k = Key(x, z);
+        return k >= 0 && _floors.TryGetValue(k, out var fl) ? fl : Array.Empty<float>();
+    }
+
+    // Probe-only provenance of one cell's floor stack: for every floor height, where it came from
+    // and whether the grounding pass marked it. 'T' tile stamp, 'M' placed mesh, 'D' doorway
+    // bridge (neither). missionx "cell" prints it.
+    public string DebugCell(float x, float z)
+    {
+        int k = Key(x, z);
+        if (k < 0 || !_floors.TryGetValue(k, out var fl))
+        {
+            return "void";
+        }
+
+        var parts = new List<string>();
+        foreach (float f in fl)
+        {
+            var kind = _tileStamp.Contains((k, f)) ? 'T' : _meshStamp.Contains((k, f)) ? 'M' : _doorways.Contains(k) ? 'D' : '?';
+            parts.Add($"{f:0.###}{kind}");
+        }
+
+        var tiles = _tileStamp.Where(t => t.k == k).Select(t => t.h.ToString("0.###")).ToList();
+        var mesh = _meshStamp.Where(t => t.k == k).Select(t => t.h.ToString("0.###")).ToList();
+        return $"cell ({(k % _w + _x0) * Cell:0.##},{(k / _w + _z0) * Cell:0.##}): floors [{string.Join(" ", parts)}]" +
+               $", tile stamps [{string.Join(" ", tiles)}], mesh stamps [{string.Join(" ", mesh)}]";
+    }
+
+    /// <summary>The floor index FloorAt would pick at (x, z) for height y within tol; -1 when none.</summary>
+    public int FloorIndexAt(float x, float z, float y, float tol)
+    {
+        int k = Key(x, z);
+        return k < 0 ? -1 : FloorAt(k, y, tol, null);
+    }
 
     /// <summary>
     ///     Can the body walk the STRAIGHT line a->b in the real geometry, the grid's verdict aside?

@@ -22,9 +22,19 @@ if (args.Length > 0 && args[0] == "selftest")
     return LineSelfTest.Run();
 }
 
-if (args.Length > 0 && args[0] == "mission")
+if (args.Length > 1 && args[1] == "mission")
 {
-    return MissionSweep.Run(args[1], args[2], args[3]);
+    return MissionSweep.Run(args[0], args[2], args[3]);
+}
+
+if (args.Length > 1 && args[1] == "missionx")
+{
+    // gridprobe <pluginDir> missionx <poolPf> <layout.txt> floors <cx> <cz> [span] [y] - the
+    //   composed cell lattice: every floor level per 0.5 m cell, '*' on the level FloorAt
+    //   would pick for y
+    // gridprobe <pluginDir> missionx <poolPf> <layout.txt> path <x0> <z0> <y0> <x1> <z1> <y1>
+    //   - replay one planner query and print the route's y profile
+    return MissionX.Run(args);
 }
 
 if (args.Length > 0 && args[0] == "wallfit")
@@ -365,6 +375,7 @@ internal static class MissionSweep
         var grid = FloorGrid.Build(pluginDir, m.Instance, nav, s => Console.WriteLine("  [grid] " + s));
         if (nav == null || grid == null) { Console.WriteLine("compose/build failed"); return 1; }
         Console.WriteLine("doorway meeting: " + AOBuddyNav.DoorCheck);
+        Console.WriteLine($"suppressor: {FloorGrid.DebugBuriedCells} tile floor(s) buried");
 
         // 1. every doorway: standoff-in -> standoff-out must be a clear geometry line
         int lineOk = 0, lineBad = 0;
@@ -737,5 +748,161 @@ internal static class WallFit
         }
 
         return 0;
+    }
+}
+
+// Cell-level inspection of a composed mission grid (2026-10-04): MissionSweep answers "do the
+// doors path"; this answers "what exactly did the grid record HERE" - the floor stack per 0.5 m
+// cell and one replayed planner query with its y profile. Built for the Subway ramp room, where
+// the route walked into the stairs instead of on top of them.
+internal static class MissionX
+{
+    public static int Run(string[] args)
+    {
+        // missionx <pluginDir> <poolPf> <layout.txt> floors|path ...
+        if (args.Length < 5) { Console.WriteLine("usage: missionx <pluginDir> <poolPf> <layout.txt> floors <cx> <cz> [span] [y] | path <x0> <z0> <y0> <x1> <z1> <y1>"); return 2; }
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        int poolPf = int.Parse(args[2], inv);
+        var pool = AOBuddyNav.Load(args[0], poolPf) ?? throw new Exception($"no pool data for pf {poolPf}");
+        var byName = new Dictionary<string, NavDungeon.Room>();
+        foreach (var r in pool.Dungeon.Rooms) byName[r.Name] = r;
+
+        // the MissionSweep layout parse: room N <PoolName> fF centre (cx,cz) y Y rot R (de-DE commas)
+        var rooms = new List<(string name, double cx, double cz, int rot)>();
+        foreach (var line in System.IO.File.ReadAllLines(args[3]))
+        {
+            var mt = System.Text.RegularExpressions.Regex.Match(line,
+                @"room (\d+) (\S+) f(-?\d+) centre \(([\d,]+)\) y ([\d,]+) rot (\d)");
+            if (!mt.Success) continue;
+            double D(string s) => double.Parse(s.Replace(',', '.'), inv);
+            var parts = mt.Groups[4].Value.Split(',');
+            double cx = parts.Length >= 4 ? D(parts[0] + "." + parts[1]) : D(parts[0]);
+            double cz = parts.Length >= 4 ? D(parts[^2] + "." + parts[^1]) : D(parts[^1]);
+            rooms.Add((mt.Groups[2].Value, cx, cz, int.Parse(mt.Groups[6].Value)));
+        }
+
+        if (rooms.Count == 0) { Console.WriteLine("no rooms parsed from " + args[3]); return 1; }
+
+        var tw = new int[rooms.Count];
+        var th = new int[rooms.Count];
+        var ox = new double[rooms.Count];
+        var oz = new double[rooms.Count];
+        for (var i = 0; i < rooms.Count; i++)
+        {
+            if (!byName.TryGetValue(rooms[i].name, out var pr)) { Console.WriteLine($"pool has no room '{rooms[i].name}'"); return 1; }
+            int w = pr.Rect[2] - pr.Rect[0] + 1, h = pr.Rect[3] - pr.Rect[1] + 1;
+            tw[i] = rooms[i].rot % 2 == 0 ? w : h;
+            th[i] = rooms[i].rot % 2 == 0 ? h : w;
+            int turns = ((-rooms[i].rot) % 4 + 4) % 4;
+            double tx = 1, tz = 1;
+            for (var k = 0; k < turns; k++) (tx, tz) = (-tz, tx);
+            ox[i] = rooms[i].cx - tx - tw[i] + 1;
+            oz[i] = rooms[i].cz - tz - th[i] - 1;
+        }
+
+        int bestH = -1;
+        double bestErr = double.MaxValue;
+        for (var H = 1; H <= 256; H++)
+        {
+            double err = 0;
+            for (var i = 0; i < rooms.Count; i++)
+            {
+                err += Math.Abs(ox[i] / 10 - Math.Round(ox[i] / 10));
+                err += Math.Abs(H - (oz[i] + 2 * th[i]) / 10 - Math.Round(H - (oz[i] + 2 * th[i]) / 10));
+            }
+            if (err < bestErr) { bestErr = err; bestH = H; }
+        }
+
+        if (bestErr > rooms.Count * 0.15) { Console.WriteLine($"slot reconstruction failed (err {bestErr:0.00})"); return 1; }
+        var m = new AOBuddyNav.MissionLayout
+        {
+            Instance = 14624516, TemplatePlayfield = poolPf, Width = 64, Height = bestH, WorldHeight = 12,
+        };
+        for (var i = 0; i < rooms.Count; i++)
+        {
+            m.Rooms.Add(new[] { byName[rooms[i].name].Index, 0,
+                (int)Math.Round(ox[i] / 10), (int)Math.Round(bestH - (oz[i] + 2 * th[i]) / 10), rooms[i].rot });
+        }
+
+        var nav = AOBuddyNav.ComposeMission(args[0], m);
+        FloorGrid.DebugSkipRoomTiles = args.Any(a => a == "notiles");
+        var grid = FloorGrid.Build(args[0], m.Instance, nav, s => Console.WriteLine("  [grid] " + s));
+        if (nav == null || grid == null) { Console.WriteLine("compose/build failed"); return 1; }
+        Console.WriteLine("doorway meeting: " + AOBuddyNav.DoorCheck);
+        Console.WriteLine($"suppressor: {FloorGrid.DebugBuriedCells} tile floor(s) buried");
+
+        if (args[4] == "floors")
+        {
+            float F(string s) => float.Parse(s, inv);
+            var cx = F(args[5]); var cz = F(args[6]);
+            var span = args.Length > 7 ? F(args[7]) : 12f;
+            float y = args.Length > 8 ? F(args[8]) : 10f;
+            Console.WriteLine($"floors lattice at ({cx:0.0},{cz:0.0}) span {span:0.0}, '*' = level picked for y {y:0.0}:");
+            for (float z = cz + span; z >= cz - span - 1e-3f; z -= 0.5f)
+            {
+                var row = "";
+                for (float x = cx - span; x <= cx + span + 1e-3f; x += 0.5f)
+                {
+                    var fl = grid.FloorsAt(x, z);
+                    if (fl.Length == 0) { row += "  ."; continue; }
+                    var pick = grid.FloorIndexAt(x, z, y, 0.8f);
+                    row += "|";
+                    for (int f = 0; f < fl.Length; f++)
+                        row += f == pick ? $"*{fl[f]:0.##}" : $"{fl[f]:0.##}";
+                }
+                Console.WriteLine($"z={z,7:0.0}  {row}");
+            }
+            Console.WriteLine($"           x {cx - span:0.0} -> {cx + span:0.0} (centre {cx})");
+            return 0;
+        }
+
+        if (args[4] == "path")
+        {
+            float F(string s) => float.Parse(s, inv);
+            var a = new Vector3(F(args[5]), F(args[7]), F(args[6]));
+            var b = new Vector3(F(args[8]), F(args[10]), F(args[9]));
+            var pts = grid.FindPath(a, b, null, 8f, 3f, out var why);
+            Console.WriteLine($"({a.X:0.0},{a.Y:0.0},{a.Z:0.0}) -> ({b.X:0.0},{b.Y:0.0},{b.Z:0.0}): " +
+                (pts != null ? $"{pts.Count} pts" : $"NO PATH - {why}"));
+            if (pts != null)
+                foreach (var p in pts)
+                    Console.WriteLine($"  ({p.X,7:0.0},{p.Y,6:0.0},{p.Z,7:0.0})");
+            return 0;
+        }
+
+        if (args[4] == "cell")
+        {
+            float F(string s) => float.Parse(s, inv);
+            Console.WriteLine(grid.DebugCell(F(args[5]), F(args[6])));
+            return 0;
+        }
+
+        if (args[4] == "line")
+        {
+            float F(string s) => float.Parse(s, inv);
+            var a = new Vector3(F(args[5]), F(args[7]), F(args[6]));
+            var b = new Vector3(F(args[8]), F(args[10]), F(args[9]));
+            Console.WriteLine(grid.GeometryLine(a, b, out var gwhy)
+                ? $"({a.X:0.0},{a.Y:0.0},{a.Z:0.0}) -> ({b.X:0.0},{b.Y:0.0},{b.Z:0.0}): CLEAR"
+                : $"({a.X:0.0},{a.Y:0.0},{a.Z:0.0}) -> ({b.X:0.0},{b.Y:0.0},{b.Z:0.0}): BLOCKED - {gwhy}");
+            return 0;
+        }
+
+        if (args[4] == "edges")
+        {
+            float F(string s) => float.Parse(s, inv);
+            var p = new Vector3(F(args[5]), F(args[7]), F(args[6]));
+            var reach = args.Length > 8 ? F(args[8]) : 1.5f;
+            Console.WriteLine($"edge fan from ({p.X:0.0},{p.Y:0.0},{p.Z:0.0}), reach {reach:0.0} m:");
+            foreach (var (lbl, dx, dz) in new[] { ("E ", 1f, 0f), ("NE", .71f, -.71f), ("N ", 0f, -1f), ("NW", -.71f, -.71f), ("W ", -1f, 0f), ("SW", -.71f, .71f), ("S ", 0f, 1f), ("SE", .71f, .71f) })
+            {
+                var q = new Vector3(p.X + dx * reach, p.Y, p.Z + dz * reach);
+                Console.WriteLine("  " + lbl + ": " + (grid.GeometryLine(p, q, out var w) ? "clear" : "BLOCKED - " + w));
+            }
+            return 0;
+        }
+
+        Console.WriteLine("unknown missionx verb: " + args[4]);
+        return 2;
     }
 }
