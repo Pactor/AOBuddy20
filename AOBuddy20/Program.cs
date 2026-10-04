@@ -2,8 +2,8 @@
 // Solution: AOBuddy20
 // Project: AOBuddy20
 // Filename: Program.cs
-// 
-// Last modified: 2026-09-30 00:19
+//
+// Last modified: 2026-10-04
 // Created:       2026-09-29 23:09
 // 
 // Long live OmniCell and AOBuddy
@@ -226,6 +226,10 @@ internal class Program
         // after login, when the profession is on the wire (BrainBank.EnsureSelected from BotLoop).
         services.AddSingleton<BrainRegistry>();
         services.AddSingleton<BrainBank>();
+        // NANO LIBRARY: the profession's castable nanos (GameData/Profiles/<profession>-nanos.json),
+        // loaded once post-login when the profession is on the wire (NanoLibrary.EnsureLoaded from
+        // BotLoop, next to the brain selection) - the brains' decision material.
+        services.AddSingleton(sp => new NanoLibrary(BaseDir, sp.GetRequiredService<ILogger<NanoLibrary>>()));
         // LOOT BAGS: the designation store (per-character JSON); commands reach it through
         // OwnerChat (tell or POST /command), the monitor sees the flag in /inventory.
         services.AddSingleton<LootBagStore>();

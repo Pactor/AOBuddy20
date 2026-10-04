@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: BotLoop.cs
 //
-// Last modified: 2026-10-01
+// Last modified: 2026-10-04
 // Created:       2026-09-29 23:09
 //
 // Long live OmniCell and AOBuddy
@@ -36,6 +36,7 @@ public sealed class BotLoop
     private readonly AccountInfo _config;
     private readonly ControlArbiter _controlArbiter;
     private readonly BrainBank _brains;
+    private readonly NanoLibrary _nanos;
     private readonly HealController _heal;
     private readonly ILogger<BotLoop> _logger;
     private readonly MissionController _missionController;
@@ -45,7 +46,7 @@ public sealed class BotLoop
     private readonly NavController _navMemory;
     private bool _running;
 
-    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, AccountInfo config, ILogger<BotLoop> logger)
+    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NanoLibrary nanos, NavController navMemory, Awareness awareness, AccountInfo config, ILogger<BotLoop> logger)
     {
         _controlArbiter = controlArbiter;
         _missionController = missionController;
@@ -53,6 +54,7 @@ public sealed class BotLoop
         _sell = sell;
         _heal = heal;
         _brains = brains;
+        _nanos = nanos;
         _navMemory = navMemory;
         _awareness = awareness;
         _config = config;
@@ -115,6 +117,10 @@ public sealed class BotLoop
                 // profession is on the wire. The DI container was built before login, so the bank
                 // resolves them here, post-login, exactly once per process (review.md #12).
                 _brains.EnsureSelected(me);
+
+                // NANO LIBRARY: the profession's castable nanos, loaded once the profession is on
+                // the wire - same wait-for-the-stats posture as the brain selection above it.
+                _nanos.EnsureLoaded(me);
 
                 // The decision chain, in descending ControlPriority: heal (800) - the stims and
                 // rechargers go in before anything else looks at its state; combat (700) and
