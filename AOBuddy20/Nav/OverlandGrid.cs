@@ -46,9 +46,9 @@ public interface IWalkGrid
 ///     suppressed as a routing floor of that cell and the collision floors (the street) are what remains -
 ///     ground routing stays on the ground; elevated walkways connect only where real triangles carry them.
 ///     SLOPES ARE DIRECTIONAL (owner, 2026-09-25): a slope too steep to climb is still walkable going down,
-///     and there is NO fall damage outdoors — but a drop the MaxRise rule refuses is only taken where a
-///     recorded road says so (LearnedGround's drops: the cells of a jump the owner himself walked, both
-///     ends of it).
+///     and there is NO fall damage (owner, 2026-10-04, anywhere in AO) — a drop is a route like any
+///     other, taken wherever it is shorter; LearnedGround's recorded jumps only still price the
+///     climb back UP through them as a last resort.
 ///     THE LEARNED LAYERS (AOBuddy10, ported 2026-10-03): the owner's recorded roads (nav/&lt;pf&gt;.json)
 ///     cost RoadFactor of normal and the server's remembered pull-back spots (snapbacks.json) add up to
 ///     SnapWeight x hits, so the route is planned around yesterday's refusals instead of collecting them
@@ -672,9 +672,10 @@ public sealed class OverlandGrid : IWalkGrid
                 }
 
                 var flat = Movement.Flat(a, b);
-                // A drop is allowed only where the OWNER walked it (his recorded roads), never from the
-                // bot's own walks (2026-09-28: his glitch off a ridge, saved as one of the bot's walks,
-                // let a route drop off it).
+                // A recorded stretch dropping faster than DropGrade is a jump off something (the owner
+                // jumps off ledges by habit): it is not road - the drop itself is free everywhere now
+                // (no fall damage, owner 2026-10-04) - but the cells are marked so the climb back UP
+                // through them is priced as a last resort (DropClimbCost).
                 if (flat > 0.1f && Math.Abs(b.Y - a.Y) / flat > DropGrade)
                 {
                     if (ownerSet.Contains(road))
@@ -1403,18 +1404,12 @@ public sealed class OverlandGrid : IWalkGrid
                     for (int j = 0; j < FloorCount(ncell); j++)
                     {
                         // The one-way rule per floor pair: climbing onto the next floor must stay under
-                        // MaxRise; dropping onto it is free (no fall damage outdoors, owner 2026-09-25).
-                        // NO JUMPING OFF (AOBuddy10, owner 2026-09-27: "no more trying to drop off the top
-                        // of mountain"): a drop the MaxRise rule refuses is taken only where the OWNER
-                        // walked it - a recorded road or jump, BOTH cells on it (a drop onto a road cell
-                        // from anywhere once let the way to a town's entrance go off its ridge).
+                        // MaxRise; dropping onto it is free wherever it is shorter - NO FALL DAMAGE in
+                        // AO, anywhere (owner, 2026-10-04: the old "only where the OWNER walked it"
+                        // gate kept the planner off every ledge with no recorded jump). LearnedGround's
+                        // recorded jumps only still price the climb back UP through them.
                         float rise = FloorH(ncell, j) - fh;
                         if (rise > MaxRise * d)
-                        {
-                            continue;
-                        }
-
-                        if (-rise > MaxRise * d && !(_drop != null && _drop[ncell] && _drop[curCell]))
                         {
                             continue;
                         }

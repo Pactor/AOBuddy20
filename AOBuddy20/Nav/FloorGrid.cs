@@ -21,8 +21,9 @@ namespace AOBuddy20.Nav;
 ///     (walls.bin) blocking at body height. A cell can hold several floors, one above the other; a step goes to
 ///     the floor in the next cell within MaxStep of the one we are on, so the path stays on the level it
 ///     started on and on the platform it is walking - the Grid's middle level is a web of walkways a metre or
-///     two wide over a 33 m drop (2026-09-24). Changing level is not walking: that is a lift beam, which the
-///     route planner treats as an exit. Dropping off an edge is never planned.
+///     two wide over a 33 m drop (2026-09-24). Changing level UP is not walking: that is a lift beam, which
+///     the route planner treats as an exit. Dropping off an edge IS a route like any other - no fall damage
+///     anywhere in AO (owner, 2026-10-04): the fall lands on the topmost floor below the edge.
 ///     Nothing here moves the body. IMMUTABLE after Build/Read: any thread may query.
 /// </summary>
 public sealed class FloorGrid : IWalkGrid
@@ -1066,6 +1067,36 @@ public sealed class FloorGrid : IWalkGrid
     /// <summary>Standable ground at p (a floor within 3 m of p.Y) — the front-ray test for doorway exits.</summary>
     public bool OpenAt(Vector3 p) => FloorAt(Key(p.X, p.Z), p.Y, 3f, null) >= 0;
 
+    // NO FALL DAMAGE anywhere in AO (owner, 2026-10-04): a floor to LAND on below the current one -
+    // the topmost unblocked floor of the cell strictly under the step band (floors ascend, so the
+    // scan from the top finds the first surface a fall would hit). -1 when there is nothing to
+    // stand on beneath (open air, or only the level we are leaving).
+    private int LandingFloor(int k, float y, HashSet<int> extra)
+    {
+        if (k < 0 || (extra != null && extra.Contains(k)) || !_floors.TryGetValue(k, out var fl))
+        {
+            return -1;
+        }
+
+        for (int f = fl.Length - 1; f >= 0; f--)
+        {
+            if (fl[f] < y - _maxStep && !_blocked.Contains((long)k * 8 + f))
+            {
+                return f;
+            }
+        }
+
+        return -1;
+    }
+
+    // The floor a walker takes in cell k from height y: the nearest step, or, none being within
+    // reach, the landing below the edge (see LandingFloor). Climbs stay out of reach.
+    private int StandFloor(int k, float y, HashSet<int> extra)
+    {
+        int f = FloorAt(k, y, _maxStep, extra);
+        return f >= 0 ? f : LandingFloor(k, y, extra);
+    }
+
     /// <summary>
     ///     Walkable ground within tol of y at (x, z)? The outside view of the grid for renderers and
     ///     tools: the same FloorAt verdict the pathfinder walks by (a floor exists there AND no wall,
@@ -1119,7 +1150,8 @@ public sealed class FloorGrid : IWalkGrid
     ///     Can the body walk the STRAIGHT line a->b in the real geometry, the grid's verdict aside?
     ///     The blocked-verdict fallback (owner, 2026-10-03): a plan that found no route may still be
     ///     a straight walk the cells never saw. The line walks when there is floor to stand on every
-    ///     step (each within MaxStep of the one before: no level change, no leaving the platform)
+    ///     step (each within MaxStep of the one before, or a landing below it - no fall damage, so
+    ///     the line may drop off an edge - but no leaving the platform sideways and no climbing)
     ///     and no wall crosses the body band - EXACT segment-edge crossings, so a vertical wall is
     ///     caught. Missions judge by their composed wall triangles; static dungeons by their
     ///     walls.bin (loaded for the grid at build, or from the folder on first need); anything else
@@ -1160,7 +1192,7 @@ public sealed class FloorGrid : IWalkGrid
         {
             double t = (double)s / n;
             int k = Key((float)(a.X + dx * t), (float)(a.Z + dz * t));
-            int f = FloorAt(k, y, _maxStep, null);
+            int f = StandFloor(k, y, null);
             if (f < 0)
             {
                 why = $"no floor {t * len:0.0} m along the line (a hole or a level change)";
@@ -1402,7 +1434,7 @@ public sealed class FloorGrid : IWalkGrid
                     }
 
                     int nk = (j + dj) * _w + i + di;
-                    int f = FloorAt(nk, y, _maxStep, extra);
+                    int f = StandFloor(nk, y, extra);
                     if (f < 0)
                     {
                         continue;
@@ -1529,8 +1561,9 @@ public sealed class FloorGrid : IWalkGrid
         return -1;
     }
 
-    // Walkable in a straight line: every sample (and a body's width either side) has a floor within MaxStep
-    // of the one before it, so the line neither leaves the platform nor changes level.
+    // Walkable in a straight line: every sample (and a body's width either side) has a floor within
+    // MaxStep of the one before it, or a landing below it (no fall damage - the line may drop off
+    // an edge) - so the line neither leaves the platform nor climbs.
     private bool Clear(long n0, long n1, HashSet<int> extra)
     {
         int k0 = (int)(n0 / 8), k1 = (int)(n1 / 8);
@@ -1548,7 +1581,7 @@ public sealed class FloorGrid : IWalkGrid
         for (int s = 1; s <= n; s++)
         {
             float t = s / (float)n, x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t;
-            int f = FloorAt(Idx(x, z), y, _maxStep, extra);
+            int f = StandFloor(Idx(x, z), y, extra);
             if (f < 0)
             {
                 return false;
@@ -1556,7 +1589,7 @@ public sealed class FloorGrid : IWalkGrid
 
             y = _floors[Idx(x, z)][f];
             floors.Add(y);
-            if (FloorAt(Idx(x + px, z + pz), y, _maxStep, extra) < 0 || FloorAt(Idx(x - px, z - pz), y, _maxStep, extra) < 0)
+            if (StandFloor(Idx(x + px, z + pz), y, extra) < 0 || StandFloor(Idx(x - px, z - pz), y, extra) < 0)
             {
                 return false;
             }
