@@ -175,6 +175,10 @@ internal class Program
         // loaded data is immutable from here on.
         Zoning.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         ItemValues.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        // THE NANO LIBRARY (GameData/nanos.ocp, omnicell's content pack): every nano formula,
+        // stats dictionary included - the OnUse heal amounts and the stacking orders the
+        // brains will decide on. Names come from ItemData.bin at query time.
+        NanoLibrary.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         // WHAT WALKING TAUGHT (AOBuddy10, ported 2026-10-03): the owner's recorded roads, the bot's own
         // clean walks and the remembered pull-back spots (LearnedGround), saved routes between fixed
         // objects (RouteCache) and the hostile-mob picture (MobDanger) - the overland planner's memory.
@@ -226,10 +230,6 @@ internal class Program
         // after login, when the profession is on the wire (BrainBank.EnsureSelected from BotLoop).
         services.AddSingleton<BrainRegistry>();
         services.AddSingleton<BrainBank>();
-        // NANO LIBRARY: the profession's castable nanos (GameData/Profiles/<profession>-nanos.json),
-        // loaded once post-login when the profession is on the wire (NanoLibrary.EnsureLoaded from
-        // BotLoop, next to the brain selection) - the brains' decision material.
-        services.AddSingleton(sp => new NanoLibrary(BaseDir, sp.GetRequiredService<ILogger<NanoLibrary>>()));
         // LOOT BAGS: the designation store (per-character JSON); commands reach it through
         // OwnerChat (tell or POST /command), the monitor sees the flag in /inventory.
         services.AddSingleton<LootBagStore>();

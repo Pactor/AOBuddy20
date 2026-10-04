@@ -45,7 +45,7 @@
         <None Update="GameData\ScottyWarps.json">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </None>
-        <None Update="GameData\Profiles\*-nanos.json">
+        <None Update="GameData\nanos.ocp">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </None>
         <None Update="GameData\perks.sql"><CopyToOutputDirectory>Always</CopyToOutputDirectory></None>
