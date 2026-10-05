@@ -147,15 +147,17 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
-    ///     The ordered tells to summon a pet needing <paramref name="reqMc" /> / <paramref name="reqTs" />
-    ///     MC/TS: the NCU buff first, then the SMALLEST safe nano-skill buff that closes the gap from
-    ///     our current (buffed) skills - or the biggest if none closes it (we over-buff for the summon
-    ///     moment, then downshift; see PETBRAIN-DESIGN.md). Empty when the catalog is not loaded.
+    ///     The ordered tells to lift our nano skills by <paramref name="need" />: the NCU buff
+    ///     first, then the SMALLEST safe nano-skill buff closing the gap - or the biggest if none
+    ///     closes it (we over-buff for the summon moment, then downshift; see PETBRAIN-DESIGN.md).
+    ///     The raw-gap entry point: the caller computes the need from whatever skill pair its
+    ///     target gates on (the MP pet lines gap on BioMet (128) / MatMet (127) + TS, not only
+    ///     MC/TS). Empty when the catalog is not loaded.
     /// </summary>
-    public List<string> PlanForPetSummon(LocalPlayer me, int reqMc, int reqTs)
+    public List<string> PlanForSkillGap(LocalPlayer me, int need)
     {
         var tells = new List<string>();
-        if (!Loaded || me == null)
+        if (!Loaded || me == null || need <= 0)
         {
             return tells;
         }
@@ -165,10 +167,6 @@ public sealed class BuffCatalog
         {
             tells.Add(ncu);
         }
-
-        var curMc = me.TryGetStat(Stat.MaterialCreation, out var mc) ? mc : 0;
-        var curTs = me.TryGetStat(Stat.SpaceTime, out var ts) ? ts : 0;
-        var need = Math.Max(Math.Max(0, reqMc - curMc), Math.Max(0, reqTs - curTs));
 
         var cands = SafeNanoSkillBuffs();
         if (cands.Count > 0)
@@ -183,5 +181,22 @@ public sealed class BuffCatalog
         }
 
         return tells;
+    }
+
+    /// <summary>
+    ///     The ordered tells to summon a pet needing <paramref name="reqMc" /> / <paramref name="reqTs" />
+    ///     MC/TS: the gap is read from our current (buffed) MC and TS.
+    /// </summary>
+    public List<string> PlanForPetSummon(LocalPlayer me, int reqMc, int reqTs)
+    {
+        if (!Loaded || me == null)
+        {
+            return new List<string>();
+        }
+
+        var curMc = me.TryGetStat(Stat.MaterialCreation, out var mc) ? mc : 0;
+        var curTs = me.TryGetStat(Stat.SpaceTime, out var ts) ? ts : 0;
+        var need = Math.Max(Math.Max(0, reqMc - curMc), Math.Max(0, reqTs - curTs));
+        return PlanForSkillGap(me, need);
     }
 }
