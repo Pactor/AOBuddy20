@@ -253,6 +253,25 @@ attack-target should track our combat. **Decision: `ControlPriority.Pet` just be
 6. **MP** (three wire-labelled role slots) and the **charm** classes (Crat / Trader / Adv)
    as further subclasses on the same base.
 
+## Combat mode — the player's choice (owner, 2026-10-05)
+
+Fighting alongside the pets is NOT a fixed rule; it is the player's choice, informed by his
+profession template. Two modes:
+
+- **Pet-tank / passive** (what the hunt work built): the bot stays put and does NOT attack;
+  the pets fight, and the bot swings back only when something aggros it. For max-level or
+  dangerous mobs the player could not survive in melee - "that is why we have the pets."
+- **Fight-alongside**: the bot attacks WITH the pets (e.g. an Atrox MP on 2h blunt, the heal
+  pet keeping him up), for content he can handle himself.
+
+It is a TOGGLE, defaulting sensibly off the template (does the character have a weapon /
+melee skills) but ultimately the owner's call - never auto-forced. Architecturally the bot's
+own weapon is the `CombatBrain` (still dormant) and the pets are the `PetBrain`; they COMPOSE
+(both priority-gated ticks). The toggle decides whether `CombatBrain` is **active** (the bot
+swings) or **defensive-only** (the bot swings back only when a mob is on it - the current
+pet-tank behaviour). The hunt/pet work is the pet half; lighting up `CombatBrain` with this
+toggle is the bot-melee half (a later step).
+
 ## TODO — come back to these
 
 - **4a.2-full (the full buff optimizer):** proper RECEIVER-requirement gating (level/expansion
