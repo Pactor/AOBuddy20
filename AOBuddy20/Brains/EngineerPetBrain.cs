@@ -10,14 +10,15 @@
 // ---------------------------------------------------------------------------------------
 
 using System.IO;
+using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
+using AOBuddy20.PacketConsumers;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 using Serilog.Events;
-using SmokeLounge.AOtomation.Messaging.Messages.N3Messages; // PetCommand
 
 namespace AOBuddy20.Brains;
 
@@ -62,14 +63,19 @@ public sealed class EngineerPetBrain : PetBrain
     private readonly Dictionary<(int, int), double> _shellUsedAt = new(); // (shellId, slotInstance) -> last used (_clock)
     private bool _shellPending;
     private int _shellWarned;
-    private int _commandedInstance;  // the pet instance we last sent Follow to (0 = none)
 
     private readonly HashSet<int> _robotSummonIds = new();
     private bool _warnedNoSummonData;
 
-    public EngineerPetBrain(ILogger<EngineerPetBrain> logger, ControlArbiter controlArbiter)
+    private readonly HuntController _hunt;
+    private readonly Awareness _awareness;
+
+    public EngineerPetBrain(ILogger<EngineerPetBrain> logger, ControlArbiter controlArbiter,
+        HuntController hunt, Awareness awareness)
         : base(logger, controlArbiter)
     {
+        _hunt = hunt;
+        _awareness = awareness;
         LoadRobotSummonIds();
     }
 
@@ -78,9 +84,9 @@ public sealed class EngineerPetBrain : PetBrain
         var attack = AttackPet(me);
         if (attack != null)
         {
-            // The robot is up: keep it commanded, and let the chain continue (overlay, returns false).
-            EnsureCommanded(me, attack);
-            return true; // claim Tasks.Pet while a robot is up (informational); never holds the body
+            // The robot is up: drive it onto the hunt target (hunt off / no target -> Follow).
+            DriveAttack(me, attack, _hunt.Tick(me, _awareness, dt));
+            return true;
         }
 
         // No robot: work on summoning one. Claim the task while establishing it so the bot gets its
@@ -100,25 +106,6 @@ public sealed class EngineerPetBrain : PetBrain
 
         TrySummon(me);
         return true;
-    }
-
-    // ---- Command ----------------------------------------------------------------------------
-
-    /// <summary>
-    ///     On newly acquiring the robot, put it on Follow once (established and commanded). Target
-    ///     assignment / hunting is a later step; a conservative Follow keeps it from pulling trains
-    ///     on its own ([[outside-never-fight]]).
-    /// </summary>
-    private void EnsureCommanded(LocalPlayer me, NpcChar attack)
-    {
-        if (_commandedInstance == attack.Identity.Instance)
-        {
-            return;
-        }
-
-        _commandedInstance = attack.Identity.Instance;
-        Command(me, PetCommand.Follow);
-        _logger.LogInformation($"PET: robot '{attack.Name}'#{attack.Identity.Instance} is up - on Follow.");
     }
 
     // ---- Summon -----------------------------------------------------------------------------

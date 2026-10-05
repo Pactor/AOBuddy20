@@ -130,6 +130,59 @@ public abstract class PetBrain
         me.CommandPets(command, pets);
     }
 
+    // Pet attack is TARGET-BASED (AOBuddy10 PetController.EngageTarget): set our target to the mob,
+    // then CommandPets(Attack) naming the attack pets. Issue it ONCE PER MOB (re-asserting resets the
+    // pet's swing timer), re-sent only when the target changes - or as a retry when a pet still isn't
+    // on it a few seconds later (a pet can miss the first order). Stand down to Follow when there is
+    // no target (and once on a freshly-summoned pet, to establish it).
+    private const double AttackRetrySec = 3.0;
+    private Identity? _attackTarget;
+    private double _attackSentAt;
+    private int _commandedInstance; // the attack-pet instance we last issued a command to (0 = none)
+
+    /// <summary>
+    ///     Drive the attack pet: onto <paramref name="target" /> (attack-once + retry), or Follow when
+    ///     <paramref name="target" /> is null. <paramref name="attackPet" /> is the current attack pet
+    ///     (its instance is tracked so a re-summoned pet is re-established).
+    /// </summary>
+    protected void DriveAttack(LocalPlayer me, NpcChar attackPet, SimpleChar? target)
+    {
+        var attackers = me.Pets.Where(p => p.Role == PetType.Attack).Select(p => p.Identity).ToList();
+
+        if (target != null && attackers.Count > 0)
+        {
+            var changed = _attackTarget != target.Identity;
+            var retry = !changed && _clock - _attackSentAt >= AttackRetrySec
+                        && attackers.Any(a => !(DynelManager.Find(a, out NpcChar pet)
+                                                && pet.FightingIdentity.HasValue
+                                                && pet.FightingIdentity.Value == target.Identity));
+            if (changed || retry)
+            {
+                Targeting.SetTarget(target.Identity);
+                Command(me, PetCommand.Attack, attackers);
+                _attackTarget = target.Identity;
+                _attackSentAt = _clock;
+                _commandedInstance = attackPet.Identity.Instance;
+                _logger.LogInformation($"PET: attack '{target.Name}'{(retry ? " (again, not on it yet)" : "")}.");
+            }
+
+            return;
+        }
+
+        // No target: Follow, when we were just attacking (stand down) or this attack pet is new.
+        var stoodDown = _attackTarget != null;
+        var newPet = _commandedInstance != attackPet.Identity.Instance;
+        if (stoodDown || newPet)
+        {
+            _attackTarget = null;
+            _commandedInstance = attackPet.Identity.Instance;
+            Command(me, PetCommand.Follow);
+            _logger.LogInformation(stoodDown
+                ? "PET: no target - pets on Follow."
+                : $"PET: robot '{attackPet.Name}'#{attackPet.Identity.Instance} is up - on Follow.");
+        }
+    }
+
     // ---- ENGINE: the over-equip (OE) math ---------------------------------------------------
 
     /// <summary>
