@@ -1,0 +1,2392 @@
+{
+  "profile": "Keeper castable nanos (for AOBuddy10 bot decision-making)",
+  "profession": {
+    "id": 14,
+    "name": "Keeper"
+  },
+  "generatedUtc": "2026-10-04T17:23:18Z",
+  "dataSource": {
+    "nanoData": "E:\\Funcom\\OmniCell\\OmniCell\\Datafiles\\nanos.ocp (OMNICELL-CONTENT v3 pack, client 18.8.50_EP1 extraction) loaded via OmniCell.Core NanoLoader.CacheAllNanos",
+    "itemNames": "E:\\Funcom\\attic\\extracted-client-data\\itemnames.sql",
+    "stat/nanoLineEnums": "E:\\Funcom\\AOBuddy10\\AOSharp.Common\\GameData\\Stat.cs, NanoEnums.cs",
+    "extractor": "E:\\Funcom\\AOBuddy10\\tools\\mp-nano-extractor (net10)",
+    "nanosInData": 10965
+  },
+  "castabilityCriterion": "A nano is KPR-castable when one of its cast Actions (OmniCell.Enums.ActionType.ToUse=3) carries an Operator.EqualTo requirement on Profession(stat 60)==14 OR VisualProfession(stat 368)==14. All matches use EqualTo. VisualProfession is how most older profession nanos are locked; in this data 111 gate via Profession(60) and 3 via VisualProfession(368).",
+  "statIds": {
+    "Level": 54,
+    "Profession": 60,
+    "VisualProfession": 368,
+    "NanoStrain": 75,
+    "MaterialCreation": 130,
+    "MaterialMetamorphosis": 127,
+    "BiologicalMetamorphosis": 128,
+    "PsychologicalModification": 129,
+    "SensoryImprovement": 122,
+    "SpaceTime": 131
+  },
+  "fieldNotes": {
+    "minLevel": "Character Level requirement read from the ToUse action (stat 54). 0 = no explicit level requirement; the real gate is the nano-skill requirement in castReqs.",
+    "castReqs": "The full ToUse action requirement list, stat names from Stat.cs. '>' means the CellAO GreaterThan operator (stat >= value at runtime).",
+    "effectSummary": "Derived from the nano's Events->Functions in nanos.ocp. Modify shows 'stat +/-amount'; SummonPet shows the pet template arg; Hit shows [attackType,min,max,...]; other function types shown as Name[rawArgs].",
+    "nanoLine": "AOSharp NanoLine enum name for the nano's NanoStrain (stat 75)."
+  },
+  "totalCount": 114,
+  "categoryCounts": {
+    "Auras - Team (friendly)": 52,
+    "Self / Team Buffs": 33,
+    "Team Casts (friendly)": 6,
+    "Root": 1,
+    "Misc / Utility": 4,
+    "Attack Rating Buffs": 1,
+    "Reflect / Absorb Shields": 5,
+    "Weapon & Special Attack Buffs": 12
+  },
+  "categories": {
+    "Auras - Team (friendly)": [
+      {
+        "id": 210530,
+        "name": "Ambient Alleviation",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 143",
+          "BiologicalMetamorphosis > 143",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210521] => 'Ambient Alleviation' [strain 0 NOSTACKING] {Hit[27,53,53,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210707,
+        "name": "Enervate Bonds",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 219",
+          "BiologicalMetamorphosis > 219",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210701] => 'Enervate Bonds' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210701] => 'Enervate Bonds' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,6]",
+          "ResistNanoStrain[146,6]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210671,
+        "name": "Imminence of Scrimmage",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 169",
+          "BiologicalMetamorphosis > 169",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210665] => 'Imminence of Scrimmage' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +3; Modify AddAllDef +16}",
+          "TeamCastNano[210665] => 'Imminence of Scrimmage' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +3; Modify AddAllDef +16}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210613,
+        "name": "Vengeance of the Steadfast",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 189",
+          "BiologicalMetamorphosis > 189",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210606] => 'Vengeance of the Steadfast' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +22; Modify ProjectileDamageModifier +22; Modify EnergyDamageModifier +22; Modify FireDamageModifier +22; Modify ColdDamageModifier +22; Modify ChemicalDamageModifier +22; Modify PoisonDamageModifier +22; Modify RadiationDamageModifier +22}",
+          "TeamCastNano[210606] => 'Vengeance of the Steadfast' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +22; Modify ProjectileDamageModifier +22; Modify EnergyDamageModifier +22; Modify FireDamageModifier +22; Modify ColdDamageModifier +22; Modify ChemicalDamageModifier +22; Modify PoisonDamageModifier +22; Modify RadiationDamageModifier +22}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210532,
+        "name": "Ambient Rehabilitation",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 334",
+          "BiologicalMetamorphosis > 334",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210522] => 'Ambient Rehabilitation' [strain 0 NOSTACKING] {Hit[27,143,143,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210689,
+        "name": "Barrier of the Loyal",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 365",
+          "BiologicalMetamorphosis > 365",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210683] => 'Barrier of the Loyal' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +1; Modify ReflectEnergyAC +1; Modify ReflectProjectileAC +1; Modify ReflectFireAC +1; Modify ReflectColdAC +1; Modify ReflectChemicalAC +1; Modify ReflectPoisonAC +1; Modify ReflectRadiationAC +1}",
+          "TeamCastNano[210683] => 'Barrier of the Loyal' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +1; Modify ReflectEnergyAC +1; Modify ReflectProjectileAC +1; Modify ReflectFireAC +1; Modify ReflectColdAC +1; Modify ReflectChemicalAC +1; Modify ReflectPoisonAC +1; Modify ReflectRadiationAC +1}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210709,
+        "name": "Enervate Constraints",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 396",
+          "BiologicalMetamorphosis > 396",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210702] => 'Enervate Constraints' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210702] => 'Enervate Constraints' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,9]",
+          "ResistNanoStrain[146,9]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210673,
+        "name": "Imminence of Conflict",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 352",
+          "BiologicalMetamorphosis > 352",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210666] => 'Imminence of Conflict' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +7; Modify AddAllDef +29}",
+          "TeamCastNano[210666] => 'Imminence of Conflict' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +7; Modify AddAllDef +29}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210593,
+        "name": "Tone of Purity",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 315",
+          "BiologicalMetamorphosis > 315",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210571] => 'Tone of Purity' [strain 0 NOSTACKING] {Hit[214,105,105,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210615,
+        "name": "Vengeance of the Resolute",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 402",
+          "BiologicalMetamorphosis > 402",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210607] => 'Vengeance of the Resolute' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +38; Modify ProjectileDamageModifier +38; Modify EnergyDamageModifier +38; Modify FireDamageModifier +38; Modify ColdDamageModifier +38; Modify ChemicalDamageModifier +38; Modify PoisonDamageModifier +38; Modify RadiationDamageModifier +38}",
+          "TeamCastNano[210607] => 'Vengeance of the Resolute' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +38; Modify ProjectileDamageModifier +38; Modify EnergyDamageModifier +38; Modify FireDamageModifier +38; Modify ColdDamageModifier +38; Modify ChemicalDamageModifier +38; Modify PoisonDamageModifier +38; Modify RadiationDamageModifier +38}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210534,
+        "name": "Ambient Rejuvenation",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 535",
+          "BiologicalMetamorphosis > 535",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210523] => 'Ambient Rejuvenation' [strain 0 NOSTACKING] {Hit[27,243,243,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210691,
+        "name": "Barrier of the Staunch",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 496",
+          "BiologicalMetamorphosis > 496",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210684] => 'Barrier of the Staunch' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +2; Modify ReflectEnergyAC +2; Modify ReflectProjectileAC +2; Modify ReflectFireAC +2; Modify ReflectColdAC +2; Modify ReflectChemicalAC +2; Modify ReflectPoisonAC +2; Modify ReflectRadiationAC +2}",
+          "TeamCastNano[210684] => 'Barrier of the Staunch' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +2; Modify ReflectEnergyAC +2; Modify ReflectProjectileAC +2; Modify ReflectFireAC +2; Modify ReflectColdAC +2; Modify ReflectChemicalAC +2; Modify ReflectPoisonAC +2; Modify ReflectRadiationAC +2}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210675,
+        "name": "Imminence of Battle",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 490",
+          "BiologicalMetamorphosis > 490",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210667] => 'Imminence of Battle' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +11; Modify AddAllDef +35}",
+          "TeamCastNano[210667] => 'Imminence of Battle' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +11; Modify AddAllDef +35}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210595,
+        "name": "Tone of Tranquility",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 521",
+          "BiologicalMetamorphosis > 521",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210572] => 'Tone of Tranquility' [strain 0 NOSTACKING] {Hit[214,177,177,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210693,
+        "name": "Barrier of the Devoted",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 605",
+          "BiologicalMetamorphosis > 605",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210685] => 'Barrier of the Devoted' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +3; Modify ReflectEnergyAC +3; Modify ReflectProjectileAC +3; Modify ReflectFireAC +3; Modify ReflectColdAC +3; Modify ReflectChemicalAC +3; Modify ReflectPoisonAC +3; Modify ReflectRadiationAC +3}",
+          "TeamCastNano[210685] => 'Barrier of the Devoted' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +3; Modify ReflectEnergyAC +3; Modify ReflectProjectileAC +3; Modify ReflectFireAC +3; Modify ReflectColdAC +3; Modify ReflectChemicalAC +3; Modify ReflectPoisonAC +3; Modify ReflectRadiationAC +3}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210711,
+        "name": "Enervate Impediments",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 629",
+          "BiologicalMetamorphosis > 629",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210703] => 'Enervate Impediments' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210703] => 'Enervate Impediments' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,12]",
+          "ResistNanoStrain[146,12]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210677,
+        "name": "Imminence of Havoc",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 685",
+          "BiologicalMetamorphosis > 685",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210668] => 'Imminence of Havoc' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +20; Modify AddAllDef +55}",
+          "TeamCastNano[210668] => 'Imminence of Havoc' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +20; Modify AddAllDef +55}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210617,
+        "name": "Vengeance of the Virtuous",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 668",
+          "BiologicalMetamorphosis > 668",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210608] => 'Vengeance of the Virtuous' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +51; Modify ProjectileDamageModifier +51; Modify EnergyDamageModifier +51; Modify FireDamageModifier +51; Modify ColdDamageModifier +51; Modify ChemicalDamageModifier +51; Modify PoisonDamageModifier +51; Modify RadiationDamageModifier +51}",
+          "TeamCastNano[210608] => 'Vengeance of the Virtuous' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +51; Modify ProjectileDamageModifier +51; Modify EnergyDamageModifier +51; Modify FireDamageModifier +51; Modify ColdDamageModifier +51; Modify ChemicalDamageModifier +51; Modify PoisonDamageModifier +51; Modify RadiationDamageModifier +51}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210536,
+        "name": "Adaptive Ambient Regeneration",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 125,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 743",
+          "BiologicalMetamorphosis > 743",
+          "Level > 124",
+          "Specialization op22 2"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302366] => 'Ambient Regeneration' [strain 0 NOSTACKING] {TeamCastNano[300491]; TeamCastNano[300492]; TeamCastNano[300493]; TeamCastNano[300494]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210597,
+        "name": "Adaptive Tone of Harmony",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 125,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 749",
+          "BiologicalMetamorphosis > 749",
+          "Level > 124",
+          "Specialization op22 2"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302391] => 'Tone of Harmony' [strain 0 NOSTACKING] {TeamCastNano[300477]; TeamCastNano[300478]; TeamCastNano[300479]; TeamCastNano[300480]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210695,
+        "name": "Barrier of the Veracious",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 125,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 750",
+          "BiologicalMetamorphosis > 750",
+          "Level > 124"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210686] => 'Barrier of the Veracious' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +4; Modify ReflectEnergyAC +4; Modify ReflectProjectileAC +4; Modify ReflectFireAC +4; Modify ReflectColdAC +4; Modify ReflectChemicalAC +4; Modify ReflectPoisonAC +4; Modify ReflectRadiationAC +4}",
+          "TeamCastNano[210686] => 'Barrier of the Veracious' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +4; Modify ReflectEnergyAC +4; Modify ReflectProjectileAC +4; Modify ReflectFireAC +4; Modify ReflectColdAC +4; Modify ReflectChemicalAC +4; Modify ReflectPoisonAC +4; Modify ReflectRadiationAC +4}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210713,
+        "name": "Enervate Shackles",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 135,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 780",
+          "BiologicalMetamorphosis > 780",
+          "Level > 134"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210704] => 'Enervate Shackles' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210704] => 'Enervate Shackles' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,15]",
+          "ResistNanoStrain[146,15]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210679,
+        "name": "Imminence of Warfare",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 145,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 801",
+          "BiologicalMetamorphosis > 801",
+          "Level > 144"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210669] => 'Imminence of Warfare' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +32; Modify AddAllDef +90}",
+          "TeamCastNano[210669] => 'Imminence of Warfare' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +32; Modify AddAllDef +90}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210599,
+        "name": "Tone of Rapport",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 145,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 809",
+          "BiologicalMetamorphosis > 809",
+          "Level > 144"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210574] => 'Tone of Rapport' [strain 0 NOSTACKING] {Hit[214,303,303,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210538,
+        "name": "Ambient Regeneration",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 823",
+          "BiologicalMetamorphosis > 823",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210525] => 'Ambient Regeneration' [strain 0 NOSTACKING] {Hit[27,494,494,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210715,
+        "name": "Enervate Bindings",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 842",
+          "BiologicalMetamorphosis > 842",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210705] => 'Enervate Bindings' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210705] => 'Enervate Bindings' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,20]",
+          "ResistNanoStrain[146,20]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223743,
+        "name": "Vengeance of the Blessed",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 832",
+          "BiologicalMetamorphosis > 832",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[223741] => 'Vengeance of the Blessed' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +73; Modify ProjectileDamageModifier +73; Modify EnergyDamageModifier +73; Modify FireDamageModifier +73; Modify ColdDamageModifier +73; Modify ChemicalDamageModifier +73; Modify PoisonDamageModifier +73; Modify RadiationDamageModifier +73}",
+          "TeamCastNano[223741] => 'Vengeance of the Blessed' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +73; Modify ProjectileDamageModifier +73; Modify EnergyDamageModifier +73; Modify FireDamageModifier +73; Modify ColdDamageModifier +73; Modify ChemicalDamageModifier +73; Modify PoisonDamageModifier +73; Modify RadiationDamageModifier +73}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210697,
+        "name": "Barrier of the Resolute",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 165,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 858",
+          "BiologicalMetamorphosis > 858",
+          "Level > 164"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210687] => 'Barrier of the Resolute' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +5; Modify ReflectEnergyAC +5; Modify ReflectProjectileAC +5; Modify ReflectFireAC +5; Modify ReflectColdAC +5; Modify ReflectChemicalAC +5; Modify ReflectPoisonAC +5; Modify ReflectRadiationAC +5}",
+          "TeamCastNano[210687] => 'Barrier of the Resolute' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +5; Modify ReflectEnergyAC +5; Modify ReflectProjectileAC +5; Modify ReflectFireAC +5; Modify ReflectColdAC +5; Modify ReflectChemicalAC +5; Modify ReflectPoisonAC +5; Modify ReflectRadiationAC +5}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210540,
+        "name": "Ambient Amelioration",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 175,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 901",
+          "BiologicalMetamorphosis > 901",
+          "Level > 174"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210526] => 'Ambient Amelioration' [strain 0 NOSTACKING] {Hit[27,597,597,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 224070,
+        "name": "Imminence of Bloodshed",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 175,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 919",
+          "BiologicalMetamorphosis > 919",
+          "Level > 174"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[224069] => 'Imminence of Bloodshed' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +50; Modify AddAllDef +120}",
+          "TeamCastNano[224069] => 'Imminence of Bloodshed' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +50; Modify AddAllDef +120}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210601,
+        "name": "Tone of Benevolence",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 175,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 894",
+          "BiologicalMetamorphosis > 894",
+          "Level > 174"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210575] => 'Tone of Benevolence' [strain 0 NOSTACKING] {Hit[214,376,376,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210542,
+        "name": "Ambient Revitalization",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 185,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 928",
+          "BiologicalMetamorphosis > 928",
+          "Level > 184"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210527] => 'Ambient Revitalization' [strain 0 NOSTACKING] {Hit[27,679,679,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210717,
+        "name": "Enervate Imprisonment",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 185,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 944",
+          "BiologicalMetamorphosis > 944",
+          "Level > 184"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210706] => 'Enervate Imprisonment' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[210706] => 'Enervate Imprisonment' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,25]",
+          "ResistNanoStrain[146,25]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210603,
+        "name": "Tone of Unity",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 185,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 942",
+          "BiologicalMetamorphosis > 942",
+          "Level > 184"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210576] => 'Tone of Unity' [strain 0 NOSTACKING] {Hit[214,470,470,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223745,
+        "name": "Vengeance of the Holy",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 185,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 939",
+          "BiologicalMetamorphosis > 939",
+          "Level > 184"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[223742] => 'Vengeance of the Holy' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +98; Modify ProjectileDamageModifier +98; Modify EnergyDamageModifier +98; Modify FireDamageModifier +98; Modify ColdDamageModifier +98; Modify ChemicalDamageModifier +98; Modify PoisonDamageModifier +98; Modify RadiationDamageModifier +98}",
+          "TeamCastNano[223742] => 'Vengeance of the Holy' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +98; Modify ProjectileDamageModifier +98; Modify EnergyDamageModifier +98; Modify FireDamageModifier +98; Modify ColdDamageModifier +98; Modify ChemicalDamageModifier +98; Modify PoisonDamageModifier +98; Modify RadiationDamageModifier +98}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210699,
+        "name": "Barrier of the Righteous",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 195,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 954",
+          "BiologicalMetamorphosis > 954",
+          "Level > 194"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210688] => 'Barrier of the Righteous' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +7; Modify ReflectEnergyAC +7; Modify ReflectProjectileAC +7; Modify ReflectFireAC +7; Modify ReflectColdAC +7; Modify ReflectChemicalAC +7; Modify ReflectPoisonAC +7; Modify ReflectRadiationAC +7}",
+          "TeamCastNano[210688] => 'Barrier of the Righteous' [strain 534 KeeperReflectAura_Team] {Modify ReflectMeleeAC +7; Modify ReflectEnergyAC +7; Modify ReflectProjectileAC +7; Modify ReflectFireAC +7; Modify ReflectColdAC +7; Modify ReflectChemicalAC +7; Modify ReflectPoisonAC +7; Modify ReflectRadiationAC +7}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223024,
+        "name": "Adaptive Ambient Renaissance",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 201,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1000",
+          "BiologicalMetamorphosis > 1000",
+          "Level > 200",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302367] => 'Ambient Renaissance' [strain 0 NOSTACKING] {TeamCastNano[300456]; TeamCastNano[300489]; TeamCastNano[300490]; TeamCastNano[300457]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 224073,
+        "name": "Adaptive Tone of Serenity",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 201,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1050",
+          "BiologicalMetamorphosis > 1050",
+          "Level > 200",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302390] => 'Tone of Serenity' [strain 0 NOSTACKING] {TeamCastNano[300476]; TeamCastNano[300475]; TeamCastNano[300473]; TeamCastNano[300474]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223030,
+        "name": "Imminence of Slaughter",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 201,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1089",
+          "BiologicalMetamorphosis > 1089",
+          "Level > 200",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[223019] => 'Imminence of Slaughter' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +70; Modify AddAllDef +150}",
+          "TeamCastNano[223019] => 'Imminence of Slaughter' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +70; Modify AddAllDef +150}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210619,
+        "name": "Vengeance of the Pure",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 203,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1158",
+          "BiologicalMetamorphosis > 1158",
+          "Level > 202",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210609] => 'Vengeance of the Pure' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +114; Modify ProjectileDamageModifier +114; Modify EnergyDamageModifier +114; Modify FireDamageModifier +114; Modify ColdDamageModifier +114; Modify ChemicalDamageModifier +114; Modify PoisonDamageModifier +114; Modify RadiationDamageModifier +114}",
+          "TeamCastNano[210609] => 'Vengeance of the Pure' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +114; Modify ProjectileDamageModifier +114; Modify EnergyDamageModifier +114; Modify FireDamageModifier +114; Modify ColdDamageModifier +114; Modify ChemicalDamageModifier +114; Modify PoisonDamageModifier +114; Modify RadiationDamageModifier +114}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210681,
+        "name": "Imminence of Carnage",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 213,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1208",
+          "BiologicalMetamorphosis > 1205",
+          "Level > 212",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210670] => 'Imminence of Carnage' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +90; Modify AddAllDef +180}",
+          "TeamCastNano[210670] => 'Imminence of Carnage' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +90; Modify AddAllDef +180}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210621,
+        "name": "Vengeance of the Immaculate",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 214,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1232",
+          "BiologicalMetamorphosis > 1235",
+          "Level > 213",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210610] => 'Vengeance of the Immaculate' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +130; Modify ProjectileDamageModifier +130; Modify EnergyDamageModifier +130; Modify FireDamageModifier +130; Modify ColdDamageModifier +130; Modify ChemicalDamageModifier +130; Modify PoisonDamageModifier +130; Modify RadiationDamageModifier +130}",
+          "TeamCastNano[210610] => 'Vengeance of the Immaculate' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +130; Modify ProjectileDamageModifier +130; Modify EnergyDamageModifier +130; Modify FireDamageModifier +130; Modify ColdDamageModifier +130; Modify ChemicalDamageModifier +130; Modify PoisonDamageModifier +130; Modify RadiationDamageModifier +130}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223028,
+        "name": "Tone of Bliss",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 215,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1260",
+          "BiologicalMetamorphosis > 1263",
+          "Level > 214",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[223018] => 'Tone of Bliss' [strain 0 NOSTACKING] {Hit[214,576,576,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223026,
+        "name": "Ambient Invigoration",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 216,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1288",
+          "BiologicalMetamorphosis > 1291",
+          "Level > 215",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[223017] => 'Ambient Invigoration' [strain 0 NOSTACKING] {Hit[27,843,843,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 273362,
+        "name": "Adaptive Ambient Renewal",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1399",
+          "BiologicalMetamorphosis > 1399",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302368] => 'Ambient Renewal' [strain 0 NOSTACKING] {TeamCastNano[300485]; TeamCastNano[300486]; TeamCastNano[300487]; TeamCastNano[300488]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210528,
+        "name": "Adaptive Ambient Restoration",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 9",
+          "BiologicalMetamorphosis > 9"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302365] => 'Ambient Restoration' [strain 0 NOSTACKING] {TeamCastNano[300495]; TeamCastNano[300496]; TeamCastNano[300497]; TeamCastNano[300498]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210589,
+        "name": "Adaptive Tone of Clarity",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 19",
+          "BiologicalMetamorphosis > 19"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[302392] => 'Tone of Clarity' [strain 0 NOSTACKING] {TeamCastNano[300481]; TeamCastNano[300482]; TeamCastNano[300483]; TeamCastNano[300484]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 275837,
+        "name": "Imminence of Extermination",
+        "nanoStrain": 528,
+        "nanoLine": "KeeperAura_Absorb_Reflect_AMSBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1473",
+          "BiologicalMetamorphosis > 1473",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[275836] => 'Imminence of Extermination' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +120; Modify AddAllDef +210}",
+          "TeamCastNano[275836] => 'Imminence of Extermination' [strain 533 KeeperAMS_DMSAura_Team] {Modify AddAllOff +120; Modify AddAllDef +210}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 270795,
+        "name": "Improved Enervate Imprisonment",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1473",
+          "BiologicalMetamorphosis > 1473",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[270796] => 'Improved Enervate Imprisonment' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "TeamCastNano[270796] => 'Improved Enervate Imprisonment' [strain 536 KeeperSnareReductionAura_Team] {RemoveNanoStrain[145]; RemoveNanoStrain[146]}",
+          "ResistNanoStrain[145,35]",
+          "ResistNanoStrain[146,35]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 273359,
+        "name": "Improved Vengeance of the Immaculate",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1473",
+          "BiologicalMetamorphosis > 1473",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[273360] => 'Improved Vengeance of the Immaculate' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +150; Modify ProjectileDamageModifier +150; Modify EnergyDamageModifier +150; Modify FireDamageModifier +150; Modify ColdDamageModifier +150; Modify ChemicalDamageModifier +150; Modify PoisonDamageModifier +150; Modify RadiationDamageModifier +150}",
+          "TeamCastNano[273360] => 'Improved Vengeance of the Immaculate' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +150; Modify ProjectileDamageModifier +150; Modify EnergyDamageModifier +150; Modify FireDamageModifier +150; Modify ColdDamageModifier +150; Modify ChemicalDamageModifier +150; Modify PoisonDamageModifier +150; Modify RadiationDamageModifier +150}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210591,
+        "name": "Tone of Accord",
+        "nanoStrain": 527,
+        "nanoLine": "KeeperAura_HPandNPHeal",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 133",
+          "BiologicalMetamorphosis > 133"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210570] => 'Tone of Accord' [strain 0 NOSTACKING] {Hit[214,42,42,0]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210611,
+        "name": "Vengeance of the Loyal",
+        "nanoStrain": 529,
+        "nanoLine": "KeeperAura_Damage_SnareReductionBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 50",
+          "BiologicalMetamorphosis > 50"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210605] => 'Vengeance of the Loyal' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +10; Modify ProjectileDamageModifier +10; Modify EnergyDamageModifier +10; Modify FireDamageModifier +10; Modify ColdDamageModifier +10; Modify ChemicalDamageModifier +10; Modify PoisonDamageModifier +10; Modify RadiationDamageModifier +10}",
+          "TeamCastNano[210605] => 'Vengeance of the Loyal' [strain 535 KeeperDamageAura_Team] {Modify MeleeDamageModifier +10; Modify ProjectileDamageModifier +10; Modify EnergyDamageModifier +10; Modify FireDamageModifier +10; Modify ColdDamageModifier +10; Modify ChemicalDamageModifier +10; Modify PoisonDamageModifier +10; Modify RadiationDamageModifier +10}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Self / Team Buffs": [
+      {
+        "id": 210301,
+        "name": "Decision Maker",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 254",
+          "SensoryImprovement > 254",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify MeleeEnergy +40",
+          "Modify Skill2hEdged +54"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211164,
+        "name": "Sidestep",
+        "nanoStrain": 545,
+        "nanoLine": "KeeperEvade_Dodge_DuckBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 214",
+          "SensoryImprovement > 214",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify EvadeClsC +50",
+          "Modify DodgeRanged +25",
+          "Modify DuckExp +25"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210486,
+        "name": "Honored Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 379",
+          "BiologicalMetamorphosis > 340",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,13]",
+          "ChangeVariable[553,210479]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211158,
+        "name": "Transfuse Vigor",
+        "nanoStrain": 539,
+        "nanoLine": "KeeperStr_Stam_AgiBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 296",
+          "SensoryImprovement > 296",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Strength +12",
+          "Modify Stamina +12",
+          "Modify Agility +6"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210488,
+        "name": "Exalted Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 513",
+          "BiologicalMetamorphosis > 473",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,13]",
+          "ChangeVariable[553,210480]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210303,
+        "name": "Judgement Bringer",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 467",
+          "SensoryImprovement > 467",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Skill2hEdged +85",
+          "Modify MeleeEnergy +65"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211166,
+        "name": "Quicken Reflexes",
+        "nanoStrain": 545,
+        "nanoLine": "KeeperEvade_Dodge_DuckBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 450",
+          "SensoryImprovement > 450",
+          "Level > 74"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify EvadeClsC +80",
+          "Modify DodgeRanged +40",
+          "Modify DuckExp +40"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210500,
+        "name": "Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 514",
+          "BiologicalMetamorphosis > 462",
+          "Level > 74",
+          "Specialization op22 1"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,15]",
+          "ChangeVariable[553,210496]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211160,
+        "name": "A Keeper's Physique",
+        "nanoStrain": 539,
+        "nanoLine": "KeeperStr_Stam_AgiBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 673",
+          "SensoryImprovement > 673",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Strength +23",
+          "Modify Stamina +23",
+          "Modify Agility +12"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210490,
+        "name": "Glorious Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 797",
+          "BiologicalMetamorphosis > 721",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,13]",
+          "ChangeVariable[553,210481]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210305,
+        "name": "The Adjudicator's Blade",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 691",
+          "SensoryImprovement > 691",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Skill2hEdged +110",
+          "Modify MeleeEnergy +80"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210502,
+        "name": "Havoc Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 125,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 893",
+          "BiologicalMetamorphosis > 808",
+          "Level > 124",
+          "Specialization op22 2"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,15]",
+          "ChangeVariable[553,210497]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211168,
+        "name": "Sharpen Instincts",
+        "nanoStrain": 545,
+        "nanoLine": "KeeperEvade_Dodge_DuckBuff",
+        "minLevel": 135,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 762",
+          "SensoryImprovement > 762",
+          "Level > 134"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify EvadeClsC +110",
+          "Modify DodgeRanged +55",
+          "Modify DuckExp +55"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210307,
+        "name": "Finality's Edge",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 850",
+          "SensoryImprovement > 850",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify MeleeEnergy +95",
+          "Modify Skill2hEdged +127"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210492,
+        "name": "Venerated Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 918",
+          "BiologicalMetamorphosis > 846",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,13]",
+          "ChangeVariable[553,210482]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210504,
+        "name": "Carnage Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 165,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1031",
+          "BiologicalMetamorphosis > 952",
+          "Level > 164",
+          "Specialization op22 4"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,15]",
+          "ChangeVariable[553,210498]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211162,
+        "name": "Guardian of Might",
+        "nanoStrain": 539,
+        "nanoLine": "KeeperStr_Stam_AgiBuff",
+        "minLevel": 165,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 874",
+          "SensoryImprovement > 874",
+          "Level > 164"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Strength +40",
+          "Modify Stamina +40",
+          "Modify Agility +20"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 211170,
+        "name": "Elude Pain",
+        "nanoStrain": 545,
+        "nanoLine": "KeeperEvade_Dodge_DuckBuff",
+        "minLevel": 185,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 935",
+          "SensoryImprovement > 935",
+          "Level > 184"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify EvadeClsC +140",
+          "Modify DodgeRanged +70",
+          "Modify DuckExp +70"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210309,
+        "name": "Colossus of Swords",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 195,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 959",
+          "SensoryImprovement > 959",
+          "Level > 194"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Skill2hEdged +140",
+          "Modify MaxHealth +15",
+          "Modify MeleeInit +10",
+          "Modify MeleeEnergy +105"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210506,
+        "name": "Crusader Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 195,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1150",
+          "BiologicalMetamorphosis > 1054",
+          "Level > 194",
+          "Specialization op22 4"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,16]",
+          "ChangeVariable[553,210499]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210494,
+        "name": "Reverential Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 195,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1037",
+          "BiologicalMetamorphosis > 951",
+          "Level > 194"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,14]",
+          "ChangeVariable[553,210483]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 224077,
+        "name": "Fanatic Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 209,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1240",
+          "BiologicalMetamorphosis > 1095",
+          "Level > 208",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,17]",
+          "ChangeVariable[553,224076]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 222977,
+        "name": "Pious Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 211,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1312",
+          "BiologicalMetamorphosis > 1151",
+          "Level > 210",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,15]",
+          "ChangeVariable[553,269183]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223020,
+        "name": "Evangelical Reaper",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 217,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1524",
+          "BiologicalMetamorphosis > 1319",
+          "Level > 216",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,20]",
+          "ChangeVariable[553,222985]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 222981,
+        "name": "Sainted Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 218,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1560",
+          "BiologicalMetamorphosis > 1347",
+          "Level > 217",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,17]",
+          "ChangeVariable[553,222979]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 222983,
+        "name": "Divine Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 220,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 1632",
+          "BiologicalMetamorphosis > 1404",
+          "Level > 219",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,19]",
+          "ChangeVariable[553,222980]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 266301,
+        "name": "Blow Their Cover",
+        "nanoStrain": 0,
+        "nanoLine": "NOSTACKING",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Expansion op22 32",
+          "BiologicalMetamorphosis > 799",
+          "Profession == 14",
+          "PsychologicalModification > 799",
+          "Profession == 5"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Rifle -1250"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 279378,
+        "name": "Courage Of The Just",
+        "nanoStrain": 900,
+        "nanoLine": "KeeperFearImmunity",
+        "minLevel": 0,
+        "professionReqVia": "VisualProfession(368)==14",
+        "castReqs": [
+          "VisualProfession == 14",
+          "SensoryImprovement > 119",
+          "SpaceTime > 119"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[279379] => 'Courage Of The Just' [strain 0 NOSTACKING] {ResistNanoStrain[883,1000]; RemoveNanoStrain[883]}",
+          "Modify AddAllDef +15"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 275838,
+        "name": "Giant of Swords",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1243",
+          "SensoryImprovement > 1243",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Skill2hEdged +170",
+          "Modify MaxHealth +100",
+          "Modify MeleeEnergy +120",
+          "Modify MeleeInit +100"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210299,
+        "name": "Impartiality of the Blade",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 113",
+          "SensoryImprovement > 113"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify MeleeEnergy +20",
+          "Modify Skill2hEdged +29"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 273365,
+        "name": "Improved Guardian of Might",
+        "nanoStrain": 539,
+        "nanoLine": "KeeperStr_Stam_AgiBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1243",
+          "SensoryImprovement > 1243",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Strength +80",
+          "Modify Stamina +80",
+          "Modify Agility +40",
+          "Modify Sense +40",
+          "Modify MaxHealth +980"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210297,
+        "name": "Keeper's Edge",
+        "nanoStrain": 153,
+        "nanoLine": "_2HEdgedBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 4",
+          "SensoryImprovement > 4"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify MeleeEnergy +8",
+          "Modify Skill2hEdged +12"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210484,
+        "name": "Sanctifier",
+        "nanoStrain": 526,
+        "nanoLine": "KeeperProcBuff",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 130",
+          "BiologicalMetamorphosis > 113"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "ChangeVariable[540,3]",
+          "ChangeVariable[557,13]",
+          "ChangeVariable[553,210478]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Team Casts (friendly)": [
+      {
+        "id": 210512,
+        "name": "Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 209",
+          "BiologicalMetamorphosis > 209",
+          "Level > 24",
+          "Specialization op22 1"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210508] => 'Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,1]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210514,
+        "name": "Benevolent Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 75,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 426",
+          "BiologicalMetamorphosis > 426",
+          "Level > 74",
+          "Specialization op22 1"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210509] => 'Benevolent Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,1]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210516,
+        "name": "Guardian Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 125,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 759",
+          "BiologicalMetamorphosis > 759",
+          "Level > 124",
+          "Specialization op22 2"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210510] => 'Guardian Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,1]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210518,
+        "name": "Sentinel Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 196,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 956",
+          "BiologicalMetamorphosis > 956",
+          "Level > 195",
+          "Specialization op22 4"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[210511] => 'Sentinel Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,1]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 223022,
+        "name": "Warden Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 219,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1371",
+          "BiologicalMetamorphosis > 1375",
+          "Level > 218",
+          "Specialization op22 8"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[222987] => 'Warden Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,1]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 275036,
+        "name": "Watch Ward",
+        "nanoStrain": 224,
+        "nanoLine": "Fortify",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 1473",
+          "BiologicalMetamorphosis > 1473",
+          "NanoFocusLevel op22 64"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "TeamCastNano[275037] => 'Watch Ward' [strain 532 KeeperAbsorbAura_Team] {ChangeVariable[516,2]}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Root": [
+      {
+        "id": 281239,
+        "name": "Release Me Now",
+        "nanoStrain": 283,
+        "nanoLine": "SelfRoot_SnareResistBuff",
+        "minLevel": 0,
+        "professionReqVia": "VisualProfession(368)==14",
+        "castReqs": [
+          "VisualProfession == 9",
+          "VisualProfession == 14",
+          "VisualProfession == 15",
+          "VisualProfession == 1",
+          "SensoryImprovement > 99",
+          "PsychologicalModification > 99",
+          "Expansion op22 32"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "RemoveNanoStrain[145]",
+          "RemoveNanoStrain[146]",
+          "ResistNanoStrain[145,100]",
+          "ResistNanoStrain[146,100]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Misc / Utility": [
+      {
+        "id": 210730,
+        "name": "Fury",
+        "nanoStrain": 735,
+        "nanoLine": "Fury",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "SpaceTime > 290",
+          "BiologicalMetamorphosis > 265",
+          "Level > 49",
+          "Side != 0",
+          "Specialization op22 1"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "(2 non-effect functions only)"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 301153,
+        "name": "Clarion Call",
+        "nanoStrain": 886,
+        "nanoLine": "ReverseKnockback",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "SpaceTime > 149",
+          "Profession == 14",
+          "Expansion op22 32",
+          "NPCFamily == 0"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "CastNano[281252] => 'Stunned by Clarion Call' [strain 1003 Stun] {}"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 301117,
+        "name": "Rebirth",
+        "nanoStrain": 1045,
+        "nanoLine": "ResurrectionSicknessRemoval",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "PlayfieldType op107 2",
+          "TemporarySkillReduction > 1",
+          "Flags op136 2",
+          "Flags op136 3",
+          "BiologicalMetamorphosis > 1299",
+          "PsychologicalModification > 1299",
+          "Profession == 14",
+          "Expansion op22 32"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Set[247,1]",
+          "SystemText[You feel like a new person.]"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 272374,
+        "name": "Wrath",
+        "nanoStrain": 735,
+        "nanoLine": "Fury",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "SpaceTime > 805",
+          "BiologicalMetamorphosis > 735",
+          "Profession == 14"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "(3 non-effect functions only)"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Attack Rating Buffs": [
+      {
+        "id": 301602,
+        "name": "Punisher of the Wicked",
+        "nanoStrain": 836,
+        "nanoLine": "AAOBuffs",
+        "minLevel": 0,
+        "professionReqVia": "VisualProfession(368)==14",
+        "castReqs": [
+          "SensoryImprovement > 492",
+          "PsychologicalModification > 492",
+          "VisualProfession == 14"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify AddAllOff +30"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Reflect / Absorb Shields": [
+      {
+        "id": 210311,
+        "name": "Defender's Poise",
+        "nanoStrain": 518,
+        "nanoLine": "KeeperDeflect_RiposteBuff",
+        "minLevel": 25,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 148",
+          "SensoryImprovement > 148",
+          "Level > 24"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Parry +38",
+          "Modify Riposte +38",
+          "Modify MultiMelee +15"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210313,
+        "name": "Warden's Resolve",
+        "nanoStrain": 518,
+        "nanoLine": "KeeperDeflect_RiposteBuff",
+        "minLevel": 50,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 328",
+          "SensoryImprovement > 328",
+          "Level > 49"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Parry +65",
+          "Modify Riposte +65",
+          "Modify MultiMelee +30"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210315,
+        "name": "Guardian's Balance",
+        "nanoStrain": 518,
+        "nanoLine": "KeeperDeflect_RiposteBuff",
+        "minLevel": 100,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 648",
+          "SensoryImprovement > 648",
+          "Level > 99"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Parry +105",
+          "Modify Riposte +105",
+          "Modify MultiMelee +45"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210317,
+        "name": "Grace of the Samurai",
+        "nanoStrain": 518,
+        "nanoLine": "KeeperDeflect_RiposteBuff",
+        "minLevel": 155,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 821",
+          "SensoryImprovement > 821",
+          "Level > 154"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Parry +125",
+          "Modify Riposte +125",
+          "Modify MultiMelee +60"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210319,
+        "name": "Discipline of the Vindicator",
+        "nanoStrain": 518,
+        "nanoLine": "KeeperDeflect_RiposteBuff",
+        "minLevel": 195,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 14",
+          "PsychologicalModification > 956",
+          "SensoryImprovement > 956",
+          "Level > 194"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify Parry +140",
+          "Modify Riposte +140",
+          "Modify MultiMelee +80",
+          "Modify AddAllDef +12"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ],
+    "Weapon & Special Attack Buffs": [
+      {
+        "id": 210793,
+        "name": "Backpiercer",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 891",
+          "SensoryImprovement > 891"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +110"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210797,
+        "name": "Backstabber",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 1034",
+          "SensoryImprovement > 1034"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +150"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210791,
+        "name": "Dagger in the Back",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 681",
+          "SensoryImprovement > 681"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +90"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210323,
+        "name": "Fervor of the Devotee",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 308",
+          "SensoryImprovement > 308"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +70"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210327,
+        "name": "Fervor of the Disciple",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 789",
+          "SensoryImprovement > 789"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +110"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210329,
+        "name": "Fervor of the Fanatic",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 878",
+          "SensoryImprovement > 878"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +135"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210321,
+        "name": "Fervor of the Henchman",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 81",
+          "SensoryImprovement > 81"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +30"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210325,
+        "name": "Fervor of the Minion",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 555",
+          "SensoryImprovement > 555"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +90"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210331,
+        "name": "Fervor of the Zealot",
+        "nanoStrain": 519,
+        "nanoLine": "FastAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 2",
+          "Profession == 9",
+          "PsychologicalModification > 949",
+          "SensoryImprovement > 949"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify FastAttack +150"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210787,
+        "name": "Footpad Apprentice",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 141",
+          "SensoryImprovement > 123"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +30"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210795,
+        "name": "Shuffle of the Rogue",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 988",
+          "SensoryImprovement > 988"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +135"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      },
+      {
+        "id": 210789,
+        "name": "Silent Dagger",
+        "nanoStrain": 208,
+        "nanoLine": "SneakAttackBuffs",
+        "minLevel": 0,
+        "professionReqVia": "Profession(60)==14",
+        "castReqs": [
+          "Profession == 15",
+          "Profession == 14",
+          "Profession == 6",
+          "PsychologicalModification > 308",
+          "SensoryImprovement > 308"
+        ],
+        "petTargeted": false,
+        "effectSummary": [
+          "Modify SneakAttack +70"
+        ],
+        "source": "local:nanos.ocp (OmniCell.Core) + name from itemnames.sql"
+      }
+    ]
+  }
+}
