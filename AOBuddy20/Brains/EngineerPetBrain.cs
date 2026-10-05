@@ -65,6 +65,15 @@ public sealed class EngineerPetBrain : PetBrain
     private bool _shellPending;
     private int _shellWarned;
 
+    // Watchdog: count summon casts / shell uses since we last had a pet. If they pile up with no pet
+    // appearing, something is wrong (no credits, over-equip, or the pet isn't registering on the wire) -
+    // report it (throttled) instead of churning silently. Reset the moment a pet is actually up.
+    private int _summonTries;
+    private double _lastStuckWarnAt = double.NegativeInfinity;
+    private double _lastNoCastWarnAt = double.NegativeInfinity;
+    private const int SummonTriesWarn = 4;
+    private const double StuckWarnEverySec = 30.0;
+
     private readonly HashSet<int> _robotSummonIds = new();
     private bool _warnedNoSummonData;
 
@@ -114,6 +123,7 @@ public sealed class EngineerPetBrain : PetBrain
         var attack = AttackPet(me);
         if (attack != null)
         {
+            _summonTries = 0; // a pet is up - the summon watchdog resets
             // The robot is up: drive it onto the hunt target (hunt off / no target -> Follow).
             DriveAttack(me, attack, _hunt.Tick(me, _awareness, dt));
 
@@ -180,6 +190,8 @@ public sealed class EngineerPetBrain : PetBrain
         {
             _shellUsedAt[(shell.Id, shell.Slot.Instance)] = _clock;
             shell.Use();
+            _summonTries++;
+            StuckCheck(me, $"using shell '{shell.Name}' (ql {shell.Ql})");
             _logger.LogInformation($"PET: using shell '{shell.Name}' id={shell.Id} ql={shell.Ql}.");
             return;
         }
@@ -264,7 +276,19 @@ public sealed class EngineerPetBrain : PetBrain
 
         if (best == null)
         {
-            return; // nothing castable this pass (skills/level/credits/expansion)
+            // Nothing castable now (skills/level/credits/expansion) and no buff path taken - say so, so
+            // it is visible via the log instead of a silent no-op. Throttled; left to our own devices.
+            if (_clock - _lastNoCastWarnAt > StuckWarnEverySec)
+            {
+                _lastNoCastWarnAt = _clock;
+                var mc = me.TryGetStat(Stat.MaterialCreation, out var m) ? m : 0;
+                var ts = me.TryGetStat(Stat.SpaceTime, out var t) ? t : 0;
+                _logger.LogWarning(
+                    $"PET: no robot castable at MC {mc}/TS {ts} (level/credits/expansion), and no buffs available - " +
+                    "holding without a pet. Raise skills, enable PetAutoBuff near a buff bot, or check credits.");
+            }
+
+            return;
         }
 
         if (_summonAt.TryGetValue(best.Id, out var last) && _clock - last < SummonRecastSec)
@@ -275,6 +299,8 @@ public sealed class EngineerPetBrain : PetBrain
         _summonAt[best.Id] = _clock;
         (_activeReqMc, _activeReqTs) = PetReq(best); // remember what this pet needs, for control maintenance
         me.Cast(best.Id);
+        _summonTries++;
+        StuckCheck(me, $"casting '{best.Name}' (ql {best.Ql})");
         _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, ql {best.Ql}) to make a shell.");
     }
 
@@ -642,6 +668,24 @@ public sealed class EngineerPetBrain : PetBrain
         return use.Any(c => c.Operator == UseCriteriaOperator.TestNumPets && c.Param2 / 1000 == 0)
                && use.Any(c => c.Operator == UseCriteriaOperator.EqualTo
                                && c.Param1 == (int)Stat.Profession && c.Param2 == profession);
+    }
+
+    // The summon watchdog: several attempts with no pet appearing means something is wrong (no credits,
+    // over-equip, or the pet not registering on the wire). Report it - throttled - so it surfaces in the
+    // log for tuning. We keep trying: a pet may yet appear or skills may rise (always recoverable).
+    private void StuckCheck(LocalPlayer me, string what)
+    {
+        if (_summonTries < SummonTriesWarn || _clock - _lastStuckWarnAt < StuckWarnEverySec)
+        {
+            return;
+        }
+
+        _lastStuckWarnAt = _clock;
+        var mc = me.TryGetStat(Stat.MaterialCreation, out var m) ? m : 0;
+        var ts = me.TryGetStat(Stat.SpaceTime, out var t) ? t : 0;
+        _logger.LogWarning(
+            $"PET: {_summonTries} summon attempts, still no pet ({what}; MC {mc}/TS {ts}). Likely no credits, " +
+            "over-equip, or the pet isn't registering on the wire - still trying.");
     }
 
     // ---- Pet-only buffs (cast on the robot; no player NCU) ----------------------------------

@@ -278,6 +278,23 @@ public sealed class BuffBotController
             _reply?.Invoke($"Buff session done ({why}).");
         }
 
+        // Recovery: a crashed / unresponsive buff bot can invite us, have us join, then never buff OR
+        // kick - which would leave us teamed forever and SILENTLY block every future buff request (the
+        // Team.IsInTeam guard in RequestBuffs). If we are still in the team we joined for this session,
+        // leave it so the bot falls back to its own devices and can try again later.
+        if (_joined && Team.IsInTeam)
+        {
+            try
+            {
+                Team.LeaveTeam();
+                _logger.LogWarning("BUFFS: buff bot never released us - leaving the team to recover (self-buff fallback).");
+            }
+            catch
+            {
+                // best-effort; even if the leave send fails, we reset to Idle below and retry later
+            }
+        }
+
         _stage = Stage.Idle;
         _joined = false;
         _tellIndex = 0;

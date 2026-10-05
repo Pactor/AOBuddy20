@@ -62,6 +62,7 @@ public abstract class PetBrain
 
     protected double _clock; // the brain's own clock, accumulated from dt
     private bool _holding;   // an episode is open: arbiter held at ControlPriority.Pet
+    private double _lastTickErrorAt = double.NegativeInfinity; // throttle the recovery log
 
     /// <summary>True while a pet episode is open (BotLoop claims Tasks.Pet).</summary>
     public bool Tick(LocalPlayer me, double dt)
@@ -73,13 +74,31 @@ public abstract class PetBrain
             return false;
         }
 
-        var holding = PolicyTick(me, dt);
-        if (!holding)
+        // A pet-brain decision must never wedge the bot: a throw here would otherwise skip every system
+        // that ticks after the pet overlay this frame. Contain it, drop our control so nothing is held in
+        // a broken state, report it (throttled, so a persistent bad-data case is visible but not spam),
+        // and let the next tick retry. ALWAYS recover.
+        try
         {
-            ReleaseControl();
-        }
+            var holding = PolicyTick(me, dt);
+            if (!holding)
+            {
+                ReleaseControl();
+            }
 
-        return holding;
+            return holding;
+        }
+        catch (Exception ex)
+        {
+            if (_clock - _lastTickErrorAt > 10.0)
+            {
+                _lastTickErrorAt = _clock;
+                _logger.LogError(ex, "PET: brain tick threw - recovering (released control, retrying next tick).");
+            }
+
+            ReleaseControl();
+            return false;
+        }
     }
 
     /// <summary>
