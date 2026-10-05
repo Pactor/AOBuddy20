@@ -97,6 +97,22 @@ public sealed class MetaphysicistBrain : PetBrain
         // idempotent on the server, so re-sending it when a new pet lands is safe.
         EnsureCommanded(me);
 
+        // The buff-first hold wins over everything below: stay petless until the buffing side
+        // resolves (pets already up stay commanded).
+        if (SummonHeld)
+        {
+            return true;
+        }
+
+        // A buffing brain's request jumps the queue: a summon pass now, without the 1s cadence
+        // (IsCasting still gates - the wire takes one cast at a time; the request stays pending
+        // until a tick can act on it).
+        if (!me.IsCasting && ConsumeSummonRequest())
+        {
+            TrySummon(me);
+            return true;
+        }
+
         // The roster is complete: let the chain continue (overlay, returns true - the body is
         // never held; ControlPriority.Pet stays reserved for a later step).
         if (RosterComplete(me))
@@ -120,6 +136,12 @@ public sealed class MetaphysicistBrain : PetBrain
 
         TrySummon(me);
         return true;
+    }
+
+    /// <summary>After /pet terminate every instance is gone - the re-summon gets Followed afresh.</summary>
+    protected override void OnRosterTerminated()
+    {
+        _commanded.Clear();
     }
 
     // ---- Roster -----------------------------------------------------------------------------

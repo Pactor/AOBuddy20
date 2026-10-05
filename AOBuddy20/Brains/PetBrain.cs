@@ -235,6 +235,93 @@ public abstract class PetBrain
             _controlArbiter.ReleaseControl();
         }
     }
+
+    // ---- ENGINE: the cross-brain handshake (the buff-first summon) --------------------------
+
+    // One-shot: another brain asked for an immediate summon pass (consumed by the next tick).
+    private bool _summonRequested;
+
+    // While held, the policy summons nothing - the buff-first "stay petless until it resolves".
+    private bool _summonHold;
+
+    /// <summary>
+    ///     CROSS-BRAIN: a buffing brain (the Selfbuffing / ExternalBuffing side, once the peak
+    ///     skill stack is confirmed up - PETBRAIN-DESIGN.md, buff-first step 3) asks the pet
+    ///     brain for an IMMEDIATE summon pass: the next tick runs the summon policy without the
+    ///     ~1s decide cadence. One-shot, and a no-op while <see cref="SetSummonHold" /> is held
+    ///     (release first, then request). Reachable as <c>BrainBank.Pet.RequestSummon()</c>.
+    /// </summary>
+    public void RequestSummon()
+    {
+        if (_summonHold)
+        {
+            return;
+        }
+
+        _summonRequested = true;
+        _logger.LogInformation("PET: summon requested (buff-first handshake).");
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: while held, the policy summons NOTHING - not on its own cadence, not on
+    ///     request - but keeps commanding pets already up. This is the buff-first gate ("stay
+    ///     petless until it resolves", owner 2026-10-05): hold while the NCU/skill buffs are
+    ///     being arranged, then release + <see cref="RequestSummon" /> at the peak. Releasing
+    ///     without a request simply returns to the normal auto cadence.
+    /// </summary>
+    public void SetSummonHold(bool held)
+    {
+        if (_summonHold == held)
+        {
+            return;
+        }
+
+        _summonHold = held;
+        _logger.LogInformation($"PET: summon hold {(held ? "ON - staying petless until released" : "off")}.");
+    }
+
+    /// <summary>Whether summoning is currently held (the policy checks before any cast).</summary>
+    protected bool SummonHeld => _summonHold;
+
+    /// <summary>Consume the pending summon request - true once, then it is gone.</summary>
+    protected bool ConsumeSummonRequest()
+    {
+        if (!_summonRequested)
+        {
+            return false;
+        }
+
+        _summonRequested = false;
+        return true;
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: /pet terminate - the WHOLE roster dies (server-side), its NCU frees and
+    ///     every slot is empty again. The buff-first re-summon uses this to clear a pet summoned
+    ///     below the peak before casting the better one. Pair it with <see cref="SetSummonHold" />
+    ///     when the intent is a re-summon at higher skills: otherwise the normal cadence refills
+    ///     the empty slots within a second. <see cref="OnRosterTerminated" /> lets the policy
+    ///     drop its per-pet bookkeeping. Reachable as <c>BrainBank.Pet.TerminateAll(me)</c>.
+    /// </summary>
+    public void TerminateAll(LocalPlayer me)
+    {
+        if (me == null || !me.Pets.Any())
+        {
+            return;
+        }
+
+        var count = me.Pets.Count();
+        Command(me, PetCommand.Terminate);
+        _logger.LogInformation($"PET: terminating all {count} pet(s).");
+        _attackTarget = null;    // the engine's attack bookkeeping is stale with the roster gone
+        _commandedInstance = 0;
+        OnRosterTerminated();
+    }
+
+    /// <summary>Hook: the roster was just terminated - the policy drops its per-pet bookkeeping.</summary>
+    protected virtual void OnRosterTerminated()
+    {
+    }
 }
 
 /// <summary>
