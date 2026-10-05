@@ -46,6 +46,7 @@ public sealed class OwnerChat
     private readonly ResupplyController _resupply;
     private readonly SellController _sell;
     private readonly HuntController _hunt;
+    private readonly BuffBotController _buffBot;
 
     private bool _greeted;
     private bool _running;
@@ -56,8 +57,8 @@ public sealed class OwnerChat
     private uint _tellId;
 
     public OwnerChat(MovementController movement, ResupplyController resupply, SellController sell,
-        MissionController mission, BrainBank brains, LootBagStore lootBags, HuntController hunt, AccountInfo config,
-        ILogger<OwnerChat> logger)
+        MissionController mission, BrainBank brains, LootBagStore lootBags, HuntController hunt,
+        BuffBotController buffBot, AccountInfo config, ILogger<OwnerChat> logger)
     {
         _movement = movement;
         _resupply = resupply;
@@ -66,6 +67,7 @@ public sealed class OwnerChat
         _brains = brains;
         _lootBags = lootBags;
         _hunt = hunt;
+        _buffBot = buffBot;
         _config = config;
         _logger = logger;
         _commands = BuildCommands();
@@ -312,7 +314,7 @@ public sealed class OwnerChat
 
         t["help"] = (reply, p) =>
         {
-            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|status|roll|list|accept n|buybags n] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | stop | sit | stand | navdata | help." +
+            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|status|roll|list|accept n|buybags n] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | buffs [start|stop|status] | stop | sit | stand | navdata | help." +
                   " follow stacks me on you and mirrors your movement; goto/come walk at priority Travel and hand me back to follow on arrival;" +
                   " travel crosses playfields by zone lines, doors, whompas and pads (id or name); resupply shops for stims and rechargers by my own skills (bags n buys bags);" +
                   " sell sells the bag contents to a shop terminal (NODROP and main inventory untouched);" +
@@ -326,6 +328,8 @@ public sealed class OwnerChat
         t["brain"] = (reply, p) => { reply(_brains.Describe()); };
         // HUNT: the pets attack hostiles in a radius; the bot stays put. Off until 'hunt on'.
         t["hunt"] = (reply, p) => { _hunt.Command(p, reply); };
+        // BUFFS: the public-buff-bot handshake (start|stop|status).
+        t["buffs"] = (reply, p) => { _buffBot.Command(p, reply); };
 
         // LOOTBAGS: the bags of the packs, numbered; add/remove (de)signates by number. The
         // designation lives in the LootBagStore (per-character JSON); loot logic consumes it later.

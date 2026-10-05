@@ -237,6 +237,7 @@ internal class Program
         services.AddSingleton<SellController>();
         services.AddSingleton<HealController>();
         services.AddSingleton<HuntController>();
+        services.AddSingleton<BuffBotController>();
         // BRAINS (per-profession policy): the registry scans once at startup (the same reflection
         // pass the MinLogLevel overrides above use); the bank picks this character's brains right
         // after login, when the profession is on the wire (BrainBank.EnsureSelected from BotLoop).

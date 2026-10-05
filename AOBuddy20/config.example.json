@@ -45,5 +45,10 @@
   "HuntRadius": 40,
   "HuntMaxLevelMargin": 10,
   "HuntFactionMode": "Auto",
-  "HuntBlacklist": []
+  "HuntBlacklist": [],
+
+  "_comment_buffs": "BUFF BOTS ('buffs' command): the public-buff-bot handshake (Chewy on RubiKa, Codedoc on RubiKa2019). Be un-teamed and near the bot, then 'buffs start': the bot invites, we accept, we send BuffRequestTells in order, it buffs and auto-kicks us. ALWAYS list the highest NCU buff first (it expands Max NCU so the rest fit). BuffBotName empty = no buff bot. (4a.1 is the plumbing; the buff selection is computed later.)",
+  "BuffBotName": "",
+  "BuffRequestTells": [],
+  "BuffHandshakeSeconds": 45
 }

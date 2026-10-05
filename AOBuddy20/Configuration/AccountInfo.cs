@@ -85,6 +85,16 @@ public class AccountInfo
     public string HuntFactionMode = "Auto"; // Auto | On | Off - Shadowlands faction-safe hunting
     public List<string> HuntBlacklist = new(); // mob NAMES never hunted (mini-bosses you'd only die to)
 
+    // --- Buff bots (BuffBotController, the 'buffs' command): getting buffs from a public buff bot
+    // (Chewy on RubiKa, Codedoc on RubiKa2019). The handshake: un-teamed -> the bot invites -> we
+    // accept -> it buffs -> it auto-kicks us. 4a.1 is the plumbing; the buff SELECTION comes later,
+    // so for now the request tells are listed here verbatim.
+    public string BuffBotName = ""; // the buff-bot toon's name; empty = no buff bot configured
+    public List<string> BuffRequestTells = new(); // tells sent IN ORDER once teamed. ALWAYS list the
+    // highest NCU buff first (owner, 2026-10-05: it expands Max NCU so the rest fit). 4a.2 computes
+    // and orders these; until then they are listed here verbatim, NCU first.
+    public float BuffHandshakeSeconds = 45f; // the invite/buff window (AOBuddy10 Scotty uses 45)
+
     // Where this config was loaded from (set at load; never serialized). Save() writes the whole
     // config back here so a runtime setting change persists in the one self-contained conf file.
     [JsonIgnore] public string ConfigPath = "";
