@@ -60,8 +60,11 @@ public sealed class EngineerPetBrain : PetBrain
     private const double DecideEverySec = 1.0;
 
     private double _sinceDecide;
+    private const double ShellDeleteCooldownSec = 5.0; // don't re-send a delete while the shell is still disappearing
+
     private readonly Dictionary<int, double> _summonAt = new();          // nanoId -> last cast (_clock)
     private readonly Dictionary<(int, int), double> _shellUsedAt = new(); // (shellId, slotInstance) -> last used (_clock)
+    private readonly Dictionary<(int, int), double> _shellDeletedAt = new(); // (shellId, slotInstance) -> last deleted (_clock)
     private bool _shellPending;
     private int _shellWarned;
 
@@ -191,8 +194,19 @@ public sealed class EngineerPetBrain : PetBrain
             return;
         }
 
-        // 1) Use a shell already in the bags.
+        var targetQl = BestCastableSummonQl(me); // the best pet we could cast right now (0 if none)
         var shell = ShellCheck(me, out var unusable);
+
+        // SHELL CLEANUP (owner's mechanic: an old shell must be gone before a new one can be summoned).
+        // If a shell in the bags is a LESSER pet than one we could cast now, bin it and cast the better.
+        // Only ever our OWN robot shells (ShellCheck/IsOurShell identified them) - never your items.
+        if (shell != null && targetQl > shell.Ql)
+        {
+            DeleteStray(shell, $"inferior shell ql{shell.Ql} < castable ql{targetQl}");
+            return;
+        }
+
+        // 1) Use the shell when it is already the best we would make.
         if (shell != null)
         {
             _shellUsedAt[(shell.Id, shell.Slot.Instance)] = _clock;
@@ -210,11 +224,20 @@ public sealed class EngineerPetBrain : PetBrain
 
         if (unusable != null)
         {
+            // An unusable shell INFERIOR to a pet we can cast is just in the way - bin it, then cast the
+            // better one. A BETTER unusable shell (we simply can't use it yet) is KEPT: buffs/skills may
+            // unlock it, and we must not delete a pet we cannot replace.
+            if (targetQl > 0 && targetQl >= unusable.Ql)
+            {
+                DeleteStray(unusable, $"unusable inferior shell ql{unusable.Ql}, casting ql{targetQl} instead");
+                return;
+            }
+
             if (_shellWarned != unusable.Id)
             {
                 _shellWarned = unusable.Id;
                 _logger.LogInformation(
-                    $"PET: shell '{unusable.Name}' ql={unusable.Ql} is in the bags but its requirements aren't met - not casting another.");
+                    $"PET: shell '{unusable.Name}' ql={unusable.Ql} is in the bags, requirements not met and nothing better castable - keeping it.");
             }
 
             return;
@@ -222,6 +245,51 @@ public sealed class EngineerPetBrain : PetBrain
 
         // 2) No shell: cast the best robot summon we know and can cast (it makes a shell).
         CastBestSummon(me);
+    }
+
+    // The QL of the best robot we could CAST right now (learned + reqs met), 0 if none. Used to decide
+    // whether a shell in the bags is worth keeping or should be binned for a better pet. No side effects.
+    private int BestCastableSummonQl(LocalPlayer me)
+    {
+        var best = 0;
+        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
+        {
+            if (!_robotSummonIds.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+            {
+                continue;
+            }
+
+            bool castable;
+            try
+            {
+                castable = ni.MeetsUseReqs(me, false, true); // ignorePetLimit: rank on skill/level, not slot
+            }
+            catch
+            {
+                castable = false;
+            }
+
+            if (castable && ni.Ql > best)
+            {
+                best = ni.Ql;
+            }
+        }
+
+        return best;
+    }
+
+    // Delete one of OUR leftover robot shells (owner authorized: "recover and act right"). Throttled per
+    // item so we don't re-send while it is disappearing. Shells are cheap/re-summonable - never your gear.
+    private void DeleteStray(Item shell, string why)
+    {
+        if (_shellDeletedAt.TryGetValue((shell.Id, shell.Slot.Instance), out var at) && _clock - at < ShellDeleteCooldownSec)
+        {
+            return;
+        }
+
+        _shellDeletedAt[(shell.Id, shell.Slot.Instance)] = _clock;
+        shell.Delete();
+        _logger.LogInformation($"PET: deleting stray shell '{shell.Name}' id={shell.Id} ql={shell.Ql} - {why}.");
     }
 
     private void CastBestSummon(LocalPlayer me)
