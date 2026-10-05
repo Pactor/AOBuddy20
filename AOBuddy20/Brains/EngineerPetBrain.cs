@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------------------
 
 using System.IO;
+using AOBuddy20.Configuration;
 using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
 using AOBuddy20.PacketConsumers;
@@ -69,13 +70,23 @@ public sealed class EngineerPetBrain : PetBrain
 
     private readonly HuntController _hunt;
     private readonly Awareness _awareness;
+    private readonly BuffCatalog _catalog;
+    private readonly BuffBotController _buffBot;
+    private readonly AccountInfo _config;
+
+    private const double BuffRetrySec = 300.0; // don't re-ask the buff bot more often than this
+    private double _buffAskedAt = -1e9;
+    private int _loggedBuffOppFor; // the want-pet id we last logged a buff opportunity for
 
     public EngineerPetBrain(ILogger<EngineerPetBrain> logger, ControlArbiter controlArbiter,
-        HuntController hunt, Awareness awareness)
+        HuntController hunt, Awareness awareness, BuffCatalog catalog, BuffBotController buffBot, AccountInfo config)
         : base(logger, controlArbiter)
     {
         _hunt = hunt;
         _awareness = awareness;
+        _catalog = catalog;
+        _buffBot = buffBot;
+        _config = config;
         LoadRobotSummonIds();
     }
 
@@ -199,9 +210,16 @@ public sealed class EngineerPetBrain : PetBrain
             }
         }
 
+        // BUFF-FIRST (4b): is a BETTER robot learned but out of reach only for lack of MC/TS? Ask the
+        // buff bot first and wait, rather than summoning a weaker one now ("not before").
+        if (BuffFirst(me, best))
+        {
+            return;
+        }
+
         if (best == null)
         {
-            return; // nothing castable this pass (skills/level/credits/expansion) - a later step adds buffs
+            return; // nothing castable this pass (skills/level/credits/expansion)
         }
 
         if (_summonAt.TryGetValue(best.Id, out var last) && _clock - last < SummonRecastSec)
@@ -212,6 +230,108 @@ public sealed class EngineerPetBrain : PetBrain
         _summonAt[best.Id] = _clock;
         me.Cast(best.Id);
         _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, ql {best.Ql}) to make a shell.");
+    }
+
+    /// <summary>
+    ///     Buff-first: when a BETTER robot than <paramref name="castableBest" /> is learned but gated
+    ///     only by MC/TS, ask the buff bot (PetAutoBuff on, bot configured, un-teamed, near it) and
+    ///     wait, rather than summoning the weaker one. Returns true while holding for the buffs. Off,
+    ///     or no better pet, or a non-MC/TS gap, returns false and the caller summons what it can.
+    /// </summary>
+    private bool BuffFirst(LocalPlayer me, NanoItem? castableBest)
+    {
+        var want = BestLearnedRobot(me);
+        if (want == null || (castableBest != null && want.Ql <= castableBest.Ql))
+        {
+            return false; // no better pet to reach for
+        }
+
+        var (reqMc, reqTs) = PetReq(want);
+        if (OeMargin(me, reqMc, reqTs) >= 1.0)
+        {
+            return false; // the gap is not MC/TS (level/credits/expansion) - buffs won't help
+        }
+
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        {
+            if (_loggedBuffOppFor != want.Id)
+            {
+                _loggedBuffOppFor = want.Id;
+                var who = _config.BuffBotName.Length > 0 ? _config.BuffBotName : "the buff bot";
+                _logger.LogInformation(
+                    $"PET: '{want.Name}' (ql {want.Ql}) needs MC {reqMc}/TS {reqTs} - out of reach now; " +
+                    $"buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
+            }
+
+            return false; // the owner controls buffing; summon the best we can now
+        }
+
+        if (_buffBot.Active)
+        {
+            return true; // a buff session is running - wait for it
+        }
+
+        if (_clock - _buffAskedAt >= BuffRetrySec)
+        {
+            if (_buffBot.RequestBuffs(_catalog.PlanForPetSummon(me, reqMc, reqTs), $"pet-first for {want.Name}"))
+            {
+                _buffAskedAt = _clock;
+                _logger.LogInformation($"PET: asking the buff bot for MC {reqMc}/TS {reqTs} to summon '{want.Name}'.");
+                return true;
+            }
+
+            return false; // couldn't start (not near the bot / no plan) - summon what we can
+        }
+
+        return _clock - _buffAskedAt < _config.PetBuffWaitSeconds; // hold for the wait window
+    }
+
+    private NanoItem? BestLearnedRobot(LocalPlayer me)
+    {
+        NanoItem? best = null;
+        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
+        {
+            if (!_robotSummonIds.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+            {
+                continue;
+            }
+
+            if (best == null || ni.Ql > best.Ql)
+            {
+                best = ni;
+            }
+        }
+
+        return best;
+    }
+
+    // A robot summon's MC/TS requirement, read from its cast criteria (GreaterThan means stat > N, so
+    // the requirement is N + 1). 0 when the nano has no such criterion.
+    private static (int Mc, int Ts) PetReq(NanoItem nano)
+    {
+        var mc = 0;
+        var ts = 0;
+        if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+        {
+            foreach (var c in use)
+            {
+                if (c.Operator != UseCriteriaOperator.GreaterThan)
+                {
+                    continue;
+                }
+
+                if (c.Param1 == (int)Stat.MaterialCreation)
+                {
+                    mc = Math.Max(mc, c.Param2 + 1);
+                }
+                else if (c.Param1 == (int)Stat.SpaceTime)
+                {
+                    ts = Math.Max(ts, c.Param2 + 1);
+                }
+            }
+        }
+
+        return (mc, ts);
     }
 
     // ---- Shells -----------------------------------------------------------------------------

@@ -98,6 +98,22 @@ public sealed class BuffBotController
         }
     }
 
+    /// <summary>
+    ///     Programmatic start (the pet brain's buff-first, 4b): open a session with a computed plan.
+    ///     Returns false when it cannot start (no bot configured, already active, in a team, or an
+    ///     empty plan) so the caller can fall back to summoning what it can now.
+    /// </summary>
+    public bool RequestBuffs(List<string> tells, string why)
+    {
+        if (Active || string.IsNullOrWhiteSpace(_config.BuffBotName) || Team.IsInTeam || tells == null || tells.Count == 0)
+        {
+            return false;
+        }
+
+        StartSession(tells, why, s => _logger.LogInformation($"BUFFS: {s}"));
+        return true;
+    }
+
     private void StartSession(List<string> tells, string what, Action<string> reply)
     {
         if (string.IsNullOrWhiteSpace(_config.BuffBotName))

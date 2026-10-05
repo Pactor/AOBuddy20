@@ -243,9 +243,12 @@ attack-target should track our combat. **Decision: `ControlPriority.Pet` just be
    - **4a.2-pet DONE** — `BuffCatalog` (ChewysBuffs.json) + `PlanForPetSummon`: NCU buff first,
      then one safe MC/TS buff (all-nano composites + the Skill Wrangler ladder, froob-receivable).
      `buffs pet`.
-   - **4b** — wire the **buff-first + OE sustain gate** into the EngineerPetBrain policy (the pet
-     brain calls `BuffBotController` with `PlanForPetSummon` for its target pet, then the
-     summon/downshift two-phase).
+   - **4b DONE (summon side)** — the EngineerPetBrain is buff-first: when a better robot is
+     learned but gated only by MC/TS, it asks the buff bot (`PlanForPetSummon` for that pet's
+     req) and waits, rather than summoning a weaker one — opt-in via `PetAutoBuff` (off: it logs
+     the opportunity and summons the best it can now). Once the buffs land, skills rise and the
+     normal summon picks the better pet. The **downshift** half (reclaim NCU after summon) and a
+     true buff-durability **sustain-gate** are still TODO (they need buff-timer tracking).
 5. **Team pet-command mirroring.**
 6. **MP** (three wire-labelled role slots) and the **charm** classes (Crat / Trader / Adv)
    as further subclasses on the same base.

@@ -95,6 +95,14 @@ public class AccountInfo
     // and orders these; until then they are listed here verbatim, NCU first.
     public float BuffHandshakeSeconds = 45f; // the invite/buff window (AOBuddy10 Scotty uses 45)
 
+    // Pet buff-first (4b): when ON, a pet brain that wants a better pet it cannot yet summon for lack
+    // of Matter Creation / Time and Space will ask the buff bot FIRST (near it and un-teamed), then
+    // summon the better pet once the skills are up - rather than summoning a weaker one now. OFF by
+    // default (the owner positions the bot and controls buffing); off, the brain summons the best it
+    // can now and logs the buff opportunity.
+    public bool PetAutoBuff = false;
+    public float PetBuffWaitSeconds = 60f; // after asking, wait this long for the buffs before summoning anyway
+
     // Where this config was loaded from (set at load; never serialized). Save() writes the whole
     // config back here so a runtime setting change persists in the one self-contained conf file.
     [JsonIgnore] public string ConfigPath = "";
