@@ -11,6 +11,46 @@ reference so we know what the runtime is choosing among.
 Verified 2026-10-05. Level shown as the raw `Level > N` from the cast action. Expansion gate
 `[SL]` = Shadowlands (`Expansion op22 2`) = **requires a paid account**.
 
+## VERIFIED buff tiers + receiver level locks (2026-10-05, from nanos.ocp cast criteria)
+
+The all-6-nano-skill **Composite** buffs are RECEIVER level-locked AND require Shadowlands
+(the lower `Level >` of the two in each nano's ToUse is the receiver gate; the higher is the
+casting MP's):
+
+| Buff | tell | +skill (all 6) | Receiver needs | NCU |
+|---|---|---|---|---|
+| Composite Teachings | compt | +25 | L15 + SL | 6 |
+| Composite Mastery | compmast | +50 | L40 + SL | 13 |
+| Composite Infuse With Knowledge | cominf | +90 | L90 + SL | 25 |
+| Composite Mochams (1h) | compmoch1 | +140 | L175 + SL | 48 |
+| Composite Mochams (2h/4h/8h) | compmoch2/4/8 | +140 | L201 / L205 / L209 + SL | 51/54/55 |
+
+The **SINGLE-SKILL Mocham's Gift** buffs are the +140 you get at low level - **NO level req,
+NO SL** (only PM/SI ~744 + VisualProfession 12 on the casting MP):
+
+| Buff | tell | +skill | NCU |
+|---|---|---|---|
+| Mocham's Gift: MatCrea | mcmo | +140 MC | 51 |
+| Mocham's Gift: SpaceTime | stmo | +140 TS | 50 |
+| (BioMet/MatMet/PsyMod/SenseImp each +140) | bmmo/mmmo/pmmo/simo | +140 one skill | 50-52 |
+
+So to lift **MC and TS** for pet summoning at ANY level: `mcmo` (+140 MC) + `stmo` (+140 TS),
+each ~50 NCU, plus a wrangle. The all-skills composites add ON TOP (different nano strains:
+Mocham's Gift = strain 159/161, Composite = strain 165, wrangle = strain 220 - all stack) once
+you meet their level. **ALWAYS strive for the +140** (the player max), single-skill if the
+all-skills tier is out of level (owner, 2026-10-05).
+
+Wrangle: **Skill Wrangler (Premium) = +131** (tell `131`, 58 NCU, raises MC & TS); the *Team*
+variant is +132 (tell `132`) - use +131.
+
+**Worked example (L50 Engineer, raw MC/TS 326, 148 NCU):** NCU buff first (the stack needs it:
+mcmo 51 + stmo 50 + wrangle 58 = 159 > 148) -> mcmo +140 -> stmo +140 (MC/TS 466) -> wrangle
++131 (597 PEAK). Durable (no wrangle) = 466 -> control max 466/0.80 = 582 -> **summon the best
+req <= 582 = Semi-Sentient Guardbot (569, held at 82%)**, NOT Patchwork Warbot (596, would OE at
+78%). Wrangle off -> 466, pet holds, free 58 NCU for survivability. The current code does NOT do
+this yet: it excludes single-skill buffs, has no NCU math / sustain-gate / downshift (4a.2-full
++ 4b TODOs).
+
 ## The headline facts (owner's questions, answered against the data)
 
 1. **The Engineer cannot self-buff MC/TS.** Zero Engineer-gated (prof 3) nanos modify 130/131
