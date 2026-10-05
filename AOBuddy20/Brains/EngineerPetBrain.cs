@@ -68,6 +68,14 @@ public sealed class EngineerPetBrain : PetBrain
     private readonly HashSet<int> _robotSummonIds = new();
     private bool _warnedNoSummonData;
 
+    // Pet-only buffs (engineer-pets.json "petBuffs"): nanos the Engineer casts ON the robot - pet AC /
+    // defense / proc / scale. They land on the pet, so they never touch the player's NCU and are kept up
+    // whenever a pet is out, independent of PetAutoBuff. Pet HEALS in that list are excluded at runtime
+    // (they Hit Health, carry no stat Modify - owner's AOBuddy10 model). Repair/heal is a separate path.
+    private readonly HashSet<int> _petBuffIds = new();
+    private const double PetBuffRecastSec = 20.0;
+    private readonly Dictionary<string, double> _petBuffAt = new(); // "petInstance:nanoId" -> last cast
+
     private readonly HuntController _hunt;
     private readonly Awareness _awareness;
     private readonly BuffCatalog _catalog;
@@ -98,6 +106,7 @@ public sealed class EngineerPetBrain : PetBrain
         _buffBot = buffBot;
         _config = config;
         LoadRobotSummonIds();
+        LoadPetBuffIds();
     }
 
     protected override bool PolicyTick(LocalPlayer me, double dt)
@@ -116,7 +125,12 @@ public sealed class EngineerPetBrain : PetBrain
                 && _controlArbiter.HasControl(ControlPriority.LowHealthNanoEmergency))
             {
                 _sinceMaintain = 0;
-                MaintainAndSurvive(me);
+                // Pet-only buffs first (free of player NCU, always); then control upkeep + survival
+                // (PetAutoBuff-gated). One cast per pass - BuffPets returning true means it took the slot.
+                if (!BuffPets(me))
+                {
+                    MaintainAndSurvive(me);
+                }
             }
 
             return true;
@@ -291,7 +305,7 @@ public sealed class EngineerPetBrain : PetBrain
             return false; // already castable now (no buffs needed)
         }
 
-        var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid);
+        var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid, "Engineer");
         if (!plan.CanControl)
         {
             return false; // BestControllableRobot already filtered on this, but stay safe
@@ -427,7 +441,7 @@ public sealed class EngineerPetBrain : PetBrain
             }
 
             var (reqMc, reqTs) = PetReq(ni);
-            if (!_catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid).CanControl)
+            if (!_catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid, "Engineer").CanControl)
             {
                 continue;
             }
@@ -461,7 +475,7 @@ public sealed class EngineerPetBrain : PetBrain
         if ((_activeReqMc > 0 || _activeReqTs > 0) && OeMargin(me, _activeReqMc, _activeReqTs) < RefreshMargin)
         {
             var plan = _catalog.BuildControlPlan(me, UnbuffedBase(me, Stat.MaterialCreation),
-                UnbuffedBase(me, Stat.SpaceTime), _activeReqMc, _activeReqTs, paid);
+                UnbuffedBase(me, Stat.SpaceTime), _activeReqMc, _activeReqTs, paid, "Engineer");
             if (TryApply(me, _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me)),
                     "pet control refresh"))
             {
@@ -630,7 +644,158 @@ public sealed class EngineerPetBrain : PetBrain
                                && c.Param1 == (int)Stat.Profession && c.Param2 == profession);
     }
 
+    // ---- Pet-only buffs (cast on the robot; no player NCU) ----------------------------------
+
+    /// <summary>
+    ///     Keep the robot's own buffs up (AC / defense / proc / scale) - the pet-targeted nanos from
+    ///     engineer-pets.json. Per NanoLine, the best learned nano castable ON this pet (its own target
+    ///     reqs - NPCFamily / Breed - decide), cast only if the pet lacks an equal-or-better buff of that
+    ///     line (checked against the pet's own buff list + a refresh margin), in range, past the recast
+    ///     guard. One cast per pass; returns true when it took the cast slot. Pet HEALS are filtered out
+    ///     (they Hit Health and carry no stat Modify) - repair is a separate path.
+    /// </summary>
+    private bool BuffPets(LocalPlayer me)
+    {
+        var spells = me.SpellList;
+        if (spells == null || spells.Length == 0 || _petBuffIds.Count == 0)
+        {
+            return false;
+        }
+
+        var pets = me.Pets?.Where(p => p.IsCombatPet).ToList();
+        if (pets == null || pets.Count == 0)
+        {
+            return false;
+        }
+
+        // Learned pet-buff nanos that actually MODIFY pet stats (heals Hit Health -> empty Modifies ->
+        // skipped), grouped per NanoLine, best StackingOrder first.
+        var byLine = new Dictionary<NanoLine, List<NanoItem>>();
+        foreach (var id in spells)
+        {
+            if (!_petBuffIds.Contains(id))
+            {
+                continue;
+            }
+
+            var np = NanoLibrary.Find(id);
+            if (np == null || np.Modifies.Count == 0 || !ItemData.Find(id, out NanoItem ni) || ni == null)
+            {
+                continue;
+            }
+
+            if (!byLine.TryGetValue(ni.NanoLine, out var list))
+            {
+                byLine[ni.NanoLine] = list = new List<NanoItem>();
+            }
+
+            list.Add(ni);
+        }
+
+        foreach (var list in byLine.Values)
+        {
+            list.Sort((a, b) => (b.StackingOrder & 0xFFFFF).CompareTo(a.StackingOrder & 0xFFFFF));
+        }
+
+        foreach (var pet in pets)
+        {
+            foreach (var kv in byLine)
+            {
+                var best = kv.Value.FirstOrDefault(ni => CastableOnPet(ni, pet));
+                if (best == null || !PetNeedsBuff(pet, best))
+                {
+                    continue;
+                }
+
+                var key = pet.Identity.Instance + ":" + best.Id;
+                if (_petBuffAt.TryGetValue(key, out var last) && _clock - last < PetBuffRecastSec)
+                {
+                    continue;
+                }
+
+                if (best.Range > 0 && me.DistanceFrom(pet) > best.Range)
+                {
+                    continue; // wait until it's in reach
+                }
+
+                _petBuffAt[key] = _clock;
+                me.Cast(pet.Identity, best.Id);
+                _logger.LogInformation(
+                    $"PET: buffing '{best.Name}' [{best.Id}] ({kv.Key}) on {pet.Name}#{pet.Identity.Instance}.");
+                return true; // one cast per pass
+            }
+        }
+
+        return false;
+    }
+
+    private static bool CastableOnPet(NanoItem ni, NpcChar pet)
+    {
+        try
+        {
+            return ni.MeetsUseReqs(pet, false, false);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Missing, or no equal/better buff of the line is up, or the one up is about to run out (refresh
+    // margin capped at a quarter of its duration so short buffs aren't recast the instant they land).
+    private static bool PetNeedsBuff(NpcChar pet, NanoItem best)
+    {
+        var up = pet.Buffs?.FirstOrDefault(b => b.Id == best.Id
+            || (b.NanoItem != null && b.NanoItem.NanoLine == best.NanoLine
+                && b.NanoItem.StackingOrder >= best.StackingOrder));
+        if (up == null)
+        {
+            return true;
+        }
+
+        var remaining = up.Cooldown?.RemainingTime ?? -1;
+        if (remaining < 0)
+        {
+            return false; // up, timer unknown - leave it
+        }
+
+        return remaining < Math.Min(30.0, best.TotalTime / 4.0);
+    }
+
     // ---- Data -------------------------------------------------------------------------------
+
+    /// <summary>
+    ///     The Engineer's pet-targeted buff nano ids from engineer-pets.json ("petBuffs"). Loaded whole;
+    ///     BuffPets filters to the ones that modify pet stats (excludes the Hit-based pet heals) and that
+    ///     the character has learned. Best-effort - a missing file just leaves pet-buffing off.
+    /// </summary>
+    private void LoadPetBuffIds()
+    {
+        try
+        {
+            var file = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GameData", "profiles", "engineer-pets.json");
+            if (!File.Exists(file))
+            {
+                return;
+            }
+
+            var doc = JObject.Parse(File.ReadAllText(file));
+            foreach (var b in doc["petBuffs"] ?? new JArray())
+            {
+                var id = (int?)b["id"];
+                if (id.HasValue && id.Value > 0)
+                {
+                    _petBuffIds.Add(id.Value);
+                }
+            }
+
+            _logger.LogInformation($"PET: {_petBuffIds.Count} Engineer pet-buff ids loaded.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "PET: failed to read engineer-pets.json pet buffs - pet-buffing disabled.");
+        }
+    }
 
     /// <summary>
     ///     The Engineer's robot summon nano ids from GameData/profiles/engineer-pets.json (cited

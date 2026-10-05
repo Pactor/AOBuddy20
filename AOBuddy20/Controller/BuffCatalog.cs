@@ -253,9 +253,16 @@ public sealed class BuffCatalog
     ///     one skill share a strain, so only one is ever held; we pick the lowest that clears the control
     ///     floor and bank the NCU (owner, 2026-10-05: +90 over +140 when it still holds). Level/SL gated.
     /// </summary>
-    public BuffEntry? BestRung(int statId, int otherStatId, int need, int myLevel, bool paid)
+    public BuffEntry? BestRung(int statId, int otherStatId, int need, int myLevel, bool paid) =>
+        BestRungIn(_buffs, statId, otherStatId, need, myLevel, paid);
+
+    // As BestRung, over a given candidate pool (bot catalog plus our learned self-buffs). A rung is a
+    // single-skill buff (adds this skill, not its partner); pool spanning both sources lets a bigger
+    // self-cast rung win where one exists (owner, 2026-10-05: self-buffs sometimes beat the bot's).
+    private static BuffEntry? BestRungIn(IEnumerable<BuffEntry> pool, int statId, int otherStatId, int need,
+        int myLevel, bool paid)
     {
-        var rungs = _buffs
+        var rungs = pool
             .Where(b => b.Adds(statId) > 0 && b.Adds(otherStatId) == 0 && Castable(b, myLevel, paid))
             .OrderBy(b => b.Adds(statId))
             .ToList();
@@ -264,9 +271,76 @@ public sealed class BuffCatalog
             return null;
         }
 
-        // lowest rung that covers the need; if none does, the biggest we can take (summon moment uses the
-        // wrangle on top, then we downshift - but a rung that cannot even reach the need is still the best base).
         return rungs.FirstOrDefault(b => b.Adds(statId) >= need) ?? rungs[^1];
+    }
+
+    /// <summary>
+    ///     The buffs the bot can put on ITSELF: its learned nanos (<paramref name="me" />.SpellList) that
+    ///     raise a nano skill or an ability and that it can cast right now, turned into catalog candidates
+    ///     (Profession = ours so they route self-cast, no bot tell). Merged into the control-plan pool so a
+    ///     profession's own self-buff competes with - and where bigger, beats - the bot's, and SELF-ONLY
+    ///     buffs (no bot equivalent) are available at all. Empty for a class with no such self-buffs (an
+    ///     Engineer has no self MC/TS - this mainly feeds the MP brain and self-cast survival).
+    /// </summary>
+    private List<BuffEntry> SelfBuffCandidates(LocalPlayer me, string myProfession)
+    {
+        var list = new List<BuffEntry>();
+        var learned = me?.SpellList;
+        if (learned == null)
+        {
+            return list;
+        }
+
+        foreach (var id in learned)
+        {
+            var np = NanoLibrary.Find(id);
+            if (np == null)
+            {
+                continue;
+            }
+
+            // Relevant to the MC/TS plan only: it raises a nano skill or a trickle ability.
+            var relevant = np.Modify(130) > 0 || np.Modify(131) > 0
+                           || np.Modify(StatStrength) > 0 || np.Modify(StatAgility) > 0
+                           || np.Modify(StatStamina) > 0 || np.Modify(StatIntelligence) > 0;
+            if (!relevant)
+            {
+                continue;
+            }
+
+            // Only if we can actually cast it now (learned AND reqs met) - then its gate is moot.
+            if (!ItemData.Find(id, out NanoItem ni) || ni == null || !SafeMeetsUseReqs(ni, me))
+            {
+                continue;
+            }
+
+            var entry = new BuffEntry
+            {
+                Profession = myProfession, // marks it self-castable and routes to self-cast
+                Name = NanoLibrary.NameOf(id),
+                NanoId = id,
+                Ncu = ni.NCU,
+                Strain = np.Stat(75),
+                Modifies = np.Modifies,
+                Tell = "", // self only - no bot tell
+            };
+            entry.LandIds.Add(id);
+            list.Add(entry);
+        }
+
+        return list;
+    }
+
+    private static bool SafeMeetsUseReqs(NanoItem ni, LocalPlayer me)
+    {
+        try
+        {
+            return ni.MeetsUseReqs(me, false, false);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>The MC rung (stat 130, partner TS 131) and the TS rung (131, partner 130).</summary>
@@ -339,7 +413,7 @@ public sealed class BuffCatalog
     ///     rung cannot reach the floor - the caller must then summon a SMALLER pet (the sustain-gate).
     /// </summary>
     public ControlPlan BuildControlPlan(LocalPlayer me, int baseMc, int baseTs, int reqMc, int reqTs, bool paid,
-        double controlFloor = 0.80)
+        string myProfession = "", double controlFloor = 0.80)
     {
         var plan = new ControlPlan
         {
@@ -353,20 +427,24 @@ public sealed class BuffCatalog
 
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
 
+        // Candidate pool = the bot catalog PLUS our own learned self-buffs, so a profession's self-buff
+        // competes with the bot's per strain (and self-only buffs are available at all).
+        var pool = _buffs.Concat(SelfBuffCandidates(me, myProfession)).ToList();
+
         plan.Ncu = BestNcuBuff(me);
 
         // Both-skill stackers: the best castable buff of each distinct strain that raises MC AND TS.
         // Different strains stack, so we take one per strain (Composite Nano Expertise strain 91 always;
         // the Composite line strain 165 when paid). TODO: for the multi-tier Composite strain this takes
         // the biggest - NCU-minimal tier selection there is a later refinement.
-        var both = _buffs
+        var both = pool
             .Where(b => b.Adds(130) > 0 && b.Adds(131) > 0 && Castable(b, myLevel, paid))
             .GroupBy(b => b.Strain)
             .Select(g => g.OrderByDescending(b => Math.Min(b.Adds(130), b.Adds(131))).First())
             .ToList();
 
         // Attribute buffs (raise abilities, not the skills directly) - best castable per strain, by MC trickle.
-        var attrs = _buffs
+        var attrs = pool
             .Where(b => Castable(b, myLevel, paid) && b.Adds(130) == 0 && b.Adds(131) == 0 && AttrTrickle(b, 130) > 0)
             .GroupBy(b => b.Strain)
             .Select(g => g.OrderByDescending(b => AttrTrickle(b, 130)).First())
@@ -380,8 +458,8 @@ public sealed class BuffCatalog
 
         var needMc = plan.FloorMc - fixedMc;
         var needTs = plan.FloorTs - fixedTs;
-        plan.McRung = needMc > 0 ? BestMcRung(needMc, myLevel, paid) : null;
-        plan.TsRung = needTs > 0 ? BestTsRung(needTs, myLevel, paid) : null;
+        plan.McRung = needMc > 0 ? BestRungIn(pool, 130, 131, needMc, myLevel, paid) : null;
+        plan.TsRung = needTs > 0 ? BestRungIn(pool, 131, 130, needTs, myLevel, paid) : null;
 
         plan.DurableMc = fixedMc + (plan.McRung?.Adds(130) ?? 0);
         plan.DurableTs = fixedTs + (plan.TsRung?.Adds(131) ?? 0);
