@@ -51,6 +51,29 @@ req <= 582 = Semi-Sentient Guardbot (569, held at 82%)**, NOT Patchwork Warbot (
 this yet: it excludes single-skill buffs, has no NCU math / sustain-gate / downshift (4a.2-full
 + 4b TODOs).
 
+## NCU buffs (Fixer NCU line, strain 257) - receiver LEVEL-LOCKED, each tier
+
+The `ncu` tell casts the Fixer NCU ladder; you keep the best your level allows. Each version is
+level-locked to the RECEIVER (owner, 2026-10-05; the nano gates only on `Level`, no prof/skill):
+
+| Receiver level | Buff | +Max NCU |
+|---|---|---|
+| L25 | NCU Compressor / Retool NCU | +20 / +40 |
+| L50 | Jury-rigged NCU Analyzer | **+60** |
+| L75 | Deck Recoder | +85 |
+| L125 | Recompiling Memory Analyzer | +110 |
+| L135 | QuarkStor NCU Core | +150 |
+| L165 | Active Viral Compressor | +195 |
+| L185 | Sentient Viral Recoder | +250 |
+| L215 | Sync Compressor | +500 |
+
+(Separate perk/Grid "NCU Booster" line, strain 558: +10/+23/+40/+70, stacks on top.)
+
+**This is the binding resource for the pet-buff stack.** L50 example: NCU buff +60 -> Max NCU
+148 -> 208; the stack mcmo 51 + stmo 50 + wrangle 58 = 159 then FITS (159 < 208, ~49 spare for
+survivability). Without the NCU buff (148) the 159-NCU stack does not hold - that is why NCU is
+requested FIRST.
+
 ## The headline facts (owner's questions, answered against the data)
 
 1. **The Engineer cannot self-buff MC/TS.** Zero Engineer-gated (prof 3) nanos modify 130/131
