@@ -74,6 +74,7 @@ public sealed class HuntController
     public SimpleChar? Target { get; private set; }
 
     private double _clock;
+    private Identity? _manual; // the 'pet attack' sticky target - overrides everything until cleared/dead
     private Identity? _current;
     private double _sentAt;
     private int _hpAtSend;
@@ -233,6 +234,19 @@ public sealed class HuntController
         var centre = me.Transform.Position;
         var guard = BuildGuard(me);
 
+        // 0) MANUAL 'pet attack' - the owner pointed the pets at a mob; hold them on it (overrides
+        // hunt and owner-assist) until it dies/despawns or the owner clears it ('pet follow').
+        if (_manual.HasValue)
+        {
+            if (DynelManager.Find(_manual.Value, out NpcChar manual) && IsAlive(manual))
+            {
+                Target = manual;
+                return manual;
+            }
+
+            _manual = null; // the manual target is gone - fall back to auto
+        }
+
         // 1) OWNER-ASSIST - overrides every list, works even with hunt off.
         var ownerMob = OwnerFightTarget(me);
         if (ownerMob != null)
@@ -331,15 +345,16 @@ public sealed class HuntController
 
     // ---- Owner-assist ----------------------------------------------------------------------
 
+    private PlayerChar? ResolveOwner()
+    {
+        return string.IsNullOrEmpty(_ownerName)
+            ? null
+            : DynelManager.Players.FirstOrDefault(p => string.Equals(p.Name, _ownerName, StringComparison.OrdinalIgnoreCase));
+    }
+
     private SimpleChar? OwnerFightTarget(LocalPlayer me)
     {
-        if (string.IsNullOrEmpty(_ownerName))
-        {
-            return null;
-        }
-
-        var owner = DynelManager.Players.FirstOrDefault(p =>
-            string.Equals(p.Name, _ownerName, StringComparison.OrdinalIgnoreCase));
+        var owner = ResolveOwner();
         if (owner == null || !owner.FightingIdentity.HasValue
             || !DynelManager.Find(owner.FightingIdentity.Value, out NpcChar mob) || !IsAlive(mob))
         {
@@ -347,6 +362,67 @@ public sealed class HuntController
         }
 
         return me.DistanceFrom(mob) <= Radius + LeashSlack ? mob : null;
+    }
+
+    /// <summary>
+    ///     The 'pet attack' / 'pet follow' owner command: point the pets at the owner's current
+    ///     target and HOLD them on it (overrides hunt/owner-assist until it dies or 'pet follow'
+    ///     clears it), or stand them down. The owner's target is read from owner.FightingIdentity,
+    ///     which the SDK fills from combat - so 'pet attack' needs the owner to have an actual
+    ///     target (it may require being in combat; see [[owner-target-assist]]).
+    /// </summary>
+    public void CommandPet(string[] parts, Action<string> reply)
+    {
+        var sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "status";
+        var me = DynelManager.LocalPlayer;
+        switch (sub)
+        {
+            case "attack":
+            case "kill":
+                if (me == null)
+                {
+                    reply("Not in play.");
+                    return;
+                }
+
+                if (!me.Pets.Any(p => p.Role == PetType.Attack))
+                {
+                    reply("No attack pet up.");
+                    return;
+                }
+
+                var owner = ResolveOwner();
+                if (owner == null)
+                {
+                    reply(string.IsNullOrEmpty(_ownerName) ? "No owner configured." : $"Can't see '{_ownerName}' nearby.");
+                    return;
+                }
+
+                if (!owner.FightingIdentity.HasValue
+                    || !DynelManager.Find(owner.FightingIdentity.Value, out NpcChar mob) || !IsAlive(mob))
+                {
+                    reply($"'{_ownerName}' has no target - select or attack a mob first (may need to be in combat).");
+                    return;
+                }
+
+                _manual = mob.Identity;
+                _logger.LogInformation($"PET: manual attack -> '{mob.Name}' (owner's target).");
+                reply($"Pets -> '{mob.Name}'.");
+                break;
+
+            case "follow":
+            case "stop":
+                _manual = null;
+                _current = null;
+                reply("Pets on Follow (manual target cleared).");
+                break;
+
+            default:
+                reply(_manual.HasValue
+                    ? "Pets holding a manual target ('pet follow' to release). Usage: pet attack|follow."
+                    : "Pets on auto (hunt / owner-assist). Usage: pet attack|follow.");
+                break;
+        }
     }
 
     // ---- Huntable / faction / level --------------------------------------------------------
