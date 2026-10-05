@@ -9,6 +9,7 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using AOBuddy20.Controlling; // BuffCatalog (shared control/buff math)
 using AOBuddy20.Enums;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
@@ -51,10 +52,77 @@ public abstract class PetBrain
     /// </summary>
     protected const double ControlFloor = 0.80;
 
+    /// <summary>A running buff with less than this left is treated as already gone when planning, so the
+    /// plan re-requests it; more than this is "stable" - counted as up and skipped from the request list.</summary>
+    protected const double RefreshSoonSec = 30.0;
+
     protected PetBrain(ILogger logger, ControlArbiter controlArbiter)
     {
         _logger = logger;
         _controlArbiter = controlArbiter;
+    }
+
+    // ---- Shared buff-state primitives (every pet profession uses these) ---------------------
+    // Overbuffing to control a pet is NOT the Engineer's alone - every pet class does it, just over
+    // different skills (Engineer/MP-attack: MC+TS; MP mezz: MatMet+TS; MP heal: BioMet+TS). The control
+    // MATH is in BuffCatalog.BuildControlPlan (skill-set generalized); these are the generic state reads
+    // a profession brain feeds it. Only the pet DEFINITIONS (which pets, their required-skill sets),
+    // the SUMMON mechanic, and the per-role DRIVE belong to the subclass.
+
+    /// <summary>Paid account (Shadowlands), Expansion stat bit 2 - decides which buffs we may receive.</summary>
+    protected static bool IsPaid(LocalPlayer me) => me.TryGetStat(Stat.Expansion, out var e) && (e & 2) != 0;
+
+    /// <summary>Is a specific nano running on a char right now.</summary>
+    protected static bool BuffUp(SimpleChar c, int nanoId) => c.Buffs?.Any(b => b.Id == nanoId) ?? false;
+
+    /// <summary>
+    ///     The UNBUFFED base of a skill: current value minus everything our running buffs contribute to it
+    ///     (flat modifier + ability trickle, from the pack). Planning from this is correct whether the bot
+    ///     is bare or already partially buffed - the plan re-adds the full durable set and routing skips
+    ///     the strains already stably up (<see cref="StableStrains" />).
+    /// </summary>
+    protected static int UnbuffedBase(LocalPlayer me, Stat stat)
+    {
+        var cur = me.TryGetStat(stat, out var v) ? v : 0;
+        if (me.Buffs != null)
+        {
+            foreach (var buff in me.Buffs)
+            {
+                cur -= BuffCatalog.SkillContributionOf(buff.Id, (int)stat);
+            }
+        }
+
+        return cur;
+    }
+
+    /// <summary>
+    ///     The NanoStrains of buffs running on us with time to spare (>= <see cref="RefreshSoonSec" />) -
+    ///     "stable", counted as up and skipped from the request list. Buffs expiring sooner are left out,
+    ///     so the plan refreshes them (owner's timer model, 2026-10-05).
+    /// </summary>
+    protected HashSet<int> StableStrains(LocalPlayer me)
+    {
+        var strains = new HashSet<int>();
+        if (me.Buffs == null)
+        {
+            return strains;
+        }
+
+        foreach (var buff in me.Buffs)
+        {
+            if (buff.Cooldown.RemainingTime < RefreshSoonSec)
+            {
+                continue;
+            }
+
+            var s = BuffCatalog.StrainOf(buff.Id);
+            if (s != 0)
+            {
+                strains.Add(s);
+            }
+        }
+
+        return strains;
     }
 
     protected readonly ILogger _logger;

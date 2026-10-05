@@ -299,10 +299,10 @@ public sealed class BuffCatalog
                 continue;
             }
 
-            // Relevant to the MC/TS plan only: it raises a nano skill or a trickle ability.
-            var relevant = np.Modify(130) > 0 || np.Modify(131) > 0
-                           || np.Modify(StatStrength) > 0 || np.Modify(StatAgility) > 0
-                           || np.Modify(StatStamina) > 0 || np.Modify(StatIntelligence) > 0;
+            // Relevant to a pet control plan: it raises a gating nano skill (MatMet/BioMet/MC/TS) or an
+            // ability that trickles into one.
+            var relevant = TrickleFactors.Keys.Any(s => np.Modify(s) > 0)
+                           || AbilityStats.Any(a => np.Modify(a) > 0);
             if (!relevant)
             {
                 continue;
@@ -347,27 +347,42 @@ public sealed class BuffCatalog
     public BuffEntry? BestMcRung(int need, int myLevel, bool paid) => BestRung(130, 131, need, myLevel, paid);
     public BuffEntry? BestTsRung(int need, int myLevel, bool paid) => BestRung(131, 130, need, myLevel, paid);
 
-    // Ability stat ids and the VERIFIED trickle factors into MC/TS (GameData/SkillTrickle.json, factor
-    // order [Str,Agi,Sta,Int,Sen,Psy]): MC(130) = Stamina 0.2 + Int 0.8; TS(131) = Agility 0.2 + Int 0.8.
-    // A skill's trickle = floor( Sum(ability * factor) / 4 ), so +12 to all abilities = floor(12/4) = +3.
-    private const int StatStrength = 16, StatAgility = 17, StatStamina = 18, StatIntelligence = 19;
+    // VERIFIED ability-trickle factors into the pet-gating nano skills (GameData/SkillTrickle.json,
+    // ability order [Str,Agi,Sta,Int,Sen,Psy]). A skill's trickle = floor( Sum(ability*factor) / 4 ),
+    // so +12 to all abilities = floor(12/4) = +3 for each of these (all Int-dominated). Not MC/TS-only:
+    // this is what lets the SAME control plan gate an MP mezz pet on MatMet or a heal pet on BioMet.
+    private static readonly int[] AbilityStats = { 16, 17, 18, 19, 20, 21 }; // Str,Agi,Sta,Int,Sen,Psy
 
-    /// <summary>How much an ability buff trickles into a nano skill (130/131), from the verified factors.</summary>
+    private static readonly Dictionary<int, double[]> TrickleFactors = new()
+    {
+        [127] = new[] { 0, 0, 0, 0.8, 0, 0.2 }, // Matter Metamorphosis (MP mezz)
+        [128] = new[] { 0, 0, 0, 0.8, 0, 0.2 }, // Biological Metamorphosis (MP heal)
+        [130] = new[] { 0, 0, 0.2, 0.8, 0, 0.0 }, // Matter Creation
+        [131] = new[] { 0, 0.2, 0, 0.8, 0, 0.0 }, // Time & Space
+    };
+
+    /// <summary>How much an ability buff trickles into a nano skill, from the verified factors (0 if the
+    /// skill has no trickle table entry - only the pet-gating nano skills are tracked).</summary>
     private static int AttrTrickle(BuffEntry b, int statId)
     {
-        double sum = statId switch
+        if (!TrickleFactors.TryGetValue(statId, out var f))
         {
-            130 => b.Adds(StatStamina) * 0.2 + b.Adds(StatIntelligence) * 0.8,
-            131 => b.Adds(StatAgility) * 0.2 + b.Adds(StatIntelligence) * 0.8,
-            _ => 0,
-        };
+            return 0;
+        }
+
+        double sum = 0;
+        for (var i = 0; i < AbilityStats.Length; i++)
+        {
+            sum += b.Adds(AbilityStats[i]) * f[i];
+        }
+
         return (int)Math.Floor(sum / 4.0);
     }
 
     /// <summary>
-    ///     How much a RUNNING nano (by id) contributes to a nano skill (130/131) right now - its flat
-    ///     modifier plus any ability trickle - read from the pack. Lets a brain back out the UNBUFFED
-    ///     base (current skill minus the running buffs) so the control plan starts from solid ground.
+    ///     How much a RUNNING nano (by id) contributes to a nano skill right now - its flat modifier plus
+    ///     any ability trickle - read from the pack. Lets a brain back out the UNBUFFED base (current
+    ///     skill minus the running buffs) so the control plan starts from solid ground, for any skill.
     /// </summary>
     public static int SkillContributionOf(int nanoId, int statId)
     {
@@ -377,106 +392,169 @@ public sealed class BuffCatalog
             return 0;
         }
 
-        double trickle = statId switch
+        var trickle = 0;
+        if (TrickleFactors.TryGetValue(statId, out var f))
         {
-            130 => np.Modify(StatStamina) * 0.2 + np.Modify(StatIntelligence) * 0.8,
-            131 => np.Modify(StatAgility) * 0.2 + np.Modify(StatIntelligence) * 0.8,
-            _ => 0,
-        };
-        return np.Modify(statId) + (int)Math.Floor(trickle / 4.0);
+            double sum = 0;
+            for (var i = 0; i < AbilityStats.Length; i++)
+            {
+                sum += np.Modify(AbilityStats[i]) * f[i];
+            }
+
+            trickle = (int)Math.Floor(sum / 4.0);
+        }
+
+        return np.Modify(statId) + trickle;
     }
 
     /// <summary>The NanoStrain (stat 75) of a nano by id, 0 if unknown - for the running-buff skip set.</summary>
     public static int StrainOf(int nanoId) => NanoLibrary.Find(nanoId)?.Stat(75) ?? 0;
 
-    /// <summary>The durable (no-wrangle) buff plan to CONTROL a pet, and whether it holds at the floor.</summary>
+    /// <summary>
+    ///     The durable (no-wrangle) buff plan to CONTROL a pet, over AN ARBITRARY SET of required skills -
+    ///     MC+TS for an Engineer robot or MP attack pet, MatMet+TS for an MP mezz pet, BioMet+TS for a heal
+    ///     pet. Per skill it holds Durable (projected value) and Floor (0.80*req); CanControl is true only
+    ///     when every required skill clears its floor.
+    /// </summary>
     public sealed class ControlPlan
     {
         public bool CanControl;
-        public int DurableMc, DurableTs; // projected skill with the durable buffs, no wrangle
-        public int FloorMc, FloorTs; // control floor = ceil(controlFloor * req), per skill
-        public double MarginPct; // min(durable/req) * 100 - how far above the 80% line
+        public readonly Dictionary<int, int> Durable = new(); // stat -> projected durable value (no wrangle)
+        public readonly Dictionary<int, int> Floor = new(); // stat -> ceil(controlFloor * req)
+        public double MarginPct; // min over required skills of durable/req * 100
         public NcuPick? Ncu; // the NCU buff to request first
-        public BuffEntry? McRung, TsRung; // the chosen single-skill rungs (lowest that holds)
-        public readonly List<BuffEntry> Stackers = new(); // the both-skill + attribute buffs applied
+        public readonly List<BuffEntry> Buffs = new(); // every durable buff the plan applies
         public int MaxNcu, NcuUsed, NcuFree; // NCU budget once the durable set is up
+
+        // Convenience for the common MC/TS pet (keeps callers/logs simple).
+        public int DurableMc => Durable.TryGetValue(130, out var v) ? v : 0;
+        public int DurableTs => Durable.TryGetValue(131, out var v) ? v : 0;
+        public int FloorMc => Floor.TryGetValue(130, out var v) ? v : 0;
+        public int FloorTs => Floor.TryGetValue(131, out var v) ? v : 0;
     }
 
     /// <summary>
-    ///     Control-first: can we DURABLY hold a pet needing <paramref name="reqMc" /> / <paramref name="reqTs" />
-    ///     at the 80% floor WITHOUT the (short) wrangle, and what is the minimal durable buff set? Takes the
-    ///     UNBUFFED base skills (<paramref name="baseMc" />/<paramref name="baseTs" />) so the caller controls
-    ///     the baseline (the first live test strips buffs, so me's live stats == base). Builds the stack: the
-    ///     best castable both-skill buff per strain (Nano Expertise, and the Composite line if paid - they
-    ///     stack across strains), the attribute trickle, then the LOWEST single-skill rung that still clears
-    ///     the floor (banking NCU per owner's +90-over-+140 rule). CanControl is false when even the biggest
-    ///     rung cannot reach the floor - the caller must then summon a SMALLER pet (the sustain-gate).
+    ///     Control-first, profession-agnostic: can we DURABLY hold a pet whose summon gates on
+    ///     <paramref name="reqByStat" /> (stat -> required skill) at the 80% floor WITHOUT the short wrangle,
+    ///     and what is the durable buff set? <paramref name="baseByStat" /> is the UNBUFFED base per required
+    ///     skill (the caller backs running buffs out). Pool = bot catalog + our learned self-buffs. Phase 1
+    ///     takes the best per strain of the buffs that raise MORE THAN ONE required skill or trickle from
+    ///     abilities (composites, Nano Expertise, Attribute Boost - they stack across strains); phase 2 adds,
+    ///     per still-short skill, the LOWEST single-skill rung closing its gap (banking NCU). CanControl is
+    ///     false when a skill cannot reach its floor - the caller then steps down the pet (the sustain-gate).
     /// </summary>
-    public ControlPlan BuildControlPlan(LocalPlayer me, int baseMc, int baseTs, int reqMc, int reqTs, bool paid,
-        string myProfession = "", double controlFloor = 0.80)
+    public ControlPlan BuildControlPlan(LocalPlayer me, IReadOnlyDictionary<int, int> baseByStat,
+        IReadOnlyDictionary<int, int> reqByStat, bool paid, string myProfession = "", double controlFloor = 0.80)
     {
-        var plan = new ControlPlan
+        var plan = new ControlPlan();
+        foreach (var kv in reqByStat)
         {
-            FloorMc = (int)Math.Ceiling(controlFloor * reqMc),
-            FloorTs = (int)Math.Ceiling(controlFloor * reqTs),
-        };
-        if (!Loaded || me == null)
+            plan.Floor[kv.Key] = (int)Math.Ceiling(controlFloor * kv.Value);
+        }
+
+        if (!Loaded || me == null || reqByStat.Count == 0)
         {
             return plan;
         }
 
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
-
-        // Candidate pool = the bot catalog PLUS our own learned self-buffs, so a profession's self-buff
-        // competes with the bot's per strain (and self-only buffs are available at all).
-        var pool = _buffs.Concat(SelfBuffCandidates(me, myProfession)).ToList();
+        var reqStats = reqByStat.Keys.ToList();
+        var pool = _buffs.Concat(SelfBuffCandidates(me, myProfession))
+            .Where(b => Castable(b, myLevel, paid)).ToList();
 
         plan.Ncu = BestNcuBuff(me);
 
-        // Both-skill stackers: the best castable buff of each distinct strain that raises MC AND TS.
-        // Different strains stack, so we take one per strain (Composite Nano Expertise strain 91 always;
-        // the Composite line strain 165 when paid). TODO: for the multi-tier Composite strain this takes
-        // the biggest - NCU-minimal tier selection there is a later refinement.
-        var both = pool
-            .Where(b => b.Adds(130) > 0 && b.Adds(131) > 0 && Castable(b, myLevel, paid))
+        int Help(BuffEntry e, int stat) => e.Adds(stat) + AttrTrickle(e, stat);
+
+        var cur = new Dictionary<int, int>();
+        foreach (var s in reqStats)
+        {
+            cur[s] = baseByStat.TryGetValue(s, out var b) ? b : 0;
+        }
+
+        // Phase 1: stackers that raise >1 required skill (composites) or trickle from abilities - best per
+        // strain (they stack across strains). TODO: multi-tier composite picks the biggest; NCU-minimal
+        // tier selection there is a later refinement.
+        var multi = pool
+            .Where(b =>
+            {
+                var directReq = reqStats.Count(s => b.Adds(s) > 0);
+                var abilityOnly = reqStats.All(s => b.Adds(s) == 0) && reqStats.Any(s => Help(b, s) > 0);
+                return directReq >= 2 || abilityOnly;
+            })
             .GroupBy(b => b.Strain)
-            .Select(g => g.OrderByDescending(b => Math.Min(b.Adds(130), b.Adds(131))).First())
+            .Select(g => g.OrderByDescending(b => reqStats.Sum(s => Help(b, s))).First())
             .ToList();
 
-        // Attribute buffs (raise abilities, not the skills directly) - best castable per strain, by MC trickle.
-        var attrs = pool
-            .Where(b => Castable(b, myLevel, paid) && b.Adds(130) == 0 && b.Adds(131) == 0 && AttrTrickle(b, 130) > 0)
-            .GroupBy(b => b.Strain)
-            .Select(g => g.OrderByDescending(b => AttrTrickle(b, 130)).First())
-            .ToList();
+        foreach (var b in multi)
+        {
+            plan.Buffs.Add(b);
+            foreach (var s in reqStats)
+            {
+                cur[s] += Help(b, s);
+            }
+        }
 
-        plan.Stackers.AddRange(both);
-        plan.Stackers.AddRange(attrs);
+        // Phase 2: per still-short required skill, the cheapest SINGLE-skill rung (raises this skill, none
+        // of the OTHER required skills) that closes the gap - or the biggest if none does.
+        foreach (var s in reqStats)
+        {
+            var deficit = plan.Floor[s] - cur[s];
+            if (deficit <= 0)
+            {
+                continue;
+            }
 
-        var fixedMc = baseMc + both.Sum(b => b.Adds(130)) + attrs.Sum(b => AttrTrickle(b, 130));
-        var fixedTs = baseTs + both.Sum(b => b.Adds(131)) + attrs.Sum(b => AttrTrickle(b, 131));
+            var others = reqStats.Where(x => x != s).ToList();
+            var rungs = pool
+                .Where(b => b.Adds(s) > 0 && others.All(o => b.Adds(o) == 0))
+                .OrderBy(b => b.Adds(s)).ToList();
+            if (rungs.Count == 0)
+            {
+                continue;
+            }
 
-        var needMc = plan.FloorMc - fixedMc;
-        var needTs = plan.FloorTs - fixedTs;
-        plan.McRung = needMc > 0 ? BestRungIn(pool, 130, 131, needMc, myLevel, paid) : null;
-        plan.TsRung = needTs > 0 ? BestRungIn(pool, 131, 130, needTs, myLevel, paid) : null;
+            var pick = rungs.FirstOrDefault(b => b.Adds(s) >= deficit) ?? rungs[^1];
+            if (!plan.Buffs.Contains(pick))
+            {
+                plan.Buffs.Add(pick);
+                foreach (var s2 in reqStats)
+                {
+                    cur[s2] += Help(pick, s2);
+                }
+            }
+        }
 
-        plan.DurableMc = fixedMc + (plan.McRung?.Adds(130) ?? 0);
-        plan.DurableTs = fixedTs + (plan.TsRung?.Adds(131) ?? 0);
-        plan.CanControl = plan.DurableMc >= plan.FloorMc && plan.DurableTs >= plan.FloorTs;
-        plan.MarginPct = reqMc > 0 && reqTs > 0
-            ? Math.Min((double)plan.DurableMc / reqMc, (double)plan.DurableTs / reqTs) * 100.0
-            : 0;
+        plan.CanControl = true;
+        var margin = 1.0;
+        foreach (var s in reqStats)
+        {
+            plan.Durable[s] = cur[s];
+            if (cur[s] < plan.Floor[s])
+            {
+                plan.CanControl = false;
+            }
 
-        // NCU budget once the durable set is up (the wrangle is separate - summon-moment only).
+            if (reqByStat[s] > 0)
+            {
+                margin = Math.Min(margin, (double)cur[s] / reqByStat[s]);
+            }
+        }
+
+        plan.MarginPct = margin * 100.0;
+
         var baseMaxNcu = me.TryGetStat(Stat.MaxNCU, out var mncu) ? mncu : 0;
         plan.MaxNcu = baseMaxNcu + (plan.Ncu?.MaxNcuAdded ?? 0);
-        plan.NcuUsed = both.Sum(b => b.Ncu) + attrs.Sum(b => b.Ncu)
-                       + (plan.McRung?.Ncu ?? 0) + (plan.TsRung?.Ncu ?? 0);
+        plan.NcuUsed = plan.Buffs.Sum(b => b.Ncu);
         plan.NcuFree = plan.MaxNcu - plan.NcuUsed;
-
         return plan;
     }
+
+    /// <summary>MC/TS convenience overload (Engineer robot / MP attack pet).</summary>
+    public ControlPlan BuildControlPlan(LocalPlayer me, int baseMc, int baseTs, int reqMc, int reqTs, bool paid,
+        string myProfession = "", double controlFloor = 0.80) =>
+        BuildControlPlan(me, new Dictionary<int, int> { [130] = baseMc, [131] = baseTs },
+            new Dictionary<int, int> { [130] = reqMc, [131] = reqTs }, paid, myProfession, controlFloor);
 
     /// <summary>How a buff is obtained.</summary>
     public enum BuffSource
@@ -563,22 +641,12 @@ public sealed class BuffCatalog
             });
         }
 
-        foreach (var b in plan.Stackers)
+        foreach (var b in plan.Buffs)
         {
             if (!skip.Contains(b.Strain))
             {
                 actions.Add(RouteFor(b, myProfession, botName, isLearned));
             }
-        }
-
-        if (plan.McRung != null && !skip.Contains(plan.McRung.Strain))
-        {
-            actions.Add(RouteFor(plan.McRung, myProfession, botName, isLearned));
-        }
-
-        if (plan.TsRung != null && plan.TsRung != plan.McRung && !skip.Contains(plan.TsRung.Strain))
-        {
-            actions.Add(RouteFor(plan.TsRung, myProfession, botName, isLearned));
         }
 
         return actions;

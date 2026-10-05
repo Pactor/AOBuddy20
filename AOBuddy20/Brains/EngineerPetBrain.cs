@@ -95,9 +95,7 @@ public sealed class EngineerPetBrain : PetBrain
     private double _buffAskedAt = -1e9;
     private int _loggedBuffOppFor; // the want-pet id we last logged a buff opportunity for
 
-    // A running buff with less than this left is treated as already gone when planning (so we re-request
-    // it); one with more is "stable" - counted as up and skipped from the request list (owner's model).
-    private const double RefreshSoonSec = 30.0;
+    // RefreshSoonSec lives on the base PetBrain (shared timer model).
     private const double MaintainEverySec = 8.0; // re-check control margin + survival about this often while a pet is up
     private const double RefreshMargin = 0.85; // refresh durable buffs before the pet's OE margin falls toward 0.80
 
@@ -393,63 +391,10 @@ public sealed class EngineerPetBrain : PetBrain
         return _clock - _buffAskedAt < _config.PetBuffWaitSeconds; // hold for the wait window
     }
 
-    // ---- Buff state (running buffs, timers, paid, sustain-gate, maintenance) ----------------
-
-    /// <summary>Paid account (Shadowlands) - Expansion stat, bit 2. Decides which buffs we may receive.</summary>
-    private static bool IsPaid(LocalPlayer me) => me.TryGetStat(Stat.Expansion, out var e) && (e & 2) != 0;
-
-    /// <summary>Is a specific nano running on us right now.</summary>
-    private static bool BuffUp(LocalPlayer me, int nanoId) => me.Buffs?.Any(b => b.Id == nanoId) ?? false;
-
-    /// <summary>
-    ///     The UNBUFFED base of a skill: current value minus everything our running buffs contribute to
-    ///     it (flat modifier + ability trickle, from the pack). Planning from this is correct whether the
-    ///     bot is bare (first test) or already partially buffed - the plan then re-adds the full durable
-    ///     set and routing skips the strains already up (<see cref="StableStrains" />).
-    /// </summary>
-    private static int UnbuffedBase(LocalPlayer me, Stat stat)
-    {
-        var cur = me.TryGetStat(stat, out var v) ? v : 0;
-        if (me.Buffs != null)
-        {
-            foreach (var buff in me.Buffs)
-            {
-                cur -= BuffCatalog.SkillContributionOf(buff.Id, (int)stat);
-            }
-        }
-
-        return cur;
-    }
-
-    /// <summary>
-    ///     The NanoStrains of buffs running on us with time to spare (>= RefreshSoonSec). These are
-    ///     "stable" - counted as already up, so the plan does not re-request them. Buffs expiring sooner
-    ///     are left OUT, so the plan will refresh them (owner's timer model, 2026-10-05).
-    /// </summary>
-    private HashSet<int> StableStrains(LocalPlayer me)
-    {
-        var strains = new HashSet<int>();
-        if (me.Buffs == null)
-        {
-            return strains;
-        }
-
-        foreach (var buff in me.Buffs)
-        {
-            if (buff.Cooldown.RemainingTime < RefreshSoonSec)
-            {
-                continue; // expiring soon - treat as gone so we re-request it
-            }
-
-            var s = BuffCatalog.StrainOf(buff.Id);
-            if (s != 0)
-            {
-                strains.Add(s);
-            }
-        }
-
-        return strains;
-    }
+    // ---- Buff state (sustain-gate, maintenance) ---------------------------------------------
+    // IsPaid / BuffUp / UnbuffedBase / StableStrains are shared primitives on the base PetBrain - every
+    // pet profession reads state the same way; only the pieces below (which robots, their MC/TS reqs,
+    // the shell summon, pet buffs) are Engineer-specific.
 
     /// <summary>
     ///     The sustain-gate: the highest-QL learned robot we could DURABLY control at the 80% floor once

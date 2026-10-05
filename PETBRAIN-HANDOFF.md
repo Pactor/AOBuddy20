@@ -64,6 +64,30 @@ Strip all buffs, drop the pet, verify the Engineer OE's right and summons the be
 skills allow. Note: the bot summons best-castable once the pet is GONE (no auto-OE-dismiss yet),
 so manual drop is correct. `PetAutoBuff` off, hunt off = conservative first run.
 
+## Architecture: shared base vs profession subclass (for the MP brain)
+
+Over-equipping/buff-first is NOT the Engineer's - every pet class does it, over different skills. The
+split:
+
+- **Shared (base `PetBrain` + `BuffCatalog`)** - all profession-agnostic:
+  - `BuffCatalog.BuildControlPlan(me, baseByStat, reqByStat, paid, prof)` is **skill-set generalized**:
+    MC+TS (Engineer/MP attack), MatMet+TS (MP mezz), BioMet+TS (MP heal) all flow through the SAME
+    phases (NCU first, multi-skill stackers per strain, lowest single-skill rung per skill). Trickle
+    factors for 127/128/130/131 are verified in the catalog. An MC/TS convenience overload remains.
+  - `RoutePlan` (self-cast vs bot tell, skip stable strains), `SurvivalFill`, `SelfBuffCandidates`
+    (our learned self-buffs compete per strain), `BestNcuBuff`.
+  - base `PetBrain`: `IsPaid`, `BuffUp`, `UnbuffedBase(stat)`, `StableStrains`, `RefreshSoonSec`,
+    `OeMargin`/`CanControl`/`DriveAttack`, the crash-guarded `Tick`.
+- **Subclass supplies only**: which pets + each pet's **required-skill set** and summon mechanic, the
+  per-role drive, and the pet-only buff ids. `EngineerPetBrain` is the worked example (one attack
+  robot, `{MC,TS}` from `PetReq`, shell/cast summon, `engineer-pets.json` pet buffs).
+
+**MP brain:** three slots (attack `{MC,TS}`, mezz `{MatMet,TS}`, heal `{BioMet,TS}`), each runs the
+same `BuildControlPlan`/sustain-gate/route/maintain pattern the Engineer uses - mirror `BuffFirst` /
+`BestControllableRobot` / `MaintainAndSurvive` per slot. Fully unifying that orchestration skeleton
+into a base loop (one `PetChoice` abstraction, 3 slots) is the natural next step - it changes the
+shared base ctor, so coordinate.
+
 ## How to drive/observe live (MCP)
 
 Bot running with `BotApiPort` set (5591) → `bot_command "brain"` (confirm brain loaded),
