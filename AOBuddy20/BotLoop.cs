@@ -43,9 +43,10 @@ public sealed class BotLoop
     private readonly ResupplyController _resupply;
     private readonly SellController _sell;
     private readonly NavController _navMemory;
+    private readonly BuffBotController _buffBot;
     private bool _running;
 
-    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, AccountInfo config, ILogger<BotLoop> logger)
+    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, BuffBotController buffBot, AccountInfo config, ILogger<BotLoop> logger)
     {
         _controlArbiter = controlArbiter;
         _missionController = missionController;
@@ -55,6 +56,7 @@ public sealed class BotLoop
         _brains = brains;
         _navMemory = navMemory;
         _awareness = awareness;
+        _buffBot = buffBot;
         _config = config;
         _logger = logger;
     }
@@ -122,6 +124,10 @@ public sealed class BotLoop
                 // Awareness - never gated by the exclusive decision chain below. (ControlPriority.Pet
                 // 650 is reserved for when a pet action needs the body; step 2 never takes it.)
                 _brains.TickPet(me, deltaTime);
+
+                // BUFF BOTS (4a.1): the public-buff-bot handshake, when a session is open. An overlay
+                // like the pet tick - it only sends tells and accepts the bot's invite, moves nothing.
+                _buffBot.Tick(me, deltaTime);
 
                 // The decision chain, in descending ControlPriority: heal (800) - the stims and
                 // rechargers go in before anything else looks at its state; combat (700) and

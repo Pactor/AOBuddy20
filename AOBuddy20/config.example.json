@@ -1,10 +1,10 @@
 {
-  "_comment": "One config per character (--config dadbod.json). Unknown keys are ignored; a missing key keeps its code default. Edit and restart - values are read at runtime, no recompile.",
+  "_comment": "One self-contained config per character (--config dadbod.json, or --conf). Unknown keys are ignored; a missing key keeps its code default. Edit and restart - values are read at runtime. Some runtime commands (e.g. 'hunt') save their change back to this file. Owner is OPTIONAL: leave it empty and the bot runs solo (no one commands it, owner-assist off).",
 
   "Username": "YOUR_ALT_ACCOUNT",
   "Password": "YOUR_ALT_PASSWORD",
   "Character": "YourBotChar",
-  "Owner": "YourMainChar",
+  "Owner": "",
   "Dimension": "RubiKa",
 
   "_comment_mission": "MISSION (blitz run): the mission-terminal sliders, exactly what the roll packet puts on the wire. Difficulty is the terminal's level slider (captures show 1/6/11; byte-clamped 0..255). The six sliders are WIRE values -100..+100, 0 = middle (terminal default), -100 = left end, +100 = right end - e.g. CreditsXp -100 rolls all-credit missions, +100 all-XP. MissionZones: zone names or playfield ids a mission may sit in (empty = any).",
@@ -39,5 +39,18 @@
   "HealRestMaxSeconds": 60,
 
   "_comment_api": "LOCAL API: GET /status /nav /inventory /log and POST /command on 127.0.0.1. 0 = off.",
-  "BotApiPort": 5591
+  "BotApiPort": 5591,
+
+  "_comment_hunt": "HUNT ('hunt' command): the pets fight hostiles within HuntRadius while the bot stays put (off until 'hunt on'). HuntMaxLevelMargin caps a target to best-attack-pet-level + margin (scales off the pet, not the player). HuntFactionMode Auto|On|Off - Shadowlands faction-safe hunting (Auto: on once a Redeemed/Unredeemed standing is set). HuntBlacklist: mob names never hunted. A 'hunt' command updates these and saves this file.",
+  "HuntRadius": 40,
+  "HuntMaxLevelMargin": 10,
+  "HuntFactionMode": "Auto",
+  "HuntBlacklist": [],
+
+  "_comment_buffs": "BUFF BOTS ('buffs' command): the public-buff-bot handshake (Chewy on RubiKa, Codedoc on RubiKa2019). Be un-teamed and near the bot, then 'buffs start': the bot invites, we accept, we send BuffRequestTells in order, it buffs and auto-kicks us. ALWAYS list the highest NCU buff first (it expands Max NCU so the rest fit). BuffBotName empty = no buff bot. (4a.1 is the plumbing; the buff selection is computed later.)",
+  "BuffBotName": "",
+  "BuffRequestTells": [],
+  "BuffHandshakeSeconds": 45,
+  "PetAutoBuff": false,
+  "PetBuffWaitSeconds": 60
 }

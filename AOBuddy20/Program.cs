@@ -82,11 +82,18 @@ internal class Program
 
         AddServices(services);
 
-        // --config <file> (owner, 2026-09-28): one config per character, e.g. --config dadbod.json. Relative to Build\.
-        // The same name is handed to plugins (AOBUDDY_CONFIG) so Plugins\<name>\dadbod.json is read if it exists.
+        // --config <file> (owner, 2026-09-28): one self-contained config per character, e.g.
+        // --config dadbod.json (--conf is an accepted alias). Relative to Build\. The same name is
+        // handed to plugins (AOBUDDY_CONFIG) so Plugins\<name>\dadbod.json is read if it exists.
         var configName = "config.json";
-        index = Array.IndexOf(args.Select(x => x.ToLower()).ToArray(), "--config");
-        if (index >= 0)
+        var lowerArgs = args.Select(x => x.ToLower()).ToArray();
+        index = Array.IndexOf(lowerArgs, "--config");
+        if (index < 0)
+        {
+            index = Array.IndexOf(lowerArgs, "--conf");
+        }
+
+        if (index >= 0 && index + 1 < args.Length)
         {
             configName = args[index + 1];
         }
@@ -153,6 +160,10 @@ internal class Program
             Console.ReadLine();
             return;
         }
+
+        // Remember where it came from, so a runtime setting change (e.g. a 'hunt' command) can save
+        // the whole config back to the one self-contained file.
+        config.ConfigPath = configPath;
 
         // The window is named after the character(s) it runs (owner, 2026-09-26: "name the console the bots name,
         // we may run a few at a time").
@@ -225,6 +236,9 @@ internal class Program
         services.AddSingleton<ResupplyController>();
         services.AddSingleton<SellController>();
         services.AddSingleton<HealController>();
+        services.AddSingleton<HuntController>();
+        services.AddSingleton<BuffCatalog>();
+        services.AddSingleton<BuffBotController>();
         // BRAINS (per-profession policy): the registry scans once at startup (the same reflection
         // pass the MinLogLevel overrides above use); the bank picks this character's brains right
         // after login, when the profession is on the wire (BrainBank.EnsureSelected from BotLoop).

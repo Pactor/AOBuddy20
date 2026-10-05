@@ -9,13 +9,17 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using System.IO;
+using Newtonsoft.Json;
+
 namespace AOBuddy20.Configuration;
 
 public class AccountInfo
 {
     public string Character = "";
     public string Dimension = ""; // "RubiKa" (default) or "RubiKa2019"
-    public string Owner = ""; // the character whose /tells are obeyed (empty: no one can command the bot)
+    public string Owner = ""; // OPTIONAL - the character whose /tells are obeyed. Empty: the bot runs
+    // solo (no one commands it, owner-assist is off). The bot does not need an owner to run.
     public string Password = "";
     public string Username = "";
 
@@ -72,4 +76,44 @@ public class AccountInfo
     // Local control API (BotApi): /status /nav /inventory /log and POST /command on 127.0.0.1 only -
     // the monitor (tools/AOBuddyMonitor), the MCP (tools/aobuddy-mcp) and run-bot.ps1 talk to it. 0 = off.
     public int BotApiPort = 5591;
+
+    // --- Hunt (HuntController, the 'hunt' command): the pets fight hostiles in a radius while the bot
+    // stays put. Off until 'hunt on'. These are the per-bot defaults; a runtime 'hunt' command updates
+    // them and saves this file, so everything stays in the one conf.
+    public float HuntRadius = 40f; // mobs within this of the bot are hunted
+    public int HuntMaxLevelMargin = 10; // a mob may be at most this far above the best attack pet's level
+    public string HuntFactionMode = "Auto"; // Auto | On | Off - Shadowlands faction-safe hunting
+    public List<string> HuntBlacklist = new(); // mob NAMES never hunted (mini-bosses you'd only die to)
+
+    // --- Buff bots (BuffBotController, the 'buffs' command): getting buffs from a public buff bot
+    // (Chewy on RubiKa, Codedoc on RubiKa2019). The handshake: un-teamed -> the bot invites -> we
+    // accept -> it buffs -> it auto-kicks us. 4a.1 is the plumbing; the buff SELECTION comes later,
+    // so for now the request tells are listed here verbatim.
+    public string BuffBotName = ""; // the buff-bot toon's name; empty = no buff bot configured
+    public List<string> BuffRequestTells = new(); // tells sent IN ORDER once teamed. ALWAYS list the
+    // highest NCU buff first (owner, 2026-10-05: it expands Max NCU so the rest fit). 4a.2 computes
+    // and orders these; until then they are listed here verbatim, NCU first.
+    public float BuffHandshakeSeconds = 45f; // the invite/buff window (AOBuddy10 Scotty uses 45)
+
+    // Pet buff-first (4b): when ON, a pet brain that wants a better pet it cannot yet summon for lack
+    // of Matter Creation / Time and Space will ask the buff bot FIRST (near it and un-teamed), then
+    // summon the better pet once the skills are up - rather than summoning a weaker one now. OFF by
+    // default (the owner positions the bot and controls buffing); off, the brain summons the best it
+    // can now and logs the buff opportunity.
+    public bool PetAutoBuff = false;
+    public float PetBuffWaitSeconds = 60f; // after asking, wait this long for the buffs before summoning anyway
+
+    // Where this config was loaded from (set at load; never serialized). Save() writes the whole
+    // config back here so a runtime setting change persists in the one self-contained conf file.
+    [JsonIgnore] public string ConfigPath = "";
+
+    public void Save()
+    {
+        if (string.IsNullOrEmpty(ConfigPath))
+        {
+            return;
+        }
+
+        File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(this, Formatting.Indented));
+    }
 }
