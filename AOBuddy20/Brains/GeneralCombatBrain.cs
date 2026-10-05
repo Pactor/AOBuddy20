@@ -9,8 +9,8 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
-using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
+using AOBuddy20.Network;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using Microsoft.Extensions.Logging;
@@ -28,11 +28,13 @@ namespace AOBuddy20.Brains;
 [Brain(BrainKind.Combat)]
 public class GeneralCombatBrain : CombatBrain
 {
+    protected readonly PacketRouter _packetRouter;
     private bool _loggedDormant;
 
-    public GeneralCombatBrain(ILogger<GeneralCombatBrain> logger, ControlArbiter controlArbiter)
-        : base(logger, controlArbiter)
+    public GeneralCombatBrain(ILogger<GeneralCombatBrain> logger, ControlArbiter controlArbiter, PacketRouter packetRouter)
+        : base(logger, controlArbiter, packetRouter)
     {
+        _packetRouter = packetRouter;
     }
 
     protected override SimpleChar? SelectTarget(LocalPlayer me)

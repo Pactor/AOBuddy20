@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------------------
 
 using AOBuddy20.Enums;
+using AOBuddy20.Network;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
@@ -47,14 +48,16 @@ public abstract class CombatBrain
     // SetAside: feedback-110-immune find-person NPCs).
     private const double SetAsideForgetSeconds = 30.0;
 
-    protected CombatBrain(ILogger logger, ControlArbiter controlArbiter)
+    protected CombatBrain(ILogger logger, ControlArbiter controlArbiter, PacketRouter packetRouter)
     {
         _logger = logger;
         _controlArbiter = controlArbiter;
+        _packetRouter = packetRouter;
     }
 
     protected readonly ILogger _logger;
     protected readonly ControlArbiter _controlArbiter;
+    protected readonly PacketRouter _packetRouter;
 
     protected double _clock; // the brain's own clock, accumulated from dt
 
