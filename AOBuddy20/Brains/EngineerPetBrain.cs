@@ -115,6 +115,15 @@ public sealed class EngineerPetBrain : PetBrain
             return true; // one cast at a time
         }
 
+        // Don't cast a summon while heal/emergency owns the body: a summon cast stands the bot up and
+        // would break an out-of-combat recharger REST (owner, 2026-10-05). IsCasting above covers a
+        // heal nano in flight; this covers the SEATED rest between recharger ticks. Combat (700) is
+        // left alone, so a dead pet can still be re-summoned mid-fight.
+        if (!_controlArbiter.HasControl(ControlPriority.LowHealthNanoEmergency))
+        {
+            return true;
+        }
+
         TrySummon(me);
         return true;
     }

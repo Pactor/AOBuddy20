@@ -11,6 +11,7 @@
 
 using System.IO;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace AOBuddy20.Configuration;
 
@@ -114,6 +115,27 @@ public class AccountInfo
             return;
         }
 
-        File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(this, Formatting.Indented));
+        try
+        {
+            // Merge our fields INTO the existing file so unknown keys the user keeps there (the
+            // "_comment_*" docs, or anything else) survive a runtime save - don't rewrite from
+            // scratch. Arrays are replaced wholesale (e.g. HuntBlacklist), not concatenated.
+            JObject root;
+            try
+            {
+                root = File.Exists(ConfigPath) ? JObject.Parse(File.ReadAllText(ConfigPath)) : new JObject();
+            }
+            catch
+            {
+                root = new JObject();
+            }
+
+            root.Merge(JObject.FromObject(this), new JsonMergeSettings { MergeArrayHandling = MergeArrayHandling.Replace });
+            File.WriteAllText(ConfigPath, root.ToString(Formatting.Indented));
+        }
+        catch
+        {
+            // Best-effort: a config save must never crash the bot.
+        }
     }
 }
