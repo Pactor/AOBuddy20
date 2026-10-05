@@ -9,7 +9,6 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
-using System.IO;
 using AOBuddy20.Components;
 using AOBuddy20.Configuration;
 using AOBuddy20.Nav;
@@ -18,7 +17,6 @@ using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using Serilog.Events;
 
 namespace AOBuddy20.Controlling;
@@ -63,8 +61,8 @@ public sealed class HuntController
     }
 
     private readonly ILogger<HuntController> _logger;
+    private readonly AccountInfo _config;
     private readonly string _ownerName;
-    private readonly string _blacklistFile;
     private readonly HashSet<string> _perma = new(StringComparer.OrdinalIgnoreCase); // mob NAMES
 
     public bool Active { get; private set; }
@@ -87,9 +85,26 @@ public sealed class HuntController
     public HuntController(AccountInfo config, ILogger<HuntController> logger)
     {
         _logger = logger;
+        _config = config;
         _ownerName = config.Owner ?? "";
-        _blacklistFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GameData", "hunt-blacklist.json");
-        LoadBlacklist();
+
+        // All defaults come from the one conf file; a 'hunt' command updates them and saves it back.
+        Radius = Math.Clamp(config.HuntRadius, 5f, 100f);
+        LevelMargin = Math.Clamp(config.HuntMaxLevelMargin, 0, 500);
+        if (Enum.TryParse<FactionMode>(config.HuntFactionMode, true, out var fm))
+        {
+            Faction = fm;
+        }
+
+        foreach (var name in config.HuntBlacklist ?? new List<string>())
+        {
+            _perma.Add(name);
+        }
+
+        if (_perma.Count > 0)
+        {
+            _logger.LogInformation($"HUNT: {_perma.Count} perma-blacklisted mob name(s) from the conf.");
+        }
     }
 
     // ---- The 'hunt' owner command ----------------------------------------------------------
@@ -113,6 +128,8 @@ public sealed class HuntController
                 if (parts.Length > 2 && float.TryParse(parts[2], out var r))
                 {
                     Radius = Math.Clamp(r, 5f, 100f);
+                    _config.HuntRadius = Radius;
+                    _config.Save();
                 }
 
                 reply($"Hunt radius {Radius:0} m.");
@@ -121,6 +138,8 @@ public sealed class HuntController
                 if (parts.Length > 2 && int.TryParse(parts[2], out var m))
                 {
                     LevelMargin = Math.Clamp(m, 0, 500);
+                    _config.HuntMaxLevelMargin = LevelMargin;
+                    _config.Save();
                 }
 
                 reply($"Hunt level ceiling: pet level + {LevelMargin}.");
@@ -129,6 +148,8 @@ public sealed class HuntController
                 if (parts.Length > 2 && Enum.TryParse<FactionMode>(parts[2], true, out var fm))
                 {
                     Faction = fm;
+                    _config.HuntFactionMode = Faction.ToString();
+                    _config.Save();
                 }
 
                 reply($"Hunt faction mode: {Faction}.");
@@ -163,18 +184,25 @@ public sealed class HuntController
         if (sub == "add")
         {
             _perma.Add(name);
-            SaveBlacklist();
+            PersistBlacklist();
             reply($"Blacklisted '{name}' - the pets will never hunt it (owner-assist still can).");
         }
         else if (sub == "remove")
         {
-            reply(_perma.Remove(name) ? $"Removed '{name}' from the blacklist." : $"'{name}' was not blacklisted.");
-            SaveBlacklist();
+            var removed = _perma.Remove(name);
+            PersistBlacklist();
+            reply(removed ? $"Removed '{name}' from the blacklist." : $"'{name}' was not blacklisted.");
         }
         else
         {
             reply("Usage: hunt blacklist add <mob name> | remove <mob name> | list.");
         }
+    }
+
+    private void PersistBlacklist()
+    {
+        _config.HuntBlacklist = _perma.ToList();
+        _config.Save();
     }
 
     // ---- The decision ----------------------------------------------------------------------
@@ -431,43 +459,4 @@ public sealed class HuntController
         return !c.TryGetStat(Stat.Health, out var hp) || hp > 0;
     }
 
-    // ---- Perma-blacklist persistence -------------------------------------------------------
-
-    private void LoadBlacklist()
-    {
-        try
-        {
-            if (!File.Exists(_blacklistFile))
-            {
-                return;
-            }
-
-            var names = JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(_blacklistFile));
-            if (names != null)
-            {
-                foreach (var n in names)
-                {
-                    _perma.Add(n);
-                }
-
-                _logger.LogInformation($"HUNT: {_perma.Count} perma-blacklisted mob name(s) loaded.");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "HUNT: failed to read hunt-blacklist.json.");
-        }
-    }
-
-    private void SaveBlacklist()
-    {
-        try
-        {
-            File.WriteAllText(_blacklistFile, JsonConvert.SerializeObject(_perma.ToList(), Formatting.Indented));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "HUNT: failed to write hunt-blacklist.json.");
-        }
-    }
 }

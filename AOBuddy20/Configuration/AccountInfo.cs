@@ -9,13 +9,17 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using System.IO;
+using Newtonsoft.Json;
+
 namespace AOBuddy20.Configuration;
 
 public class AccountInfo
 {
     public string Character = "";
     public string Dimension = ""; // "RubiKa" (default) or "RubiKa2019"
-    public string Owner = ""; // the character whose /tells are obeyed (empty: no one can command the bot)
+    public string Owner = ""; // OPTIONAL - the character whose /tells are obeyed. Empty: the bot runs
+    // solo (no one commands it, owner-assist is off). The bot does not need an owner to run.
     public string Password = "";
     public string Username = "";
 
@@ -72,4 +76,26 @@ public class AccountInfo
     // Local control API (BotApi): /status /nav /inventory /log and POST /command on 127.0.0.1 only -
     // the monitor (tools/AOBuddyMonitor), the MCP (tools/aobuddy-mcp) and run-bot.ps1 talk to it. 0 = off.
     public int BotApiPort = 5591;
+
+    // --- Hunt (HuntController, the 'hunt' command): the pets fight hostiles in a radius while the bot
+    // stays put. Off until 'hunt on'. These are the per-bot defaults; a runtime 'hunt' command updates
+    // them and saves this file, so everything stays in the one conf.
+    public float HuntRadius = 40f; // mobs within this of the bot are hunted
+    public int HuntMaxLevelMargin = 10; // a mob may be at most this far above the best attack pet's level
+    public string HuntFactionMode = "Auto"; // Auto | On | Off - Shadowlands faction-safe hunting
+    public List<string> HuntBlacklist = new(); // mob NAMES never hunted (mini-bosses you'd only die to)
+
+    // Where this config was loaded from (set at load; never serialized). Save() writes the whole
+    // config back here so a runtime setting change persists in the one self-contained conf file.
+    [JsonIgnore] public string ConfigPath = "";
+
+    public void Save()
+    {
+        if (string.IsNullOrEmpty(ConfigPath))
+        {
+            return;
+        }
+
+        File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(this, Formatting.Indented));
+    }
 }
