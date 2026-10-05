@@ -116,6 +116,13 @@ public sealed class BotLoop
                 // resolves them here, post-login, exactly once per process (review.md #12).
                 _brains.EnsureSelected(me);
 
+                // PET is an OVERLAY, not a chain step: it summons/maintains/commands pets but never
+                // moves the body, and it MUST keep running during combat and missions (the robot
+                // fights while the bot does other things). So it ticks unconditionally here, like
+                // Awareness - never gated by the exclusive decision chain below. (ControlPriority.Pet
+                // 650 is reserved for when a pet action needs the body; step 2 never takes it.)
+                _brains.TickPet(me, deltaTime);
+
                 // The decision chain, in descending ControlPriority: heal (800) - the stims and
                 // rechargers go in before anything else looks at its state; combat (700) and
                 // selfbuffing (600) - the brains, log-only until their families are implemented;
@@ -137,12 +144,6 @@ public sealed class BotLoop
                 else if (!_missionController.SuppressCombat && _brains.TickCombat(me, deltaTime))
                 {
                     CurrentTask = Tasks.Combat;
-                }
-                else if (_brains.TickPet(me, deltaTime))
-                {
-                    // PET (650): summon/maintain/command pets - above selfbuffing, below combat so
-                    // the pet follows the fight. Log-only until the pet families are implemented.
-                    CurrentTask = Tasks.Pet;
                 }
                 else if (_brains.TickSelfbuff(me, deltaTime))
                 {

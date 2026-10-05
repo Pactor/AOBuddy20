@@ -55,6 +55,7 @@
         <None Update="GameData\ItemImplants.bin"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
         <None Update="GameData\ItemWantData.bin"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
         <None Update="GameData\Zoning.json"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+        <None Update="GameData\profiles\*-pets.json"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     </ItemGroup>
 
 </Project>
