@@ -27,8 +27,22 @@ public sealed class NanoProfile
     public IReadOnlyDictionary<int, int> Stats = new Dictionary<int, int>();
     public IReadOnlyList<NanoAction> Actions = Array.Empty<NanoAction>();
 
+    /// <summary>
+    ///     The flat stat modifiers this formula APPLIES when it lands (event function 53045
+    ///     ModifyStat, arg0 = stat, arg1 = amount), keyed stat -> amount. The buff's actual
+    ///     numbers: +MC/+TS (130/131), +Max NCU (181), +attributes (16..21), heal amounts, etc.
+    ///     - read straight from the pack so the buff catalog never parses an effect string.
+    ///     Only integer-argument modifies are kept (the flat buffs); percent/float modifies
+    ///     are not (they are not what the pet-buff math needs). Several functions touching the
+    ///     same stat are summed.
+    /// </summary>
+    public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>();
+
     /// <summary>A stat's raw value, 0 when the record does not carry it (most stats are sparse).</summary>
     public int Stat(int statId) => Stats.TryGetValue(statId, out var v) ? v : 0;
+
+    /// <summary>How much this formula modifies a stat when it lands, 0 if it does not touch it.</summary>
+    public int Modify(int statId) => Modifies.TryGetValue(statId, out var v) ? v : 0;
 }
 
 /// <summary>One cast action of a formula (ToUse/...), with its requirement list.</summary>

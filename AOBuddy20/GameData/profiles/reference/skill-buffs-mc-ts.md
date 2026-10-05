@@ -11,45 +11,73 @@ reference so we know what the runtime is choosing among.
 Verified 2026-10-05. Level shown as the raw `Level > N` from the cast action. Expansion gate
 `[SL]` = Shadowlands (`Expansion op22 2`) = **requires a paid account**.
 
-## VERIFIED buff tiers + receiver level locks (2026-10-05, from nanos.ocp cast criteria)
+## VERIFIED receiver gates (2026-10-05, dumped from nanos.ocp cast criteria — CORRECTED)
 
-The all-6-nano-skill **Composite** buffs are RECEIVER level-locked AND require Shadowlands
-(the lower `Level >` of the two in each nano's ToUse is the receiver gate; the higher is the
-casting MP's):
+Each cast action's requirement quintuples carry a **target** field that says whose stat is
+tested: **`target=19` = OnSelf = the CASTER**, **`target=18` = OnTarget = the RECEIVER (us)**.
+`stat 389 BitAnd 2` = Shadowlands (paid) flag; `stat 368/60 == N` = caster profession gate
+(12 MP, 9 Enforcer, 7 Trader). So a buff's **receiver** gate = ONLY its `target=18` criteria.
+Everything on `target=19` is the buff bot's problem, not ours.
 
-| Buff | tell | +skill (all 6) | Receiver needs | NCU |
-|---|---|---|---|---|
-| Composite Teachings | compt | +25 | L15 + SL | 6 |
-| Composite Mastery | compmast | +50 | L40 + SL | 13 |
-| Composite Infuse With Knowledge | cominf | +90 | L90 + SL | 25 |
-| Composite Mochams (1h) | compmoch1 | +140 | L175 + SL | 48 |
-| Composite Mochams (2h/4h/8h) | compmoch2/4/8 | +140 | L201 / L205 / L209 + SL | 51/54/55 |
+**CORRECTION of the earlier version of this doc:** the Composite line is NOT receiver
+level-locked. The L15/L40/L90/L175/L201 numbers are the **casting MP's** level (`target=19`),
+not the receiver's. The ONLY receiver gate on the Composite line is `target=18` **Expansion
+(SL)** — i.e. **the receiver just needs a paid (Shadowlands) account, at ANY level.** A maxed
+Chewy therefore lands Composite Mochams +140-to-all-six on an L51 paid toon.
 
-The **SINGLE-SKILL Mocham's Gift** buffs are the +140 you get at low level - **NO level req,
-NO SL** (only PM/SI ~744 + VisualProfession 12 on the casting MP):
+| Buff | tell | +skill | strain | **receiver gate (target=18)** | NCU |
+|---|---|---|---|---|---|
+| Mocham's Gift: MatCrea | mcmo | +140 MC | 159 | **none** (froob-ok, any level) | 51 |
+| Mocham's Gift: SpaceTime | stmo | +140 TS | 161 | **none** | 50 |
+| Infuse: MatCrea / SpaceTime | mci/tsi | +90 | 159/161 | none | 40/40 |
+| Mastery: MatCrea / SpaceTime | mcma/stma | +50 | 159/161 | none | 14/13 |
+| Teachings: MatCrea / SpaceTime | mcte/stte | +25 | 159/161 | none | 7/7 |
+| Composite Teachings/Mastery/Infuse/Mochams | compt/compmast/cominf/compmoch* | +25/+50/+90/+140 all 6 | 165 | **SL only (NO level)** | 6/13/25/48-55 |
+| Composite Nano Expertise | c2 | +20 all nano | 91 | none | 4 |
+| Composite Attribute Boost | c1 | +12 all attributes | 34 | none | 4 |
+| Skill Wrangler (Premium) | 131 | +131 (short) | 220 | none | 58 |
+| Essence of Behemoth | es2 | +996 HP/+27 str/sta | 151 | **none** (any level) | 47 |
+| Improved Essence of Behemoth | es1 | +1998 HP/+54 | 151 | **Level >= 215** | 56 |
+| NCU line (LANDED nano, e.g. 162994) | ncu | +Max NCU | 257 | **receiver Level tiers** (L25->+40 ...) | ~1 |
 
-| Buff | tell | +skill | NCU |
+**Single-skill line = one strain per skill** (MatCrea all 159, SpaceTime all 161), so Mocham's/
+Infuse/Mastery/Teachings for a given skill are **SWAPS, not stacks** — you hold exactly one rung.
+The Composite line (strain 165) is a DIFFERENT strain, so it stacks on top of a single-skill
+rung; `c2` (91), `c1` (34) and the wrangle (220) each stack too.
+
+Wrangle: **Skill Wrangler (Premium) = +131** (tell `131`, 58 NCU); Team variant +132 (`132`).
+Use +131. It is **short-duration** — never counted toward durable control.
+
+## Ability trickle into MC/TS (VERIFIED from GameData/SkillTrickle.json, factor order [Str,Agi,Sta,Int,Sen,Psy])
+
+- **MC (130):** Stamina **0.2**, Intelligence **0.8** (rest 0)
+- **TS (131):** Agility **0.2**, Intelligence **0.8** (rest 0)
+
+`trickle = floor( Σ(ability × factor) / 4 )`. Both skills' factors sum to 1.0 and are Int-driven.
+A uniform **+X to all attributes adds `floor(X/4)`** to MC and TS, so **Composite Attribute Boost
+(+12 all) = +3 MC / +3 TS** (clean, no rounding slop). A buff on one ability only is less (e.g.
++12 Int -> +2 MC; +12 Sta -> +0 MC). This is why "the trickle is sometimes 1 point" (owner). The
+live `me.GetStat(MC/TS)` ALREADY includes running trickle; the planner only needs this to PROJECT
+an attribute buff it is about to request.
+
+## Worked example (L51 Engineer, raw MC/TS 326, Max NCU 148, FROOB path)
+
+Durable rung ladder (durable = raw 326 + rung + Nano Exp 20 + attr-boost trickle +3), and the
+biggest pet each rung CONTROLS at the 0.80 floor (durable / 0.80):
+
+| rung | durable MC/TS | controls pet req <= | rung NCU (MC+TS) |
 |---|---|---|---|
-| Mocham's Gift: MatCrea | mcmo | +140 MC | 51 |
-| Mocham's Gift: SpaceTime | stmo | +140 TS | 50 |
-| (BioMet/MatMet/PsyMod/SenseImp each +140) | bmmo/mmmo/pmmo/simo | +140 one skill | 50-52 |
+| +140 Mocham's (mcmo+stmo) | **489** | **611** | 101 |
+| +90 Infuse (mci+tsi) | 439 | 548 | 80 |
+| +50 Mastery (mcma+stma) | 399 | 498 | 27 |
+| +25 Teachings (mcte+stte) | 374 | 467 | 14 |
 
-So to lift **MC and TS** for pet summoning at ANY level: `mcmo` (+140 MC) + `stmo` (+140 TS),
-each ~50 NCU, plus a wrangle. The all-skills composites add ON TOP (different nano strains:
-Mocham's Gift = strain 159/161, Composite = strain 165, wrangle = strain 220 - all stack) once
-you meet their level. **ALWAYS strive for the +140** (the player max), single-skill if the
-all-skills tier is out of level (owner, 2026-10-05).
-
-Wrangle: **Skill Wrangler (Premium) = +131** (tell `131`, 58 NCU, raises MC & TS); the *Team*
-variant is +132 (tell `132`) - use +131.
-
-**Worked example (L50 Engineer, raw MC/TS 326, 148 NCU):** NCU buff first (the stack needs it:
-mcmo 51 + stmo 50 + wrangle 58 = 159 > 148) -> mcmo +140 -> stmo +140 (MC/TS 466) -> wrangle
-+131 (597 PEAK). Durable (no wrangle) = 466 -> control max 466/0.80 = 582 -> **summon the best
-req <= 582 = Semi-Sentient Guardbot (569, held at 82%)**, NOT Patchwork Warbot (596, would OE at
-78%). Wrangle off -> 466, pet holds, free 58 NCU for survivability. The current code does NOT do
-this yet: it excludes single-skill buffs, has no NCU math / sustain-gate / downshift (4a.2-full
-+ 4b TODOs).
+Rule: **pick the lowest rung whose durable total clears the floor; step up only when it falls
+short.** NCU buff FIRST (+60 at L50 -> Max NCU 208) so the stack fits. A QL119 pet (req 554)
+needs +140 (548 < 554 <= 611); a pet req <= 548 holds on the cheaper +90, banking ~21 NCU for
+survival. **Control is checked on DURABLE buffs only (no wrangle)**; the wrangle only lifts the
+summon moment to the 100% cast req, then is dropped. If the durable ceiling can't hold the pet at
+80%, the pet is too big — summon a smaller one (sustain-gate picks the pet by control, not peak).
 
 ## NCU buffs (Fixer NCU line, strain 257) - receiver LEVEL-LOCKED, each tier
 

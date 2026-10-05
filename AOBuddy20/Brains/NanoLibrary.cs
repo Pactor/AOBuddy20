@@ -141,13 +141,13 @@ public static class NanoLibrary
                 var stats = ReadDictionary(reader);
 
                 var actions = ReadActions(reader);
-                SkipEvents(reader, version);
+                var modifies = ReadEvents(reader, version);
                 if (version >= 2)
                 {
                     SkipRecordData(reader, version);
                 }
 
-                var nano = new NanoProfile { NanoId = id, Stats = stats, Actions = actions };
+                var nano = new NanoProfile { NanoId = id, Stats = stats, Actions = actions, Modifies = modifies };
                 nanos.Add(nano);
                 byId[id] = nano;
             }
@@ -214,8 +214,14 @@ public static class NanoLibrary
         return actions;
     }
 
-    private static void SkipEvents(BinaryReader reader, int version)
+    private const int FuncModifyStat = 53045; // event function: ModifyStat (arg0 = stat, arg1 = amount)
+
+    // Read the effect events, CAPTURING the flat ModifyStat functions (53045, two int args) into a
+    // stat -> summed-amount map. Everything else is still just walked past. Advancement matches the
+    // old SkipEvents exactly - the only change is that we keep the two ints instead of discarding them.
+    private static Dictionary<int, int> ReadEvents(BinaryReader reader, int version)
     {
+        var modifies = new Dictionary<int, int>();
         var eventCount = reader.ReadInt32();
         for (var e = 0; e < eventCount; e++)
         {
@@ -223,14 +229,18 @@ public static class NanoLibrary
             var functionCount = reader.ReadInt32();
             for (var f = 0; f < functionCount; f++)
             {
-                SkipFunction(reader, version);
+                ReadFunction(reader, version, modifies);
             }
         }
+
+        return modifies;
     }
 
-    private static void SkipFunction(BinaryReader reader, int version)
+    // <paramref name="capture"/> null = skip-only (used for the record-data bare functions, which are
+    // not effect events); non-null = record a 53045 ModifyStat's (stat, amount) into it.
+    private static void ReadFunction(BinaryReader reader, int version, Dictionary<int, int>? capture)
     {
-        reader.ReadInt32(); // function type
+        var functionType = reader.ReadInt32();
         reader.ReadInt32(); // target
         reader.ReadInt32(); // tick count
         reader.ReadInt32(); // tick interval
@@ -238,16 +248,25 @@ public static class NanoLibrary
         SkipRequirements(reader);
 
         var argCount = reader.ReadInt32();
+        var ints = new List<int>(2);
         for (var a = 0; a < argCount; a++)
         {
             switch (reader.ReadByte())
             {
-                case 1: reader.ReadInt32(); break;
+                case 1:
+                    ints.Add(reader.ReadInt32());
+                    break;
                 case 2: reader.ReadSingle(); break;
                 case 3: reader.ReadString(); break;
                 default:
                     throw new InvalidDataException("unsupported function argument tag");
             }
+        }
+
+        if (capture != null && functionType == FuncModifyStat && ints.Count >= 2)
+        {
+            var stat = ints[0];
+            capture[stat] = capture.TryGetValue(stat, out var had) ? had + ints[1] : ints[1];
         }
 
         if (version >= 2 && reader.ReadBoolean())
@@ -350,7 +369,7 @@ public static class NanoLibrary
             var bareFunctions = reader.ReadInt32();
             for (var f = 0; f < bareFunctions; f++)
             {
-                SkipFunction(reader, version);
+                ReadFunction(reader, version, null);
             }
         }
     }
