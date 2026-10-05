@@ -48,6 +48,7 @@ public sealed class BuffBotController
     }
 
     private readonly AccountInfo _config;
+    private readonly BuffCatalog _catalog;
     private readonly ILogger<BuffBotController> _logger;
 
     private Stage _stage = Stage.Idle;
@@ -56,13 +57,15 @@ public sealed class BuffBotController
     private double _lastTellAt;
     private int _tellIndex;
     private bool _joined;
+    private List<string> _tells = new(); // the tells for THIS session (config list or a computed plan)
     private Action<string>? _reply; // the owner tell to answer as the session progresses
 
     public bool Active => _stage != Stage.Idle;
 
-    public BuffBotController(AccountInfo config, ILogger<BuffBotController> logger)
+    public BuffBotController(AccountInfo config, BuffCatalog catalog, ILogger<BuffBotController> logger)
     {
         _config = config;
+        _catalog = catalog;
         _logger = logger;
         Team.TeamRequest += OnTeamRequest; // the buff bot answers by inviting us
     }
@@ -79,16 +82,23 @@ public sealed class BuffBotController
                 reply("Buff session stopped.");
                 break;
             case "status":
-                reply($"Buffs: {(Active ? $"{_stage}" : "idle")}. Bot '{_config.BuffBotName}', " +
-                      $"{_config.BuffRequestTells?.Count ?? 0} request tell(s), window {_config.BuffHandshakeSeconds:0} s.");
+                reply($"Buffs: {(Active ? $"{_stage}" : "idle")}. Bot '{_config.BuffBotName}', catalog " +
+                      $"{(_catalog.Loaded ? $"{_catalog.Buffs.Count} entries" : "not loaded")}, window {_config.BuffHandshakeSeconds:0} s.");
                 break;
-            default: // start
-                Start(reply);
+            case "pet":
+                // Computed plan: NCU first, then enough MC/TS for the best pet we could want (we
+                // over-request here - int.MaxValue picks the biggest safe nano-skill buff; the pet
+                // brain will request the exact amount in 4b).
+                StartSession(_catalog.PlanForPetSummon(DynelManager.LocalPlayer, int.MaxValue, int.MaxValue),
+                    "computed pet-summon plan", reply);
+                break;
+            default: // start: the tells configured in the conf
+                StartSession(_config.BuffRequestTells ?? new List<string>(), "configured tells", reply);
                 break;
         }
     }
 
-    private void Start(Action<string> reply)
+    private void StartSession(List<string> tells, string what, Action<string> reply)
     {
         if (string.IsNullOrWhiteSpace(_config.BuffBotName))
         {
@@ -102,12 +112,19 @@ public sealed class BuffBotController
             return;
         }
 
+        if (tells.Count == 0)
+        {
+            reply($"No buffs to request ({what} is empty).");
+            return;
+        }
+
+        _tells = tells;
         _reply = reply;
         _joined = false;
         _tellIndex = 0;
         Enter(Stage.AwaitingInvite);
-        _logger.LogInformation($"BUFFS: session open - waiting for '{_config.BuffBotName}' to invite us.");
-        reply($"Buff session open - waiting for '{_config.BuffBotName}' to invite us (be near it and un-teamed).");
+        _logger.LogInformation($"BUFFS: session open ({what}: {string.Join(" ", tells)}) - waiting for '{_config.BuffBotName}' to invite us.");
+        reply($"Buff session open ({tells.Count} tells, {what}) - waiting for '{_config.BuffBotName}' to invite us (be near it and un-teamed).");
     }
 
     // ---- The handshake ---------------------------------------------------------------------
@@ -156,7 +173,7 @@ public sealed class BuffBotController
 
     private void SendNextTell()
     {
-        var tells = _config.BuffRequestTells ?? new List<string>();
+        var tells = _tells;
         if (_tellIndex >= tells.Count)
         {
             Enter(Stage.Waiting);

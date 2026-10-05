@@ -237,11 +237,35 @@ attack-target should track our combat. **Decision: `ControlPriority.Pet` just be
 2. **`EngineerPetBrain` summon + maintain + command**, assuming skills are already high
    enough (no buff routing yet). Gets a working, commanded robot on the simplest path.
 3. **Port `HuntController`** → pets fight in a radius.
-4. **Port Chewy/Codedoc into `ExternalBuffingBrain`**, then wire the **buff-first** sequence
-   (the five steps above) as the EngineerPetBrain policy.
+4. **Buff machinery** (split):
+   - **4a.1 DONE** — `BuffBotController`: the public-buff-bot handshake plumbing (accept the
+     bot's invite, send request tells, auto-kick), conf-driven. `buffs start|stop|status`.
+   - **4a.2-pet DONE** — `BuffCatalog` (ChewysBuffs.json) + `PlanForPetSummon`: NCU buff first,
+     then one safe MC/TS buff (all-nano composites + the Skill Wrangler ladder, froob-receivable).
+     `buffs pet`.
+   - **4b** — wire the **buff-first + OE sustain gate** into the EngineerPetBrain policy (the pet
+     brain calls `BuffBotController` with `PlanForPetSummon` for its target pet, then the
+     summon/downshift two-phase).
 5. **Team pet-command mirroring.**
 6. **MP** (three wire-labelled role slots) and the **charm** classes (Crat / Trader / Adv)
    as further subclasses on the same base.
+
+## TODO — come back to these
+
+- **4a.2-full (the full buff optimizer):** proper RECEIVER-requirement gating (level/expansion
+  read against our own stats, so level-gated buffs — Umbral wranglers, multi-hour Mochams — come
+  back in safely), the real NCU math (fit each buff to free NCU after the NCU buff expands Max
+  NCU), single-skill two-tell plans (MatCrea + SpaceTime separately), and offense/defense/sustain
+  scoring (the general buff optimizer, not just pets). AOBuddy10 `ChewyBuffs` (1166 lines) is the
+  reference.
+- **4a.3 — Codedoc (RubiKa2019):** its level-locked model differs from Chewy; `CodedocBuffs.json`
+  + `codedoc-given.json` / `codedoc-level.json`. `BuffCatalog` loads it best-effort only for now.
+- **/assist — the owner's target:** the owner's bare SELECTION is not on the wire (LookAt is
+  client→server, not broadcast); only `FightingTarget` (on engagement) is observable. /assist is
+  the server-resolved mechanism but is NOT in the SDK — needs a sniff of a /assist to decode the
+  message, then wire it into `HuntController.OwnerFightTarget`. See [[owner-target-assist]].
+- **4a.1b — travel to the buff spot** before the handshake (the bot casts at range).
+- **Buff-first downshift** (reclaim NCU for survivability after the summon) — part of 4b.
 
 ## Files
 
