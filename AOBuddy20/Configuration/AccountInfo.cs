@@ -104,6 +104,13 @@ public class AccountInfo
     public bool PetAutoBuff = false;
     public float PetBuffWaitSeconds = 60f; // after asking, wait this long for the buffs before summoning anyway
 
+    // DRY RUN (owner's first-run safety): when ON, the pet brain performs NO actions - no summon, no
+    // buff request, no learning a crystal, no casting anything. It only LOOKS: scans the bags for a
+    // pet-summon nano crystal and narrates, step by step, what it found and what it WOULD do (the pet it
+    // would go for, whether it can control it, the buffs it would ask for). Read it in the log, then turn
+    // this off to let it act. Nothing here spends credits or uploads a nano. OFF by default.
+    public bool PetDryRun = false;
+
     // Where this config was loaded from (set at load; never serialized). Save() writes the whole
     // config back here so a runtime setting change persists in the one self-contained conf file.
     [JsonIgnore] public string ConfigPath = "";

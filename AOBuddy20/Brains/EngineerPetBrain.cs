@@ -71,6 +71,7 @@ public sealed class EngineerPetBrain : PetBrain
     private int _summonTries;
     private double _lastStuckWarnAt = double.NegativeInfinity;
     private double _lastNoCastWarnAt = double.NegativeInfinity;
+    private double _lastNarrateAt = double.NegativeInfinity;
     private const int SummonTriesWarn = 4;
     private const double StuckWarnEverySec = 30.0;
 
@@ -118,6 +119,14 @@ public sealed class EngineerPetBrain : PetBrain
 
     protected override bool PolicyTick(LocalPlayer me, double dt)
     {
+        // DRY RUN: look and narrate only - take NO action (no summon/buff/learn/cast). Owner's first-run
+        // safety so nothing irreversible happens before they have seen what the bot intends.
+        if (_config.PetDryRun)
+        {
+            NarrateFind(me);
+            return false; // never hold control in dry run
+        }
+
         var attack = AttackPet(me);
         if (attack != null)
         {
@@ -613,6 +622,119 @@ public sealed class EngineerPetBrain : PetBrain
         return use.Any(c => c.Operator == UseCriteriaOperator.TestNumPets && c.Param2 / 1000 == 0)
                && use.Any(c => c.Operator == UseCriteriaOperator.EqualTo
                                && c.Param1 == (int)Stat.Profession && c.Param2 == profession);
+    }
+
+    // ---- Dry run: look and narrate, take no action ------------------------------------------
+
+    /// <summary>
+    ///     Dry run (PetDryRun): scan the bags for a pet-summon nano crystal and narrate, step by step,
+    ///     what was found and what the bot WOULD do - the pet it would go for, whether it can control it,
+    ///     and the buffs it would ask for - WITHOUT doing any of it. Nothing here casts, summons, learns,
+    ///     or spends credits. Throttled so the log reads cleanly.
+    /// </summary>
+    private void NarrateFind(LocalPlayer me)
+    {
+        if (_clock - _lastNarrateAt < 20.0)
+        {
+            return;
+        }
+
+        _lastNarrateAt = _clock;
+
+        var crystals = new List<NanoItem>();
+
+        void Consider(Item it)
+        {
+            if (it == null || !ItemData.Find(it.Id, out NanoItem ni) || ni == null)
+            {
+                return;
+            }
+
+            var (mc, ts) = PetReq(ni);
+            if (mc > 0 && ts > 0 && IsEngineerSummonCrystal(ni))
+            {
+                crystals.Add(ni);
+            }
+        }
+
+        foreach (var it in Inventory.Items ?? Enumerable.Empty<Item>())
+        {
+            Consider(it);
+        }
+
+        foreach (var c in Inventory.Containers ?? Enumerable.Empty<Container>())
+        {
+            foreach (var it in c.Items ?? Enumerable.Empty<Item>())
+            {
+                Consider(it);
+            }
+        }
+
+        var mcNow = me.TryGetStat(Stat.MaterialCreation, out var m) ? m : 0;
+        var tsNow = me.TryGetStat(Stat.SpaceTime, out var t) ? t : 0;
+
+        if (crystals.Count == 0)
+        {
+            _logger.LogInformation(
+                "PET DRYRUN: looked in my bags - no pet-summon nano crystal found (an Engineer robot crystal " +
+                $"gates on MC+TS+profession). My MC/TS now {mcNow}/{tsNow}. Taking NO action.");
+            return;
+        }
+
+        _logger.LogInformation($"PET DRYRUN: found {crystals.Count} pet crystal(s) in my bags (my MC/TS now {mcNow}/{tsNow}):");
+        foreach (var ni in crystals.OrderByDescending(x => x.Ql))
+        {
+            var (mc, ts) = PetReq(ni);
+            _logger.LogInformation($"PET DRYRUN:   - '{ni.Name}' ql{ni.Ql}, needs MC/TS {mc}/{ts}.");
+        }
+
+        var best = BestLearnedRobot(me);
+        var target = crystals.OrderByDescending(x => x.Ql).FirstOrDefault(x => best == null || x.Ql > best.Ql);
+        if (target == null)
+        {
+            _logger.LogInformation(
+                $"PET DRYRUN: none beat my best learned robot '{best?.Name}' ql{best?.Ql} - I would summon what I " +
+                "already know rather than learn a crystal. NO action.");
+            return;
+        }
+
+        var (rmc, rts) = PetReq(target);
+        var paid = IsPaid(me);
+        var baseMc = UnbuffedBase(me, Stat.MaterialCreation);
+        var baseTs = UnbuffedBase(me, Stat.SpaceTime);
+        var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, rmc, rts, paid, "Engineer");
+
+        _logger.LogInformation(
+            $"PET DRYRUN: I WANT '{target.Name}' ql{target.Ql} (needs MC/TS {rmc}/{rts}); best learned is " +
+            $"'{best?.Name}' ql{best?.Ql ?? 0}. paid={paid}, unbuffed base {baseMc}/{baseTs}.");
+        _logger.LogInformation(
+            $"PET DRYRUN: durable I could reach {plan.DurableMc}/{plan.DurableTs} (floor {plan.FloorMc}/{plan.FloorTs}) -> " +
+            (plan.CanControl ? $"I CAN hold it at {plan.MarginPct:F0}%." : "I CANNOT hold it - I would pick a smaller pet."));
+
+        if (plan.CanControl)
+        {
+            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName ?? "",
+                (me.SpellList ?? Array.Empty<int>()).Contains, StableStrains(me));
+            var desc = actions.Count == 0 ? "(already buffed / nothing needed)" : string.Join("; ", actions.Select(a => a.Describe));
+            _logger.LogInformation(
+                $"PET DRYRUN: plan would be - learn the crystal (use it once MC/TS >= {rmc}/{rts}), then: {desc}; " +
+                "then summon, drop the wrangle, fill survival.");
+        }
+
+        _logger.LogInformation("PET DRYRUN: taking NO action (dry run). Clear PetDryRun to let me act.");
+    }
+
+    private static bool IsEngineerSummonCrystal(NanoItem ni)
+    {
+        if (ni?.Criteria == null || !ni.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+        {
+            return false;
+        }
+
+        // Engineer gate: Profession(60) == 3 or VisualProfession(368) == 3, paired with the MC+TS reqs
+        // the caller already confirmed via PetReq.
+        return use.Any(c => c.Operator == UseCriteriaOperator.EqualTo
+                            && (c.Param1 == (int)Stat.Profession || c.Param1 == 368) && c.Param2 == 3);
     }
 
     // The summon watchdog: several attempts with no pet appearing means something is wrong (no credits,
