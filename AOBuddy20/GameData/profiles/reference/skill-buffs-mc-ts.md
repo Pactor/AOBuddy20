@@ -56,9 +56,13 @@ this yet: it excludes single-skill buffs, has no NCU math / sustain-gate / downs
 The `ncu` tell casts the Fixer NCU ladder; you keep the best your level allows. Each version is
 level-locked to the RECEIVER (owner, 2026-10-05; the nano gates only on `Level`, no prof/skill):
 
+The ladder is one per level bracket (owner's memory, ground truth; +40/+60 and the higher
+tiers confirmed from nanos.ocp):
+
 | Receiver level | Buff | +Max NCU |
 |---|---|---|
-| L25 | NCU Compressor / Retool NCU | +20 / +40 |
+| L10 | NCU Compressor | +20 |
+| L25 | Retool NCU | +40 |
 | L50 | Jury-rigged NCU Analyzer | **+60** |
 | L75 | Deck Recoder | +85 |
 | L125 | Recompiling Memory Analyzer | +110 |
