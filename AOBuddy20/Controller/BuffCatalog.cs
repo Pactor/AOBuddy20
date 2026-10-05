@@ -290,6 +290,31 @@ public sealed class BuffCatalog
         return (int)Math.Floor(sum / 4.0);
     }
 
+    /// <summary>
+    ///     How much a RUNNING nano (by id) contributes to a nano skill (130/131) right now - its flat
+    ///     modifier plus any ability trickle - read from the pack. Lets a brain back out the UNBUFFED
+    ///     base (current skill minus the running buffs) so the control plan starts from solid ground.
+    /// </summary>
+    public static int SkillContributionOf(int nanoId, int statId)
+    {
+        var np = NanoLibrary.Find(nanoId);
+        if (np == null)
+        {
+            return 0;
+        }
+
+        double trickle = statId switch
+        {
+            130 => np.Modify(StatStamina) * 0.2 + np.Modify(StatIntelligence) * 0.8,
+            131 => np.Modify(StatAgility) * 0.2 + np.Modify(StatIntelligence) * 0.8,
+            _ => 0,
+        };
+        return np.Modify(statId) + (int)Math.Floor(trickle / 4.0);
+    }
+
+    /// <summary>The NanoStrain (stat 75) of a nano by id, 0 if unknown - for the running-buff skip set.</summary>
+    public static int StrainOf(int nanoId) => NanoLibrary.Find(nanoId)?.Stat(75) ?? 0;
+
     /// <summary>The durable (no-wrangle) buff plan to CONTROL a pet, and whether it holds at the floor.</summary>
     public sealed class ControlPlan
     {
@@ -437,7 +462,10 @@ public sealed class BuffCatalog
     ///     routed to self-cast or a bot tell. The (short) wrangle is NOT here - it is a summon-moment extra,
     ///     added by the summon step only when the pet's cast requirement needs it.
     /// </summary>
-    public List<BuffAction> RoutePlan(ControlPlan plan, string myProfession, string botName, Func<int, bool> isLearned)
+    private const int NcuStrain = 257; // the Fixer Max-NCU line's NanoStrain
+
+    public List<BuffAction> RoutePlan(ControlPlan plan, string myProfession, string botName, Func<int, bool> isLearned,
+        ISet<int>? skipStrains = null)
     {
         var actions = new List<BuffAction>();
         if (plan == null)
@@ -445,7 +473,10 @@ public sealed class BuffCatalog
             return actions;
         }
 
-        if (plan.Ncu != null && !string.IsNullOrWhiteSpace(botName))
+        var skip = skipStrains ?? new HashSet<int>();
+
+        // NCU buff first - unless it is already up with time to spare (its strain is in skip).
+        if (plan.Ncu != null && !string.IsNullOrWhiteSpace(botName) && !skip.Contains(NcuStrain))
         {
             actions.Add(new BuffAction
             {
@@ -456,15 +487,18 @@ public sealed class BuffCatalog
 
         foreach (var b in plan.Stackers)
         {
-            actions.Add(RouteFor(b, myProfession, botName, isLearned));
+            if (!skip.Contains(b.Strain))
+            {
+                actions.Add(RouteFor(b, myProfession, botName, isLearned));
+            }
         }
 
-        if (plan.McRung != null)
+        if (plan.McRung != null && !skip.Contains(plan.McRung.Strain))
         {
             actions.Add(RouteFor(plan.McRung, myProfession, botName, isLearned));
         }
 
-        if (plan.TsRung != null && plan.TsRung != plan.McRung)
+        if (plan.TsRung != null && plan.TsRung != plan.McRung && !skip.Contains(plan.TsRung.Strain))
         {
             actions.Add(RouteFor(plan.TsRung, myProfession, botName, isLearned));
         }

@@ -78,6 +78,16 @@ public sealed class EngineerPetBrain : PetBrain
     private double _buffAskedAt = -1e9;
     private int _loggedBuffOppFor; // the want-pet id we last logged a buff opportunity for
 
+    // A running buff with less than this left is treated as already gone when planning (so we re-request
+    // it); one with more is "stable" - counted as up and skipped from the request list (owner's model).
+    private const double RefreshSoonSec = 30.0;
+    private const double MaintainEverySec = 8.0; // re-check control margin + survival about this often while a pet is up
+    private const double RefreshMargin = 0.85; // refresh durable buffs before the pet's OE margin falls toward 0.80
+
+    private double _sinceMaintain;
+    private int _activeReqMc; // the MC/TS the CURRENT pet was summoned needing (0 if summoned from a shell we didn't cast)
+    private int _activeReqTs;
+
     public EngineerPetBrain(ILogger<EngineerPetBrain> logger, ControlArbiter controlArbiter,
         HuntController hunt, Awareness awareness, BuffCatalog catalog, BuffBotController buffBot, AccountInfo config)
         : base(logger, controlArbiter)
@@ -97,6 +107,18 @@ public sealed class EngineerPetBrain : PetBrain
         {
             // The robot is up: drive it onto the hunt target (hunt off / no target -> Follow).
             DriveAttack(me, attack, _hunt.Tick(me, _awareness, dt));
+
+            // Post-summon: keep control (refresh a fading durable buff before OE bites) and spend freed
+            // NCU on survival. Throttled, never during a heal/rest or a cast. The (short) wrangle is NOT
+            // refreshed here - it was a summon-moment prop; letting it lapse IS the downshift.
+            _sinceMaintain += dt;
+            if (_sinceMaintain >= MaintainEverySec && !me.IsCasting
+                && _controlArbiter.HasControl(ControlPriority.LowHealthNanoEmergency))
+            {
+                _sinceMaintain = 0;
+                MaintainAndSurvive(me);
+            }
+
             return true;
         }
 
@@ -237,28 +259,42 @@ public sealed class EngineerPetBrain : PetBrain
         }
 
         _summonAt[best.Id] = _clock;
+        (_activeReqMc, _activeReqTs) = PetReq(best); // remember what this pet needs, for control maintenance
         me.Cast(best.Id);
         _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, ql {best.Ql}) to make a shell.");
     }
 
     /// <summary>
-    ///     Buff-first: when a BETTER robot than <paramref name="castableBest" /> is learned but gated
-    ///     only by MC/TS, ask the buff bot (PetAutoBuff on, bot configured, un-teamed, near it) and
-    ///     wait, rather than summoning the weaker one. Returns true while holding for the buffs. Off,
-    ///     or no better pet, or a non-MC/TS gap, returns false and the caller summons what it can.
+    ///     Buff-first + sustain-gate: reach for the BIGGEST robot we could DURABLY control at 80% once
+    ///     buffed (not merely summon), and get the buffs for it - self-casting what we can, asking the
+    ///     bot for the rest, and skipping buffs already stably running. Returns true while working toward
+    ///     the buffs (the caller waits); false when there is nothing better to hold than we can already
+    ///     cast, or the owner has not enabled auto-buffing - then the caller summons the best it can now.
     /// </summary>
     private bool BuffFirst(LocalPlayer me, NanoItem? castableBest)
     {
-        var want = BestLearnedRobot(me);
+        var paid = IsPaid(me);
+        var baseMc = UnbuffedBase(me, Stat.MaterialCreation);
+        var baseTs = UnbuffedBase(me, Stat.SpaceTime);
+
+        // Sustain-gate: the biggest learned robot we can hold at 80% durably once buffed - NOT merely the
+        // highest QL. A pet we could summon at peak but not keep is skipped in favour of a smaller one.
+        var want = BestControllableRobot(me, baseMc, baseTs, paid);
         if (want == null || (castableBest != null && want.Ql <= castableBest.Ql))
         {
-            return false; // no better pet to reach for
+            return false; // nothing better that we could hold than what we can already cast
         }
 
         var (reqMc, reqTs) = PetReq(want);
         if (OeMargin(me, reqMc, reqTs) >= 1.0)
         {
-            return false; // the gap is not MC/TS (level/credits/expansion) - buffs won't help
+            return false; // already castable now (no buffs needed)
+        }
+
+        var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid);
+        if (!plan.CanControl)
+        {
+            return false; // BestControllableRobot already filtered on this, but stay safe
         }
 
         if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
@@ -268,11 +304,31 @@ public sealed class EngineerPetBrain : PetBrain
                 _loggedBuffOppFor = want.Id;
                 var who = _config.BuffBotName.Length > 0 ? _config.BuffBotName : "the buff bot";
                 _logger.LogInformation(
-                    $"PET: '{want.Name}' (ql {want.Ql}) needs MC {reqMc}/TS {reqTs} - out of reach now; " +
-                    $"buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
+                    $"PET: '{want.Name}' (ql {want.Ql}) needs MC {reqMc}/TS {reqTs} - out of reach now but holdable " +
+                    $"at {plan.MarginPct:F0}% once buffed; buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
             }
 
             return false; // the owner controls buffing; summon the best we can now
+        }
+
+        // The buffs we still need = the plan minus the strains already stably running (timer-aware).
+        var learned = me.SpellList ?? Array.Empty<int>();
+        var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me));
+
+        // Self-cast what we can ourselves (Generics / Engineer own-prof), one per pass (the cast gate is
+        // upstream in PolicyTick). This covers Composite Nano Expertise / Attribute Boost when learned.
+        var self = actions.FirstOrDefault(a => a.Source == BuffCatalog.BuffSource.SelfCast && !BuffUp(me, a.SelfCastNanoId));
+        if (self != null)
+        {
+            me.Cast(self.SelfCastNanoId);
+            _logger.LogInformation($"PET: self-casting {self.Name} ({self.SelfCastNanoId}) toward holding '{want.Name}'.");
+            return true;
+        }
+
+        var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).Select(a => a.Tell).ToList();
+        if (tells.Count == 0)
+        {
+            return false; // nothing left to request - summon now
         }
 
         if (_buffBot.Active)
@@ -282,17 +338,172 @@ public sealed class EngineerPetBrain : PetBrain
 
         if (_clock - _buffAskedAt >= BuffRetrySec)
         {
-            if (_buffBot.RequestBuffs(_catalog.PlanForPetSummon(me, reqMc, reqTs), $"pet-first for {want.Name}"))
+            if (_buffBot.RequestBuffs(tells, $"pet-first for {want.Name}"))
             {
                 _buffAskedAt = _clock;
-                _logger.LogInformation($"PET: asking the buff bot for MC {reqMc}/TS {reqTs} to summon '{want.Name}'.");
+                _logger.LogInformation(
+                    $"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] to hold '{want.Name}' " +
+                    $"(MC {reqMc}/TS {reqTs}, durable {plan.DurableMc}/{plan.DurableTs} = {plan.MarginPct:F0}%).");
                 return true;
             }
 
-            return false; // couldn't start (not near the bot / no plan) - summon what we can
+            return false; // couldn't start (not near the bot) - summon what we can
         }
 
         return _clock - _buffAskedAt < _config.PetBuffWaitSeconds; // hold for the wait window
+    }
+
+    // ---- Buff state (running buffs, timers, paid, sustain-gate, maintenance) ----------------
+
+    /// <summary>Paid account (Shadowlands) - Expansion stat, bit 2. Decides which buffs we may receive.</summary>
+    private static bool IsPaid(LocalPlayer me) => me.TryGetStat(Stat.Expansion, out var e) && (e & 2) != 0;
+
+    /// <summary>Is a specific nano running on us right now.</summary>
+    private static bool BuffUp(LocalPlayer me, int nanoId) => me.Buffs?.Any(b => b.Id == nanoId) ?? false;
+
+    /// <summary>
+    ///     The UNBUFFED base of a skill: current value minus everything our running buffs contribute to
+    ///     it (flat modifier + ability trickle, from the pack). Planning from this is correct whether the
+    ///     bot is bare (first test) or already partially buffed - the plan then re-adds the full durable
+    ///     set and routing skips the strains already up (<see cref="StableStrains" />).
+    /// </summary>
+    private static int UnbuffedBase(LocalPlayer me, Stat stat)
+    {
+        var cur = me.TryGetStat(stat, out var v) ? v : 0;
+        if (me.Buffs != null)
+        {
+            foreach (var buff in me.Buffs)
+            {
+                cur -= BuffCatalog.SkillContributionOf(buff.Id, (int)stat);
+            }
+        }
+
+        return cur;
+    }
+
+    /// <summary>
+    ///     The NanoStrains of buffs running on us with time to spare (>= RefreshSoonSec). These are
+    ///     "stable" - counted as already up, so the plan does not re-request them. Buffs expiring sooner
+    ///     are left OUT, so the plan will refresh them (owner's timer model, 2026-10-05).
+    /// </summary>
+    private HashSet<int> StableStrains(LocalPlayer me)
+    {
+        var strains = new HashSet<int>();
+        if (me.Buffs == null)
+        {
+            return strains;
+        }
+
+        foreach (var buff in me.Buffs)
+        {
+            if (buff.Cooldown.RemainingTime < RefreshSoonSec)
+            {
+                continue; // expiring soon - treat as gone so we re-request it
+            }
+
+            var s = BuffCatalog.StrainOf(buff.Id);
+            if (s != 0)
+            {
+                strains.Add(s);
+            }
+        }
+
+        return strains;
+    }
+
+    /// <summary>
+    ///     The sustain-gate: the highest-QL learned robot we could DURABLY control at the 80% floor once
+    ///     buffed (BuildControlPlan.CanControl), from the unbuffed base. The pet we KEEP is chosen by what
+    ///     we can hold, never by what a wrangle could briefly summon.
+    /// </summary>
+    private NanoItem? BestControllableRobot(LocalPlayer me, int baseMc, int baseTs, bool paid)
+    {
+        NanoItem? best = null;
+        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
+        {
+            if (!_robotSummonIds.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+            {
+                continue;
+            }
+
+            var (reqMc, reqTs) = PetReq(ni);
+            if (!_catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid).CanControl)
+            {
+                continue;
+            }
+
+            if (best == null || ni.Ql > best.Ql)
+            {
+                best = ni;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    ///     While a pet is up: keep it controlled (refresh a fading DURABLE buff before the OE margin falls
+    ///     toward 0.80) and spend freed NCU on survival. Gated behind PetAutoBuff - off (the conservative
+    ///     first run), this does nothing and the pet simply rides its summon buffs. The wrangle is never
+    ///     refreshed here; letting it lapse is the intended downshift.
+    /// </summary>
+    private void MaintainAndSurvive(LocalPlayer me)
+    {
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        {
+            return; // owner controls buffing
+        }
+
+        var paid = IsPaid(me);
+        var learned = me.SpellList ?? Array.Empty<int>();
+
+        // 1) Control upkeep: if the current pet's OE margin is nearing the floor, refresh the durable set.
+        if ((_activeReqMc > 0 || _activeReqTs > 0) && OeMargin(me, _activeReqMc, _activeReqTs) < RefreshMargin)
+        {
+            var plan = _catalog.BuildControlPlan(me, UnbuffedBase(me, Stat.MaterialCreation),
+                UnbuffedBase(me, Stat.SpaceTime), _activeReqMc, _activeReqTs, paid);
+            if (TryApply(me, _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me)),
+                    "pet control refresh"))
+            {
+                return;
+            }
+        }
+
+        // 2) Survival: fill whatever NCU is now free (the wrangle has lapsed) with HP/HoT/AC/shield.
+        var free = (me.TryGetStat(Stat.MaxNCU, out var mx) ? mx : 0) - (me.TryGetStat(Stat.CurrentNCU, out var cu) ? cu : 0);
+        if (free > 0)
+        {
+            TryApply(me, _catalog.SurvivalFill(me, free, paid, "Engineer", _config.BuffBotName, learned.Contains,
+                StableStrains(me)), "pet-tank survival");
+        }
+    }
+
+    // Do the first not-yet-up action from a routed list: self-cast it, or ask the bot (throttled). Returns
+    // true when it acted (cast or sent a request) so the caller stops for this pass.
+    private bool TryApply(LocalPlayer me, List<BuffCatalog.BuffAction> actions, string why)
+    {
+        var self = actions.FirstOrDefault(a => a.Source == BuffCatalog.BuffSource.SelfCast && !BuffUp(me, a.SelfCastNanoId));
+        if (self != null)
+        {
+            me.Cast(self.SelfCastNanoId);
+            _logger.LogInformation($"PET: self-casting {self.Name} ({self.SelfCastNanoId}) - {why}.");
+            return true;
+        }
+
+        var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).Select(a => a.Tell).ToList();
+        if (tells.Count == 0 || _buffBot.Active || _clock - _buffAskedAt < BuffRetrySec)
+        {
+            return _buffBot.Active; // waiting on a running session counts as acted
+        }
+
+        if (_buffBot.RequestBuffs(tells, why))
+        {
+            _buffAskedAt = _clock;
+            _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] - {why}.");
+            return true;
+        }
+
+        return false;
     }
 
     private NanoItem? BestLearnedRobot(LocalPlayer me)
