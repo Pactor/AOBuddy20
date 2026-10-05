@@ -138,6 +138,12 @@ public sealed class BotLoop
                 {
                     CurrentTask = Tasks.Combat;
                 }
+                else if (_brains.TickPet(me, deltaTime))
+                {
+                    // PET (650): summon/maintain/command pets - above selfbuffing, below combat so
+                    // the pet follows the fight. Log-only until the pet families are implemented.
+                    CurrentTask = Tasks.Pet;
+                }
                 else if (_brains.TickSelfbuff(me, deltaTime))
                 {
                     CurrentTask = Tasks.Selfbuff;
@@ -159,7 +165,7 @@ public sealed class BotLoop
                     CurrentTask = Tasks.SellGoods;
                 }
                 else if (CurrentTask is Tasks.Resupply or Tasks.SellGoods or Tasks.Heal
-                         or Tasks.Combat or Tasks.Selfbuff or Tasks.ExternalBuff or Tasks.Mission)
+                         or Tasks.Combat or Tasks.Selfbuff or Tasks.ExternalBuff or Tasks.Pet or Tasks.Mission)
                 {
                     CurrentTask = Tasks.Nothing;
                 }

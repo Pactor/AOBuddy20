@@ -24,4 +24,5 @@ public enum Tasks
     Combat, // brains: a CombatBrain engagement is open
     Selfbuff, // brains: a SelfbuffingBrain episode is open
     ExternalBuff, // brains: an ExternalBuffingBrain episode is open
+    Pet, // brains: a PetBrain episode is open (summon/maintain/command)
 }

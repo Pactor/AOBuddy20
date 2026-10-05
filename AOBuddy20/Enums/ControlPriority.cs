@@ -20,6 +20,7 @@ public enum ControlPriority
     Mission = 400,
     Resupply = 500, // above mission (a run must not starve mid-mission), below combat
     Selfbuffing = 600, // buffing self - above resupply, below combat
+    Pet = 650, // pet summon/maintain/command - above selfbuffing, below combat (the pet follows the fight)
     Combat = 700, // interrupts everything below it
     LowHealthNanoEmergency = 800,
     Emergency = 900, // e.g. player dying, disconnect

@@ -51,6 +51,7 @@ public sealed class BrainBank
     public CombatBrain? Combat { get; private set; }
     public SelfbuffingBrain? Selfbuff { get; private set; }
     public ExternalBuffingBrain? ExternalBuff { get; private set; }
+    public PetBrain? Pet { get; private set; }
 
     public BrainBank(BrainRegistry registry, IServiceProvider provider, ILogger<BrainBank> logger)
     {
@@ -100,8 +101,10 @@ public sealed class BrainBank
         Combat = Create<CombatBrain>(BrainKind.Combat, profession);
         Selfbuff = Create<SelfbuffingBrain>(BrainKind.Selfbuffing, profession);
         ExternalBuff = Create<ExternalBuffingBrain>(BrainKind.ExternalBuffing, profession);
+        Pet = Create<PetBrain>(BrainKind.Pet, profession);
         _logger.LogInformation(
-            $"BRAINS: profession {profession} - combat={Name(Combat)}, selfbuffing={Name(Selfbuff)}, externalbuff={Name(ExternalBuff)}.");
+            $"BRAINS: profession {profession} - combat={Name(Combat)}, selfbuffing={Name(Selfbuff)}, " +
+            $"externalbuff={Name(ExternalBuff)}, pet={Name(Pet)}.");
     }
 
     // ---- Tick forwarders (BotLoop's chain, descending ControlPriority) ----------------------
@@ -121,6 +124,11 @@ public sealed class BrainBank
         return ExternalBuff?.Tick(me, dt) ?? false;
     }
 
+    public bool TickPet(LocalPlayer me, double dt)
+    {
+        return Pet?.Tick(me, dt) ?? false;
+    }
+
     /// <summary>The 'brain' owner command's answer.</summary>
     public string Describe()
     {
@@ -131,7 +139,8 @@ public sealed class BrainBank
 
         return $"Brains: profession {_profession} - combat: {Name(Combat)}{DormantNote(Combat)}, " +
                $"selfbuffing: {Name(Selfbuff)}{DormantNote(Selfbuff)}, " +
-               $"externalbuffing: {Name(ExternalBuff)}{DormantNote(ExternalBuff)}. " +
+               $"externalbuffing: {Name(ExternalBuff)}{DormantNote(ExternalBuff)}, " +
+               $"pet: {Name(Pet)}{DormantNote(Pet)}. " +
                "Dormant brains take no actions until their family is implemented.";
     }
 

@@ -74,7 +74,8 @@ public sealed class BrainRegistry
 
         _logger.LogInformation(
             $"Brain registry: {_brains.Count} brains - combat: {Describe(BrainKind.Combat)}, " +
-            $"selfbuffing: {Describe(BrainKind.Selfbuffing)}, externalbuffing: {Describe(BrainKind.ExternalBuffing)}.");
+            $"selfbuffing: {Describe(BrainKind.Selfbuffing)}, externalbuffing: {Describe(BrainKind.ExternalBuffing)}, " +
+            $"pet: {Describe(BrainKind.Pet)}.");
     }
 
     /// <summary>
@@ -100,6 +101,7 @@ public sealed class BrainRegistry
             BrainKind.Combat => typeof(CombatBrain),
             BrainKind.Selfbuffing => typeof(SelfbuffingBrain),
             BrainKind.ExternalBuffing => typeof(ExternalBuffingBrain),
+            BrainKind.Pet => typeof(PetBrain),
             _ => typeof(object),
         };
     }
