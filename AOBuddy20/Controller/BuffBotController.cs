@@ -10,8 +10,11 @@
 // ---------------------------------------------------------------------------------------
 
 using AOBuddy20.Configuration;
+using AOBuddy20.Enums;
+using AOBuddy20.Nav;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
+using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Serilog.Events;
 using SmokeLounge.AOtomation.Messaging.Messages.N3Messages;
@@ -29,10 +32,12 @@ namespace AOBuddy20.Controlling;
 ///     owner's own invites stay manual). It sends the request tells by NAME through the chat client
 ///     (Client.Chat.SendPrivateMessage, logMessage false - off the console) and ends when the bot
 ///     kicks us or the window runs out.
-///     NOT yet (later sub-steps): travel to the buff spot (4a.1b), and computing WHICH buffs to ask
-///     for from the bot's catalogue, NCU- and receiver-aware (4a.2). For now the tells come from the
-///     conf (BuffRequestTells). Moves nothing; runs on the update thread (BotLoop ticks it, and the
-///     packet pump raises Team.TeamRequest on the same thread).
+///     Travel to the buff spot (4a.1b) is the SpotForDimension/BeginTravelToSpot/AtSpot API: the
+///     dimension's standing spot (Chewy at ICC, Codedoc at Borealis - AOBuddy10's coords) is driven on
+///     the MovementController's travel machinery; a caller walks there first, then runs the handshake.
+///     NOT yet: computing WHICH buffs to ask for from the bot's catalogue, NCU- and receiver-aware
+///     (4a.2). Runs on the update thread (BotLoop ticks it, and the packet pump raises Team.TeamRequest
+///     on the same thread).
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class BuffBotController
@@ -49,6 +54,7 @@ public sealed class BuffBotController
 
     private readonly AccountInfo _config;
     private readonly BuffCatalog _catalog;
+    private readonly MovementController _movement;
     private readonly ILogger<BuffBotController> _logger;
 
     private Stage _stage = Stage.Idle;
@@ -62,12 +68,91 @@ public sealed class BuffBotController
 
     public bool Active => _stage != Stage.Idle;
 
-    public BuffBotController(AccountInfo config, BuffCatalog catalog, ILogger<BuffBotController> logger)
+    public BuffBotController(AccountInfo config, BuffCatalog catalog, MovementController movement, ILogger<BuffBotController> logger)
     {
         _config = config;
         _catalog = catalog;
+        _movement = movement;
         _logger = logger;
         Team.TeamRequest += OnTeamRequest; // the buff bot answers by inviting us
+    }
+
+    // ---- The buff spot (4a.1b): walk to the bot before asking --------------------------------
+
+    /// <summary>The dimension's public buff spot (Chewy at ICC on RubiKa, Codedoc at Borealis on
+    /// RubiKa2019 - AOBuddy10's coords), or null when travel-to-spot is off or no spot is configured.
+    /// Resolved off Client.Dimension, the same gate CodedocBuffs/Zoning use.</summary>
+    public (int Pf, Vector3 Pos, string Label)? SpotForDimension()
+    {
+        if (!_config.BuffTravelToSpot)
+        {
+            return null;
+        }
+
+        var is2019 = Client.Dimension == AOSharp.Clientless.Common.Dimension.RubiKa2019;
+        var pf = is2019 ? _config.CodedocBuffPf : _config.ChewyBuffPf;
+        if (pf <= 0)
+        {
+            return null;
+        }
+
+        var pos = is2019
+            ? new Vector3(_config.CodedocBuffX, _config.CodedocBuffY, _config.CodedocBuffZ)
+            : new Vector3(_config.ChewyBuffX, _config.ChewyBuffY, _config.ChewyBuffZ);
+        return (pf, pos, is2019 ? "Codedoc" : "Chewy");
+    }
+
+    /// <summary>Standing at the buff bot? True when travel-to-spot is off (nothing to walk to) OR we are
+    /// in the spot's playfield and the travel goal is reached / within the arrive radius.</summary>
+    public bool AtSpot()
+    {
+        var s = SpotForDimension();
+        if (s == null)
+        {
+            return true;
+        }
+
+        if ((int)Playfield.ModelId != s.Value.Pf)
+        {
+            return false;
+        }
+
+        return _movement.IsGoalReached(ControlPriority.Travel)
+               || Vector3.Distance(_movement.CurrentPosition, s.Value.Pos) <= _config.BuffSpotArriveMeters;
+    }
+
+    /// <summary>Set the travel goal for the buff spot on the MovementController's travel machinery (the
+    /// body walks there on its own, in-zone or cross-zone). Returns a human-readable line, or null when
+    /// there is no spot to walk to.</summary>
+    public string? BeginTravelToSpot()
+    {
+        var s = SpotForDimension();
+        return s == null ? null : _movement.PlanTravel(s.Value.Pf, s.Value.Pos);
+    }
+
+    /// <summary>Drop the buff-spot travel goal once we have arrived (covers both the cross-zone plan and
+    /// the in-zone Travel goal PlanTravel leaves when already in the spot's playfield).</summary>
+    public void ClearTravelToSpot()
+    {
+        _movement.CancelTravel();
+        _movement.ClearDesiredGoal(ControlPriority.Travel);
+    }
+
+    /// <summary>A readable one-liner of where we are relative to the spot, for narration/logs.</summary>
+    public string SpotStatus()
+    {
+        var s = SpotForDimension();
+        if (s == null)
+        {
+            return "no buff spot (travel-to-spot off)";
+        }
+
+        if ((int)Playfield.ModelId == s.Value.Pf)
+        {
+            return $"{Vector3.Distance(_movement.CurrentPosition, s.Value.Pos):0}m from the {s.Value.Label} spot in {Zoning.Name(s.Value.Pf)}";
+        }
+
+        return $"traveling to {Zoning.Name(s.Value.Pf)} for {s.Value.Label}";
     }
 
     // ---- The 'buffs' owner command ---------------------------------------------------------

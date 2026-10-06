@@ -78,6 +78,9 @@ public sealed class EngineerPetBrain : PetBrain
     private double _lastStuckWarnAt = double.NegativeInfinity;
     private double _lastNoCastWarnAt = double.NegativeInfinity;
     private double _lastNarrateAt = double.NegativeInfinity;
+    private double _lastWalkLogAt = double.NegativeInfinity;
+    private bool _dryTravelPlanned; // dry run: have we set the walk-to-the-buff-spot goal this trip?
+    private bool _dryArrived;       // dry run: are we standing at the buff spot (narrate from here)?
     private const int SummonTriesWarn = 4;
     private const double StuckWarnEverySec = 30.0;
 
@@ -125,12 +128,14 @@ public sealed class EngineerPetBrain : PetBrain
 
     protected override bool PolicyTick(LocalPlayer me, double dt)
     {
-        // DRY RUN: look and narrate only - take NO action (no summon/buff/learn/cast). Owner's first-run
-        // safety so nothing irreversible happens before they have seen what the bot intends.
+        // DRY RUN: WALK to the dimension's buff spot, stand there, then narrate what it WOULD do - but
+        // take no buff/summon/learn/cast action. Owner's first-run safety: the only real movement is the
+        // walk to the bot (4a.1b), so the owner can watch it path to the right buffer (Chewy on RubiKa,
+        // Codedoc on RubiKa2019) before anything irreversible is enabled.
         if (_config.PetDryRun)
         {
-            NarrateFind(me);
-            return false; // never hold control in dry run
+            DryRun(me);
+            return false; // never hold brain control in dry run (the walk rides the Travel goal)
         }
 
         var attack = AttackPet(me);
@@ -890,7 +895,46 @@ public sealed class EngineerPetBrain : PetBrain
                                && c.Param1 == (int)Stat.Profession && c.Param2 == profession);
     }
 
-    // ---- Dry run: look and narrate, take no action ------------------------------------------
+    // ---- Dry run: walk to the buff spot, then look and narrate ------------------------------
+
+    /// <summary>
+    ///     Dry run top (PetDryRun): first WALK to the dimension's buff spot (4a.1b) - the body rides the
+    ///     MovementController's Travel goal there; the brain holds no control. Only once standing at the
+    ///     spot do we narrate the plan (NarrateFind). Nothing here buffs, summons, learns or casts: the
+    ///     walk is the only real action, so the owner can confirm the pathing to the right buffer first.
+    /// </summary>
+    private void DryRun(LocalPlayer me)
+    {
+        // No spot to walk to (travel-to-spot off / unset) -> AtSpot() is true -> narrate in place, as before.
+        if (!_buffBot.AtSpot())
+        {
+            if (!_dryTravelPlanned)
+            {
+                _dryTravelPlanned = true;
+                var line = _buffBot.BeginTravelToSpot();
+                _logger.LogInformation($"PET DRYRUN: walking to the buff spot first - {line ?? "no spot configured"}.");
+            }
+
+            if (_clock - _lastWalkLogAt >= 20.0)
+            {
+                _lastWalkLogAt = _clock;
+                _logger.LogInformation(
+                    $"PET DRYRUN: en route ({_buffBot.SpotStatus()}) - I will narrate the plan once I'm standing at the bot.");
+            }
+
+            return; // don't narrate until we're at the buffer
+        }
+
+        // Arrived (or nothing to walk to): drop the travel goal once, announce, then narrate from here.
+        if (_dryTravelPlanned && !_dryArrived)
+        {
+            _dryArrived = true;
+            _buffBot.ClearTravelToSpot();
+            _logger.LogInformation($"PET DRYRUN: arrived - standing at the buff spot ({_buffBot.SpotStatus()}). Here is what I would do:");
+        }
+
+        NarrateFind(me);
+    }
 
     /// <summary>
     ///     Dry run (PetDryRun): scan the bags for a pet-summon nano crystal and narrate, step by step,
