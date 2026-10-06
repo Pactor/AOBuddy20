@@ -79,6 +79,43 @@ Rules:
 - Carry **10+ empty bags**, kept open as plasma destinations.
 - Done condition = N bags × plasma stack size filled. (Plasma stack size per bag = confirm in-game.)
 
+## Architecture / where it lives
+This is a **task**, so it is a new **`BloodPlasmaController`** in `AOBuddy20/Controller/`,
+alongside `HuntController` / `MissionController` — **not a new brain**. Brains
+(`CombatBrain`, `PetBrain`, `*SelfbuffingBrain`…) are per-tick profession *decision* modules;
+controllers are task orchestrators. `BloodPlasmaController` drives a small state machine and
+leans on existing pieces:
+
+| Need | Reuse / new |
+|---|---|
+| Travel to the farm zone | `MovementController` / `NavController` (reuse) |
+| Find + kill biological mobs | `HuntController` + `CombatBrain` (reuse; add a biological + good-part-dropper filter) |
+| **Loot the corpse** | **NEW capability — does not exist yet (see below)** |
+| Comminute parts → plasma | **NEW**: use-item-on-item action + skill/QL gate + ruined-parts blacklist |
+| Bag management | `LootBagStore` exists for a designated destination bag; **NEW**: fill N bags, roll-over, done-condition, never-sell |
+| Trader-side selling | extend `SellController` for the Specialist Commerce terminal + buff-CL-before-sell |
+
+State machine (farmer): `Travel → Hunt → Loot → Comminute → Bag → (bags full?) → Announce`.
+The Trader side (buff Trading Mogul → sell at OT Specialist Commerce) is a separate, later mode.
+
+## Prerequisite: mob looting — NOT built yet
+The bot has corpse **awareness** (`CorpseFullUpdateMessage` marks mobs dead and names them,
+`Inventory.ContainerOpened`) and a loot-bag **destination** (`LootBagStore`, `lootbag`
+command), but there is **no loot action**: nothing walks to a corpse, opens it, and transfers
+items out. Blood Plasma farming is blocked on this, so it must be planned and built first.
+
+To design/build (its own task, likely a shared `LootController` so other modes benefit):
+1. **Target a lootable corpse** — from the dead-corpse list, within range, not yet looted.
+2. **Open it** — the corpse is a container; send the open/use, wait for `ContainerOpened`.
+3. **Transfer items out** — SDK item-transfer from the corpse container into inventory /
+   the designated loot bag (confirm the clientless transfer path exists; wire it if not).
+4. **Filter** — take only wanted IDs (here: the good Monster Parts), leave the rest.
+5. **Robustness** — corpse despawn mid-loot, out-of-range, full inventory, ghost/unmatched
+   corpses; move on without stalling the hunt.
+
+This is a general capability (missions, hunting and plasma all want it), so build it as a
+reusable `LootController` rather than inside `BloodPlasmaController`.
+
 ## Sell-price scaling → the Trader (the payout model)
 Plasma isn't a fixed payout; shop price scales with the seller's **Computer Literacy** and
 faction. From `Utils/ItemValues.cs` (verified live at ICC Fair Trade): price = `Value ×
@@ -183,6 +220,8 @@ biological-slanted slider preset.
 - Target setup: Trader ~L50 Omni, self-casts Trading Mogul (+260 CL) on a 51-NCU belt.
 
 ## Open items to close before build
+0. **BLOCKER: build a reusable `LootController`** (open corpse → transfer wanted items out).
+   Nothing loots corpses today; plasma farming cannot start without it.
 1. **Plasma stack size per bag** (sets the "N bags full" done condition).
 2. **Confirm the good-part loot-table** per zone (which mobs actually drop 42641/variants).
 3. Which comminutor QL to stock per level band (buy QL ≥ farmed part QL to avoid QL loss).
