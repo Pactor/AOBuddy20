@@ -60,6 +60,12 @@ public sealed class BuffCatalog
         public bool NeedsSl; // receiver must own Shadowlands (target=18 Expansion 389 BitAnd 2).
         public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>(); // stat -> flat amount added.
 
+        // Self-vs-others DELIVERY (AOBuddy10's method, from the pack's cast-function type / effect target,
+        // NOT the landed nano's own effect targets): a buff bot can only give us a buff that reaches OTHERS.
+        public bool CanCastOnOthers = true; // false = self-only (CastNano / only User+Wearer targets) - a bot cannot put it on us.
+        public bool NeedsTeam; // true = delivered by TeamCastNano - we must be teamed with the caster; false = single-target, just targeted.
+        public int RepNanoId; // the landed nano the gate/modifiers were read from (what actually runs on us).
+
         /// <summary>Castable by the bot itself: the "Generic" buffs anyone who learned them can cast,
         /// or this bot's own profession's buffs. Everything else needs the matching buff bot.</summary>
         public bool SelfCastableBy(string myProfession) =>
@@ -187,33 +193,63 @@ public sealed class BuffCatalog
             // The nano that actually carries the effect (several ids may share a name; take the one with
             // the most stat modifiers - the landed buff, not the team-cast wrapper). NCU's many tiers are
             // resolved per-tier in BestNcuBuff, so enriching off the representative one is harmless there.
+            // The rep is the nano that LANDS ON THE RECEIVER - the BUFF, not a self-debuff the same spell
+            // casts on the caster (a single-target wrangle's main nano modifies the target +131 AND casts a
+            // -143 debuff onto the Trader; both have the same modifier count, so count alone picked the
+            // debuff). Rank by the net modifier total (positive buff beats negative debuff), then count.
             var rep = b.LandIds.Select(NanoLibrary.Find).Where(n => n != null).Cast<NanoProfile>()
-                .OrderByDescending(n => n.Modifies.Count).FirstOrDefault();
+                .OrderByDescending(n => n.Modifies.Values.Sum())
+                .ThenByDescending(n => n.Modifies.Count).FirstOrDefault();
             if (rep == null)
             {
                 continue;
             }
 
             b.Strain = rep.Stat(75);
+            b.RepNanoId = rep.NanoId;
             var (level, sl) = ReceiverGate(rep);
             b.ReceiverLevel = level;
             b.NeedsSl = sl;
             b.Modifies = rep.Modifies;
+
+            // Self-vs-others delivery: find how the REP (landed) nano is delivered. A wrapper among the
+            // entry's own ids that casts the rep decides it - TeamCastNano => team (needs team), AreaCastNano
+            // => others (no team), CastNano => SELF ONLY. With no wrapper the rep is cast directly: it can go
+            // on another character only if it has a Target(3) landing effect. This is why the +500 Firewalled
+            // (rep self-cast via CastNano) is self-only even though its landed nano has a Target(3) effect.
+            var wrappers = b.LandIds.Select(NanoLibrary.Find).Where(n => n != null).Cast<NanoProfile>().ToList();
+            var casts = wrappers.SelectMany(n => n.Casts).Where(c => c.NanoId == rep.NanoId).ToList();
+            if (casts.Count > 0)
+            {
+                b.NeedsTeam = casts.Any(c => c.Func == FuncTeamCastNano);
+                b.CanCastOnOthers = casts.Any(c => c.Func is FuncTeamCastNano or FuncAreaCastNano);
+            }
+            else
+            {
+                b.NeedsTeam = false;
+                b.CanCastOnOthers = rep.TargetsOthers;
+            }
         }
     }
 
-    // The receiver's own gate on a nano - the Level minimum and the Shadowlands flag. Which target the
-    // Level> gate belongs to is read from the data: a nano with a CASTER profession gate (profession ==
-    // on OnSelf) is cast BY a bot, so self=caster and the receiver's reqs are on OnTarget (18); a nano
-    // with no caster profession gate is the LANDED buff running on us, so self=receiver (19). SL is
-    // always an OnTarget flag. Caster level/skill criteria are the buff bot's problem, never ours.
+    // Cast-function types (nanos.ocp effect functions) - the self-vs-others delivery signal.
+    private const int FuncCastNano = 53051, FuncTeamCastNano = 53066, FuncAreaCastNano = 53087;
+
+    // The six nano skills (Matter Creation, Time&Space, Bio/Material/Psycho Met, Sensory Imp). A buff is a
+    // NANO-SKILL buff if it directly raises one - those do not stack within a profession (per skill, highest
+    // only). Attribute buffs raise abilities (16..21) and only TRICKLE to skill - a different line that stacks.
+    private static readonly int[] NanoSkillStats = { 122, 127, 128, 129, 130, 131 };
+    private static bool IsNanoSkillBuff(BuffEntry b) => NanoSkillStats.Any(ns => b.Adds(ns) > 0);
+
+    // The RECEIVER's own gate on a nano - the Level we must meet and the Shadowlands flag. A buff cast on
+    // others carries BOTH gates on the landed nano's criteria: the CASTER's level (the higher one - the bot
+    // must be that high to cast it) and the RECEIVER's "to use/affect" level (the lower one - what WE must
+    // be). The pack puts both on the Self slot with identical child operators, so they cannot be told apart
+    // structurally; the receiver requirement is the LOWEST Level> gate (owner, 2026-10-05: Composite Mochams
+    // 8h reads caster 219 / receiver 209 this way). A single-gate nano (every NCU tier, most buffs) is
+    // unchanged. SL is read from any Expansion BitAnd-2 gate (caster or target).
     private static (int Level, bool NeedsSl) ReceiverGate(NanoProfile nano)
     {
-        var castByBot = nano.Actions.Any(a => a.ActionType == ActionToUse && a.Requirements.Any(r =>
-            r.Target == TargetSelf && r.Operator == OpEqualTo &&
-            (r.Stat == StatProfession || r.Stat == StatVisualProfession)));
-        var receiverTarget = castByBot ? TargetReceiver : TargetSelf;
-
         var level = 0;
         var needsSl = false;
         foreach (var act in nano.Actions)
@@ -225,12 +261,12 @@ public sealed class BuffCatalog
 
             foreach (var req in act.Requirements)
             {
-                if (req.Stat == StatLevel && req.Operator == OpGreaterThan && req.Target == receiverTarget)
+                if (req.Stat == StatLevel && req.Operator == OpGreaterThan)
                 {
-                    level = Math.Max(level, req.Value + 1); // GreaterThan N is inclusive of N+1
+                    var lv = req.Value + 1; // GreaterThan N is inclusive of N+1
+                    level = level == 0 ? lv : Math.Min(level, lv); // the receiver gate is the LOWER of caster/receiver
                 }
-                else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0 &&
-                         req.Target == TargetReceiver)
+                else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0)
                 {
                     needsSl = true;
                 }
@@ -353,11 +389,16 @@ public sealed class BuffCatalog
     // this is what lets the SAME control plan gate an MP mezz pet on MatMet or a heal pet on BioMet.
     private static readonly int[] AbilityStats = { 16, 17, 18, 19, 20, 21 }; // Str,Agi,Sta,Int,Sen,Psy
 
+    // Verified from OmniCell/CellAO SkillTrickleTable (columns: Str, Agi, Sta, Int, Sen, Psy). All pet-gating
+    // nano skills so the SAME control plan gates any pet class: MP mezz (MatMet 127), heal (BioMet 128),
+    // Engineer/MP-attack (MC 130 / TS 131), and Crat/others on PsyMod 129 or SI 122.
     private static readonly Dictionary<int, double[]> TrickleFactors = new()
     {
-        [127] = new[] { 0, 0, 0, 0.8, 0, 0.2 }, // Matter Metamorphosis (MP mezz)
-        [128] = new[] { 0, 0, 0, 0.8, 0, 0.2 }, // Biological Metamorphosis (MP heal)
-        [130] = new[] { 0, 0, 0.2, 0.8, 0, 0.0 }, // Matter Creation
+        [122] = new[] { 0.2, 0, 0, 0.8, 0, 0.0 }, // Sensory Improvement
+        [127] = new[] { 0, 0.8, 0, 0, 0, 0.2 }, // Material Metamorphosis
+        [128] = new[] { 0, 0, 0, 0.8, 0, 0.2 }, // Biological Metamorphosis
+        [129] = new[] { 0, 0.8, 0, 0, 0.2, 0.0 }, // Psychological Modification
+        [130] = new[] { 0, 0.8, 0.2, 0, 0, 0.0 }, // Matter Creation
         [131] = new[] { 0, 0.2, 0, 0.8, 0, 0.0 }, // Time & Space
     };
 
@@ -418,17 +459,35 @@ public sealed class BuffCatalog
     /// </summary>
     public sealed class ControlPlan
     {
-        public bool CanControl;
-        public readonly Dictionary<int, int> Durable = new(); // stat -> projected durable value (no wrangle)
+        public bool CanControl; // durable (no-wrangle) clears the 80% floor on every required skill -> holdable
+        public bool CanSummon;  // peak (durable + wrangle) clears the full requirement -> castable at the summon moment
+        public readonly Dictionary<int, int> Durable = new(); // stat -> projected durable value (NO wrangle: what we HOLD at)
+        public readonly Dictionary<int, int> Peak = new();    // stat -> durable + the short wrangle (the summon-moment value)
         public readonly Dictionary<int, int> Floor = new(); // stat -> ceil(controlFloor * req)
-        public double MarginPct; // min over required skills of durable/req * 100
+        public double MarginPct; // min over required skills of durable/req * 100 (the HOLD margin, wrangle dropped)
         public NcuPick? Ncu; // the NCU buff to request first
-        public readonly List<BuffEntry> Buffs = new(); // every durable buff the plan applies
+        public bool NcuAlreadyUp; // the chosen NCU tier is ALREADY running (login with the 4h buff) - its +Max NCU is in the live base, not added again
+        public double NcuRemainingSec; // when NcuAlreadyUp: seconds left on it (for the "refresh at T-15m" narration)
+        public readonly List<BuffEntry> Buffs = new(); // every buff the plan requests (incl. the wrangle, for the summon peak)
+        public readonly List<PlanStep> Steps = new(); // ordered, for a step-by-step "base -> +buff -> running total" trace
         public int MaxNcu, NcuUsed, NcuFree; // NCU budget once the durable set is up
+
+        /// <summary>One buff in the plan, in apply order, with the +skill it contributes - for the dry-run trace.</summary>
+        public sealed class PlanStep
+        {
+            public string Name = "";
+            public readonly Dictionary<int, int> Add = new(); // required-stat -> +skill this buff gives (trickle included)
+            public bool Wrangle; // the short summon-moment peak - not part of the durable hold
+            public int Ncu;      // the buff's NCU footprint
+            public int MaxNcuAdded; // for the NCU buff itself: +Max NCU (it adds no skill)
+            public int AddFor(int stat) => Add.TryGetValue(stat, out var v) ? v : 0;
+        }
 
         // Convenience for the common MC/TS pet (keeps callers/logs simple).
         public int DurableMc => Durable.TryGetValue(130, out var v) ? v : 0;
         public int DurableTs => Durable.TryGetValue(131, out var v) ? v : 0;
+        public int PeakMc => Peak.TryGetValue(130, out var v) ? v : 0;
+        public int PeakTs => Peak.TryGetValue(131, out var v) ? v : 0;
         public int FloorMc => Floor.TryGetValue(130, out var v) ? v : 0;
         public int FloorTs => Floor.TryGetValue(131, out var v) ? v : 0;
     }
@@ -459,92 +518,191 @@ public sealed class BuffCatalog
 
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
         var reqStats = reqByStat.Keys.ToList();
+        // Dedupe by the landed nano: a buff we LEARNED (SelfBuffCandidates) is also in the catalog, and the
+        // two entries carry different professions - counted twice they would double the skill and stack a
+        // buff against itself. Keep one per nano (the catalog entry wins, _buffs first; a Generic catalog
+        // buff still self-casts). Only THEN the skill-buff / castable filters.
+        int NanoKey(BuffEntry b) => b.RepNanoId > 0 ? b.RepNanoId : b.NanoId ?? (b.LandIds.Count > 0 ? b.LandIds[0] : 0);
         var pool = _buffs.Concat(SelfBuffCandidates(me, myProfession))
-            .Where(b => Castable(b, myLevel, paid)).ToList();
+            .GroupBy(NanoKey)
+            .Select(g => g.First())
+            .Where(b => Castable(b, myLevel, paid) && (b.CanCastOnOthers || b.SelfCastableBy(myProfession))
+                        && SurvivalRank(b).Tier < 0) // CONTROL = skill buffs only; HP/HoT/AC/shield/evade are
+            .ToList();                                // post-summon survival (owner: pet first, survival after)
 
-        plan.Ncu = BestNcuBuff(me);
+        plan.Ncu = BestNcuBuff(me, paid);
+        if (plan.Ncu != null && me.Buffs != null)
+        {
+            var upNcu = me.Buffs.FirstOrDefault(b => b.Id == plan.Ncu.LandId);
+            if (upNcu != null)
+            {
+                plan.NcuAlreadyUp = true;
+                plan.NcuRemainingSec = upNcu.Cooldown?.RemainingTime ?? 0;
+            }
+        }
 
         int Help(BuffEntry e, int stat) => e.Adds(stat) + AttrTrickle(e, stat);
 
-        var cur = new Dictionary<int, int>();
+        // Record a plan buff as an ordered step (for the dry-run trace). Wrangle steps are summon-moment
+        // peak, not durable - tracked but not folded into the durable total.
+        void AddStep(BuffEntry e, bool wrangle)
+        {
+            var step = new ControlPlan.PlanStep { Name = e.Name, Wrangle = wrangle, Ncu = e.Ncu };
+            foreach (var s in reqStats)
+            {
+                step.Add[s] = Help(e, s);
+            }
+
+            plan.Steps.Add(step);
+        }
+
+        // The NCU buff is requested first (it expands Max NCU so the rest fit); it adds no skill. Show it.
+        // Already running (login with the 4h buff) -> show it as held with its remaining time, not re-added.
+        if (plan.Ncu != null)
+        {
+            var how = plan.Ncu.NeedsTeam ? "team-cast, needs team" : "single-target";
+            var name = plan.NcuAlreadyUp
+                ? $"+{plan.Ncu.MaxNcuAdded} Max NCU '{plan.Ncu.Name}' [UP, {plan.NcuRemainingSec / 60:F0}m left - refresh at T-15m]"
+                : $"+{plan.Ncu.MaxNcuAdded} Max NCU '{plan.Ncu.Name}' ({how})";
+            plan.Steps.Add(new ControlPlan.PlanStep { Name = name, MaxNcuAdded = plan.NcuAlreadyUp ? 0 : plan.Ncu.MaxNcuAdded });
+        }
+
+        var cur = new Dictionary<int, int>();      // durable running total (NO wrangle)
+        var wrangleAdd = new Dictionary<int, int>(); // the wrangle's contribution, held separately for the peak
         foreach (var s in reqStats)
         {
             cur[s] = baseByStat.TryGetValue(s, out var b) ? b : 0;
+            wrangleAdd[s] = 0;
         }
 
-        // Phase 1: stackers that raise >1 required skill (composites) or trickle from abilities - best per
-        // strain (they stack across strains). TODO: multi-tier composite picks the biggest; NCU-minimal
-        // tier selection there is a later refinement.
-        var multi = pool
-            .Where(b =>
-            {
-                var directReq = reqStats.Count(s => b.Adds(s) > 0);
-                var abilityOnly = reqStats.All(s => b.Adds(s) == 0) && reqStats.Any(s => Help(b, s) > 0);
-                return directReq >= 2 || abilityOnly;
-            })
-            .GroupBy(b => b.Strain)
-            .Select(g => g.OrderByDescending(b => reqStats.Sum(s => Help(b, s))).First())
-            .ToList();
+        // SKILL SELECTION (owner's stacking rule, 2026-10-05): a profession's NANO-SKILL buffs do NOT stack
+        // with each other - per skill only the HIGHEST counts, so a single +140 Mocham's Gift overwrites that
+        // profession's +50 Composite (and a composite +140 would overwrite the single). DIFFERENT professions
+        // DO stack, and ATTRIBUTE buffs (a different line, trickling to skill) stack on top. So: pick the best
+        // nano-skill buff per (profession, skill), then the best-value attribute buffs, then the wrangle - all
+        // NCU-bounded to the SUMMON budget (pet first; survival spends the leftover after the wrangle drops).
+        var ncuBudget = (me.TryGetStat(Stat.MaxNCU, out var budgetMax) ? budgetMax : 0)
+                        + (plan.NcuAlreadyUp ? 0 : plan.Ncu?.MaxNcuAdded ?? 0);
+        var usedNcu = 0;
 
-        foreach (var b in multi)
+        // 1) Nano-skill buffs, grouped by profession (same profession = one line, no stacking). For each
+        // profession take the biggest buff per still-uncovered required skill that fits NCU; a multi-skill
+        // buff covers several at once. This is what drops MP's Composite Mastery in favour of Mocham's Gift.
+        foreach (var profGroup in pool.Where(b => IsNanoSkillBuff(b) && !IsWrangle(b)).GroupBy(b => b.Profession))
         {
-            plan.Buffs.Add(b);
-            foreach (var s in reqStats)
+            var covered = new HashSet<int>();
+            foreach (var s in reqStats.OrderByDescending(s => profGroup.Max(b => b.Adds(s))))
             {
-                cur[s] += Help(b, s);
-            }
-        }
+                if (covered.Contains(s))
+                {
+                    continue;
+                }
 
-        // Phase 2: per still-short required skill, the cheapest SINGLE-skill rung (raises this skill, none
-        // of the OTHER required skills) that closes the gap - or the biggest if none does.
-        foreach (var s in reqStats)
-        {
-            var deficit = plan.Floor[s] - cur[s];
-            if (deficit <= 0)
-            {
-                continue;
-            }
+                var pick = profGroup
+                    .Where(b => b.Adds(s) > 0 && !plan.Buffs.Contains(b) && b.Ncu <= ncuBudget - usedNcu)
+                    .OrderByDescending(b => b.Adds(s)).FirstOrDefault();
+                if (pick == null)
+                {
+                    continue;
+                }
 
-            var others = reqStats.Where(x => x != s).ToList();
-            var rungs = pool
-                .Where(b => b.Adds(s) > 0 && others.All(o => b.Adds(o) == 0))
-                .OrderBy(b => b.Adds(s)).ToList();
-            if (rungs.Count == 0)
-            {
-                continue;
-            }
-
-            var pick = rungs.FirstOrDefault(b => b.Adds(s) >= deficit) ?? rungs[^1];
-            if (!plan.Buffs.Contains(pick))
-            {
                 plan.Buffs.Add(pick);
+                AddStep(pick, false);
+                usedNcu += pick.Ncu;
                 foreach (var s2 in reqStats)
                 {
-                    cur[s2] += Help(pick, s2);
+                    if (pick.Adds(s2) > 0)
+                    {
+                        covered.Add(s2);
+                    }
                 }
             }
         }
 
+        // 2) The wrangle FIRST (before the small attribute buffs) - the ~1-minute SUMMON peak (Trader line,
+        // stacks), biggest that fits. It is worth far more (+131) than any trickle buff, so it is reserved
+        // before leftover NCU goes to attributes. Held aside from the durable total: dropped right after the
+        // pet lands (that lapse IS the downshift).
+        // The wrangle: the TEAM wrangle (its landed nano reads +132) is locked to us (owner), so we take the
+        // one that does NOT need a team - the single-target Skill Wrangler at its real +131 - biggest that
+        // fits NCU. NeedsTeam buffs are excluded here; a non-team wrangle is cast straight on us.
+        var wrangle = pool.Where(b => IsWrangle(b) && !b.NeedsTeam && b.Ncu <= ncuBudget - usedNcu)
+            .OrderByDescending(b => reqStats.Sum(s => Help(b, s))).FirstOrDefault();
+        if (wrangle != null)
+        {
+            plan.Buffs.Add(wrangle);
+            AddStep(wrangle, true);
+            usedNcu += wrangle.Ncu;
+        }
+
+        // 3) The BROAD attribute composite (raises >=3 abilities, so it trickles across the nano skills) -
+        // e.g. Composite Attribute Boost. NARROW single/dual-attribute buffs (Feline Grace +Agi, Iron Circle
+        // +Str/Stam, Neuronal +Int/Psy) are NOT pet-control buffs - they are survival/utility and belong to
+        // the post-summon survival pass (owner: pet first, survival after). A different line, so it stacks.
+        foreach (var b in pool
+                     .Where(b => !IsNanoSkillBuff(b) && !IsWrangle(b) && AbilityStats.Count(a => b.Adds(a) > 0) >= 3
+                                 && reqStats.Any(s => Help(b, s) > 0))
+                     .OrderByDescending(b => (double)reqStats.Sum(s => Help(b, s)) / Math.Max(1, b.Ncu)))
+        {
+            if (plan.Buffs.Contains(b) || b.Ncu > ncuBudget - usedNcu)
+            {
+                continue;
+            }
+
+            plan.Buffs.Add(b);
+            AddStep(b, false);
+            usedNcu += b.Ncu;
+        }
+
+        // Durable totals under the stacking rule: nano-skill buffs contribute their profession's MAX per skill
+        // (no same-profession stacking); attribute buffs add their trickle (they stack); the wrangle is the
+        // peak only (wrangleAdd), never durable.
+        foreach (var s in reqStats)
+        {
+            var v = cur[s]; // the unbuffed base
+            foreach (var pg in plan.Buffs.Where(b => IsNanoSkillBuff(b) && !IsWrangle(b)).GroupBy(b => b.Profession))
+            {
+                v += pg.Max(b => b.Adds(s));
+            }
+
+            foreach (var b in plan.Buffs.Where(b => !IsNanoSkillBuff(b) && !IsWrangle(b)))
+            {
+                v += Help(b, s);
+            }
+
+            cur[s] = v;
+            wrangleAdd[s] = wrangle != null ? Help(wrangle, s) : 0;
+        }
+
         plan.CanControl = true;
+        plan.CanSummon = true;
         var margin = 1.0;
         foreach (var s in reqStats)
         {
             plan.Durable[s] = cur[s];
+            plan.Peak[s] = cur[s] + wrangleAdd[s];
             if (cur[s] < plan.Floor[s])
             {
-                plan.CanControl = false;
+                plan.CanControl = false; // can't HOLD it durably at the 80% floor
+            }
+
+            if (plan.Peak[s] < reqByStat[s])
+            {
+                plan.CanSummon = false; // can't reach the full req even WITH the wrangle
             }
 
             if (reqByStat[s] > 0)
             {
-                margin = Math.Min(margin, (double)cur[s] / reqByStat[s]);
+                margin = Math.Min(margin, (double)cur[s] / reqByStat[s]); // the HOLD margin (durable, wrangle dropped)
             }
         }
 
         plan.MarginPct = margin * 100.0;
 
         var baseMaxNcu = me.TryGetStat(Stat.MaxNCU, out var mncu) ? mncu : 0;
-        plan.MaxNcu = baseMaxNcu + (plan.Ncu?.MaxNcuAdded ?? 0);
+        // When the NCU buff is already running, live Max NCU ALREADY includes its +Max NCU - adding it again
+        // would inflate the budget (owner logs in with the 4h buff up). Only project it when it is NOT up yet.
+        plan.MaxNcu = baseMaxNcu + (plan.NcuAlreadyUp ? 0 : plan.Ncu?.MaxNcuAdded ?? 0);
         plan.NcuUsed = plan.Buffs.Sum(b => b.Ncu);
         plan.NcuFree = plan.MaxNcu - plan.NcuUsed;
         return plan;
@@ -600,7 +758,9 @@ public sealed class BuffCatalog
             return action;
         }
 
-        if (!string.IsNullOrWhiteSpace(botName) && !string.IsNullOrWhiteSpace(b.Tell))
+        // A buff bot can only put a buff on us if it CASTS ON OTHERS (team or single-target). A self-only
+        // buff (CastNano) we cannot self-cast is out of reach - never ask a bot for it (the +500 NCU trap).
+        if (!string.IsNullOrWhiteSpace(botName) && !string.IsNullOrWhiteSpace(b.Tell) && b.CanCastOnOthers)
         {
             action.Source = BuffSource.BuffBot;
             action.BotName = botName;
@@ -614,11 +774,20 @@ public sealed class BuffCatalog
 
     /// <summary>
     ///     The ordered actions to put a <see cref="ControlPlan" /> up: NCU buff FIRST (it expands Max NCU
-    ///     so the rest fit), then the both-skill + attribute stackers, then the single-skill rungs. Each is
-    ///     routed to self-cast or a bot tell. The (short) wrangle is NOT here - it is a summon-moment extra,
-    ///     added by the summon step only when the pet's cast requirement needs it.
+    ///     so the rest fit), then the both-skill + attribute stackers, then the single-skill rungs, and the
+    ///     short wrangle (it is part of the buff set so the stack PEAKS over the pet's full cast requirement
+    ///     at the summon moment). The wrangle is simply never refreshed afterward - letting it lapse is the
+    ///     downshift to the durable hold. Each buff is routed to self-cast or a bot tell.
     /// </summary>
     private const int NcuStrain = 257; // the Fixer Max-NCU line's NanoStrain
+    private const int WrangleStrain = 220; // the Skill Wrangler line's NanoStrain (verified, skill-buffs-mc-ts.md)
+
+    // The (team) Skill Wrangler is a ~1-minute summon-moment peak (+131 max for the team version), NOT a
+    // durable buff - it is dropped right after the pet lands. Identified by its strain, with a name
+    // fallback in case a dimension's catalog carries it on strain 0.
+    private static bool IsWrangle(BuffEntry e) =>
+        e.Strain == WrangleStrain
+        || (e.Name?.IndexOf("Wrangl", StringComparison.OrdinalIgnoreCase) >= 0);
 
     public List<BuffAction> RoutePlan(ControlPlan plan, string myProfession, string botName, Func<int, bool> isLearned,
         ISet<int>? skipStrains = null)
@@ -661,8 +830,8 @@ public sealed class BuffCatalog
     // (amounts/gates still come from the pack). Returns tier -1 when the buff is not a survival buff.
     private static (int Tier, int Magnitude) SurvivalRank(BuffEntry b)
     {
-        // Skip the control-side buffs (skill / NCU) - those are the pet's, not survival.
-        if (b.Adds(130) > 0 || b.Adds(131) > 0 || b.Adds(181) > 0)
+        // Max-NCU buffs are the pet's NCU pillar, never survival.
+        if (b.Adds(181) > 0)
         {
             return (-1, 0);
         }
@@ -709,7 +878,8 @@ public sealed class BuffCatalog
 
         var ranked = _buffs
             .Select(b => (Buff: b, Rank: SurvivalRank(b)))
-            .Where(x => x.Rank.Tier >= 0 && x.Buff.Ncu > 0 && Castable(x.Buff, myLevel, paid))
+            .Where(x => x.Rank.Tier >= 0 && x.Buff.Ncu > 0 && Castable(x.Buff, myLevel, paid)
+                        && (x.Buff.CanCastOnOthers || x.Buff.SelfCastableBy(myProfession))) // never a self-only buff a bot can't put on us
             .ToList();
 
         // One buff per category tier, highest tier first; within a tier the biggest that fits and whose
@@ -747,24 +917,27 @@ public sealed class BuffCatalog
         public int MaxNcuAdded; // +Max NCU the selected tier grants (e.g. +60 at L50)
         public int LandId; // the landed nano actually running on the receiver
         public int ReceiverLevel; // the level that tier needs
+        public bool NeedsTeam; // the tier is team-cast - we must be teamed with the caster to receive it
+        public string Name = ""; // the tier's catalog name (for the dry-run trace)
     }
 
     private BuffEntry? FindNcuEntry() =>
         _buffs.FirstOrDefault(b => b.Tell.Equals("ncu", StringComparison.OrdinalIgnoreCase)
                                    || b.Effect.Contains("NCU", StringComparison.OrdinalIgnoreCase));
 
+    private const int StatMaxNcu = 181;
+
     /// <summary>
-    ///     The best Max-NCU buff the configured bot will cast that THIS receiver's level allows - the
-    ///     highest +Max NCU tier whose receiver-level gate is met. The Fixer NCU line is one tell that
-    ///     casts a whole ladder; the bot lands the tier matching your level, so we read each tier's
-    ///     receiver level (landed nano, target=19) and its +Max NCU (stat 181 modify) from the pack and
-    ///     pick the biggest you qualify for. Requested FIRST (owner, 2026-10-05: it expands Max NCU so
-    ///     the rest of the stack fits). Null when there is no NCU buff or none fits the level.
+    ///     The biggest Max-NCU buff a bot can put ON US that our level allows. Scans EVERY NCU tier in the
+    ///     catalog (Codedoc lists each tier as its own entry, Chewy as one laddered entry - either way every
+    ///     +Max NCU buff is considered, not just the first), keeps only tiers that CAST ON OTHERS (a bot
+    ///     cannot give us a self-only buff - this is what kept the +500 Firewalled Sync Compressor, a Fixer
+    ///     SELF buff, out), whose receiver level/SL gate we meet, and picks the largest +Max NCU. Requested
+    ///     FIRST (it expands Max NCU so the rest of the stack fits). Null when none qualifies.
     /// </summary>
-    public NcuPick? BestNcuBuff(LocalPlayer me)
+    public NcuPick? BestNcuBuff(LocalPlayer me, bool paid)
     {
-        var entry = FindNcuEntry();
-        if (!Loaded || me == null || entry == null || entry.LandIds.Count == 0)
+        if (!Loaded || me == null)
         {
             return null;
         }
@@ -772,24 +945,21 @@ public sealed class BuffCatalog
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
 
         NcuPick? best = null;
-        foreach (var id in entry.LandIds)
+        foreach (var b in _buffs)
         {
-            var nano = NanoLibrary.Find(id);
-            if (nano == null)
+            var added = b.Adds(StatMaxNcu);
+            if (added <= 0 || !b.CanCastOnOthers || b.ReceiverLevel > myLevel || (b.NeedsSl && !paid))
             {
-                continue;
-            }
-
-            var (needLevel, _) = ReceiverGate(nano); // auto-detects the receiver's own level gate
-            var added = nano.Modify(181); // Stat.MaxNCU
-            if (added <= 0 || needLevel > myLevel)
-            {
-                continue;
+                continue; // not an NCU buff / self-only / above our level / SL we don't own
             }
 
             if (best == null || added > best.MaxNcuAdded)
             {
-                best = new NcuPick { Tell = entry.Tell, MaxNcuAdded = added, LandId = id, ReceiverLevel = needLevel };
+                best = new NcuPick
+                {
+                    Tell = b.Tell, MaxNcuAdded = added, LandId = b.RepNanoId,
+                    ReceiverLevel = b.ReceiverLevel, NeedsTeam = b.NeedsTeam, Name = b.Name,
+                };
             }
         }
 

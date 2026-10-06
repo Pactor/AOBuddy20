@@ -53,8 +53,11 @@ public abstract class PetBrain
     protected const double ControlFloor = 0.80;
 
     /// <summary>A running buff with less than this left is treated as already gone when planning, so the
-    /// plan re-requests it; more than this is "stable" - counted as up and skipped from the request list.</summary>
-    protected const double RefreshSoonSec = 30.0;
+    /// plan re-requests it; more than this is "stable" - counted as up and skipped from the request list.
+    /// Owner's 15-minute lead (2026-10-05): a buff is refreshed when under 15 min remain, so the bot stays
+    /// maxed for pet control AND survival and can top up on a trip back rather than lapsing mid-task. Applies
+    /// uniformly to the NCU buff (a 4h buff he often logs in with), the control stack and the survival set.</summary>
+    protected const double RefreshSoonSec = 900.0;
 
     protected PetBrain(ILogger logger, ControlArbiter controlArbiter)
     {

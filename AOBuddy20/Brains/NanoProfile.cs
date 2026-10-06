@@ -38,6 +38,24 @@ public sealed class NanoProfile
     /// </summary>
     public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>();
 
+    /// <summary>
+    ///     The nanos this formula CASTS, as (FunctionType, TargetNanoId) pairs: CastNano (53051, on SELF),
+    ///     TeamCastNano (53066, on the whole TEAM) and AreaCastNano (53087, on others in an area). A Fixer
+    ///     NCU wrapper (e.g. 275043) casts the landed buff through one of these - the function type tells us
+    ///     whether the landed nano reaches OTHERS (team/area) or only the caster (self). This is the
+    ///     self-vs-others delivery signal (AOBuddy10's method: a self-cast buff cannot be requested from a
+    ///     buff bot, however rich the landed nano's own effects are).
+    /// </summary>
+    public IReadOnlyList<(int Func, int NanoId)> Casts = Array.Empty<(int, int)>();
+
+    /// <summary>
+    ///     True when this formula has a direct effect function targeting the cast TARGET (Target == 3), i.e.
+    ///     a STANDALONE buff a bot can land on another character (single-target-on-others). Self-only
+    ///     standalone buffs carry only User(1)/Wearer(2) effect targets. Not set by the cast functions above
+    ///     (those deliver OTHER nanos) - only by the formula's own landing effects.
+    /// </summary>
+    public bool TargetsOthers;
+
     /// <summary>A stat's raw value, 0 when the record does not carry it (most stats are sparse).</summary>
     public int Stat(int statId) => Stats.TryGetValue(statId, out var v) ? v : 0;
 

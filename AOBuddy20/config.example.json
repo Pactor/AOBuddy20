@@ -39,7 +39,7 @@
   "HealRestMaxSeconds": 60,
 
   "_comment_api": "LOCAL API: GET /status /nav /inventory /log and POST /command on 127.0.0.1. 0 = off.",
-  "BotApiPort": 5591,
+  "BotApiPort": 5592,
 
   "_comment_hunt": "HUNT ('hunt' command): the pets fight hostiles within HuntRadius while the bot stays put (off until 'hunt on'). HuntMaxLevelMargin caps a target to best-attack-pet-level + margin (scales off the pet, not the player). HuntFactionMode Auto|On|Off - Shadowlands faction-safe hunting (Auto: on once a Redeemed/Unredeemed standing is set). HuntBlacklist: mob names never hunted. A 'hunt' command updates these and saves this file.",
   "HuntRadius": 40,

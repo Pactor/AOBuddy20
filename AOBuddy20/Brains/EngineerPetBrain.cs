@@ -65,6 +65,9 @@ public sealed class EngineerPetBrain : PetBrain
     private readonly Dictionary<int, double> _summonAt = new();          // nanoId -> last cast (_clock)
     private readonly Dictionary<(int, int), double> _shellUsedAt = new(); // (shellId, slotInstance) -> last used (_clock)
     private readonly Dictionary<(int, int), double> _shellDeletedAt = new(); // (shellId, slotInstance) -> last deleted (_clock)
+    private readonly Dictionary<(int, int), double> _crystalLearnedAt = new(); // (crystalId, slotInstance) -> last Use() (_clock)
+    private const double CrystalLearnCooldownSec = 10.0; // learning uploads the nano; don't re-Use while it registers
+    private int _loggedLearnOppFor; // the crystal id we last logged a learn opportunity for
     private bool _shellPending;
     private int _shellWarned;
 
@@ -194,6 +197,16 @@ public sealed class EngineerPetBrain : PetBrain
             return;
         }
 
+        // LEARN-FIRST: an un-learned robot crystal in the bags that beats our best learned pet and we can
+        // durably control is learned (uploaded) before summoning - buffing toward its req first if needed.
+        // Learning uploads the nano and consumes the crystal (irreversible), so it is gated on actually
+        // meeting the use reqs and on durable control, never on a brief wrangle peak. (Dormant in dry run:
+        // PolicyTick returns before TrySummon when PetDryRun is set.)
+        if (TryLearnCrystal(me))
+        {
+            return;
+        }
+
         var targetQl = BestCastableSummonQl(me); // the best pet we could cast right now (0 if none)
         var shell = ShellCheck(me, out var unusable);
 
@@ -245,6 +258,146 @@ public sealed class EngineerPetBrain : PetBrain
 
         // 2) No shell: cast the best robot summon we know and can cast (it makes a shell).
         CastBestSummon(me);
+    }
+
+    // ---- Learn a crystal from the bags ------------------------------------------------------
+
+    /// <summary>
+    ///     Engineer robot-summon crystals in the bags/inventory (pairs of the inventory item and its
+    ///     resolved data). A crystal is a DummyItem whose UseCriteria gates on MC+TS+Profession==Engineer -
+    ///     the same detection the dry run reports. Used only to LEARN an upgrade we don't yet know.
+    /// </summary>
+    private List<(Item Inv, ItemBase Data)> BagsCrystals(LocalPlayer me)
+    {
+        var list = new List<(Item, ItemBase)>();
+
+        void Consider(Item it)
+        {
+            if (it == null || !ItemData.Find(it.Id, out ItemBase ib) || ib == null)
+            {
+                return;
+            }
+
+            var (mc, ts) = PetReq(ib);
+            if (mc > 0 && ts > 0 && IsEngineerSummonCrystal(ib))
+            {
+                list.Add((it, ib));
+            }
+        }
+
+        foreach (var it in Inventory.Items ?? Enumerable.Empty<Item>())
+        {
+            Consider(it);
+        }
+
+        foreach (var c in Inventory.Containers ?? Enumerable.Empty<Container>())
+        {
+            foreach (var it in c.Items ?? Enumerable.Empty<Item>())
+            {
+                Consider(it);
+            }
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    ///     Learn-first: if the bags hold a robot crystal that BEATS our best learned pet and we could
+    ///     DURABLY control once buffed, learn it (upload) before summoning - meeting its req first by
+    ///     buffing if PetAutoBuff is on, else logging the opportunity. Returns true when it acted or is
+    ///     working toward it (caller stops this pass); false to fall through to the normal summon. Learning
+    ///     is irreversible (consumes the crystal) so it fires only when the use reqs are actually met.
+    /// </summary>
+    private bool TryLearnCrystal(LocalPlayer me)
+    {
+        var crystals = BagsCrystals(me);
+        if (crystals.Count == 0)
+        {
+            return false;
+        }
+
+        var paid = IsPaid(me);
+        var baseMc = UnbuffedBase(me, Stat.MaterialCreation);
+        var baseTs = UnbuffedBase(me, Stat.SpaceTime);
+        var bestLearnedQl = BestLearnedRobot(me)?.Ql ?? 0;
+
+        // The best upgrade crystal we could hold durably at the floor once buffed (never a wrangle peak).
+        (Item Inv, ItemBase Data)? pick = null;
+        foreach (var c in crystals.OrderByDescending(x => x.Data.Ql))
+        {
+            if (c.Data.Ql <= bestLearnedQl)
+            {
+                continue; // not an upgrade over what we already know
+            }
+
+            var (rmc, rts) = PetReq(c.Data);
+            if (!_catalog.BuildControlPlan(me, baseMc, baseTs, rmc, rts, paid, "Engineer").CanControl)
+            {
+                continue; // couldn't keep it controlled - not worth consuming the crystal
+            }
+
+            pick = c;
+            break;
+        }
+
+        if (pick == null)
+        {
+            return false;
+        }
+
+        var (reqMc, reqTs) = PetReq(pick.Value.Data);
+        var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, reqMc, reqTs, paid, "Engineer");
+
+        // Reqs met right now (we have buffed enough, or the owner/bot buffed us) -> learn it.
+        bool meets;
+        try
+        {
+            meets = pick.Value.Data.MeetsUseReqs(me, false, false);
+        }
+        catch
+        {
+            meets = false;
+        }
+
+        if (meets)
+        {
+            LearnCrystal(pick.Value.Inv);
+            return true;
+        }
+
+        // Not castable yet. Buff toward the learn req the same way the summon sustain-gate does, when the
+        // owner has enabled auto-buffing; otherwise leave buffing to the owner and summon what we can now.
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        {
+            if (_loggedLearnOppFor != pick.Value.Inv.Id)
+            {
+                _loggedLearnOppFor = pick.Value.Inv.Id;
+                var who = _config.BuffBotName.Length > 0 ? _config.BuffBotName : "the buff bot";
+                _logger.LogInformation(
+                    $"PET: crystal '{pick.Value.Data.Name}' (ql {pick.Value.Data.Ql}) needs MC {reqMc}/TS {reqTs} to learn - " +
+                    $"holdable at {plan.MarginPct:F0}% once buffed; buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
+            }
+
+            return false;
+        }
+
+        return DriveBuffsToward(me, plan, $"learning '{pick.Value.Data.Name}'",
+            $"to learn {pick.Value.Data.Name}",
+            $"to learn '{pick.Value.Data.Name}' (needs MC {reqMc}/TS {reqTs}, durable {plan.DurableMc}/{plan.DurableTs} = {plan.MarginPct:F0}%)");
+    }
+
+    // Upload the crystal's nano (right-click / Use). Throttled per item so we don't re-Use while the learn
+    // registers. Irreversible - only ever called once the use reqs are confirmed met (TryLearnCrystal).
+    private void LearnCrystal(Item crystal)
+    {
+        if (_crystalLearnedAt.TryGetValue((crystal.Id, crystal.Slot.Instance), out var at) && _clock - at < CrystalLearnCooldownSec)
+        {
+            return;
+        }
+
+        _crystalLearnedAt[(crystal.Id, crystal.Slot.Instance)] = _clock;
+        crystal.Use();
+        _logger.LogInformation($"PET: learning crystal '{crystal.Name}' id={crystal.Id} ql={crystal.Ql} - uploading the nano, then I will summon it.");
     }
 
     // The QL of the best robot we could CAST right now (learned + reqs met), 0 if none. Used to decide
@@ -427,6 +580,20 @@ public sealed class EngineerPetBrain : PetBrain
         }
 
         // The buffs we still need = the plan minus the strains already stably running (timer-aware).
+        return DriveBuffsToward(me, plan, $"holding '{want.Name}'",
+            $"pet-first for {want.Name}",
+            $"to hold '{want.Name}' (MC {reqMc}/TS {reqTs}, durable {plan.DurableMc}/{plan.DurableTs} = {plan.MarginPct:F0}%)");
+    }
+
+    /// <summary>
+    ///     Work the buff plan one step per pass toward a goal (holding a pet, or meeting a crystal's learn
+    ///     req): self-cast the first own-castable buff not yet up; otherwise ask the buff bot (throttled).
+    ///     Returns true while buffs are being worked (caller waits), false when there is nothing we can do
+    ///     to close the gap (no self-cast left, no bot reachable) - the caller then acts with what it has.
+    ///     Shared by the summon sustain-gate and the crystal-learn gate so there is ONE buff path.
+    /// </summary>
+    private bool DriveBuffsToward(LocalPlayer me, BuffCatalog.ControlPlan plan, string goal, string askReason, string askDetail)
+    {
         var learned = me.SpellList ?? Array.Empty<int>();
         var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me));
 
@@ -436,14 +603,14 @@ public sealed class EngineerPetBrain : PetBrain
         if (self != null)
         {
             me.Cast(self.SelfCastNanoId);
-            _logger.LogInformation($"PET: self-casting {self.Name} ({self.SelfCastNanoId}) toward holding '{want.Name}'.");
+            _logger.LogInformation($"PET: self-casting {self.Name} ({self.SelfCastNanoId}) toward {goal}.");
             return true;
         }
 
         var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).Select(a => a.Tell).ToList();
         if (tells.Count == 0)
         {
-            return false; // nothing left to request - summon now
+            return false; // nothing left to request - act now
         }
 
         if (_buffBot.Active)
@@ -453,16 +620,14 @@ public sealed class EngineerPetBrain : PetBrain
 
         if (_clock - _buffAskedAt >= BuffRetrySec)
         {
-            if (_buffBot.RequestBuffs(tells, $"pet-first for {want.Name}"))
+            if (_buffBot.RequestBuffs(tells, askReason))
             {
                 _buffAskedAt = _clock;
-                _logger.LogInformation(
-                    $"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] to hold '{want.Name}' " +
-                    $"(MC {reqMc}/TS {reqTs}, durable {plan.DurableMc}/{plan.DurableTs} = {plan.MarginPct:F0}%).");
+                _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] {askDetail}.");
                 return true;
             }
 
-            return false; // couldn't start (not near the bot) - summon what we can
+            return false; // couldn't start (not near the bot) - act with what we can
         }
 
         return _clock - _buffAskedAt < _config.PetBuffWaitSeconds; // hold for the wait window
@@ -519,13 +684,16 @@ public sealed class EngineerPetBrain : PetBrain
         var paid = IsPaid(me);
         var learned = me.SpellList ?? Array.Empty<int>();
 
-        // 1) Control upkeep: if the current pet's OE margin is nearing the floor, refresh the durable set.
-        if ((_activeReqMc > 0 || _activeReqTs > 0) && OeMargin(me, _activeReqMc, _activeReqTs) < RefreshMargin)
+        // 1) Control upkeep: refresh the durable set when the OE margin is nearing the floor (a skill sagged)
+        // OR when a control buff is due under the 15-min lead (StableStrains drops it from the request list, so
+        // RoutePlan returns it to refresh). Either reason tops the pet's control back up before it lapses.
+        if (_activeReqMc > 0 || _activeReqTs > 0)
         {
             var plan = _catalog.BuildControlPlan(me, UnbuffedBase(me, Stat.MaterialCreation),
                 UnbuffedBase(me, Stat.SpaceTime), _activeReqMc, _activeReqTs, paid, "Engineer");
-            if (TryApply(me, _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me)),
-                    "pet control refresh"))
+            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me));
+            var marginLow = OeMargin(me, _activeReqMc, _activeReqTs) < RefreshMargin;
+            if ((marginLow || actions.Count > 0) && TryApply(me, actions, "pet control refresh"))
             {
                 return;
             }
@@ -589,7 +757,7 @@ public sealed class EngineerPetBrain : PetBrain
 
     // A robot summon's MC/TS requirement, read from its cast criteria (GreaterThan means stat > N, so
     // the requirement is N + 1). 0 when the nano has no such criterion.
-    private static (int Mc, int Ts) PetReq(NanoItem nano)
+    private static (int Mc, int Ts) PetReq(ItemBase nano)
     {
         var mc = 0;
         var ts = 0;
@@ -614,6 +782,36 @@ public sealed class EngineerPetBrain : PetBrain
         }
 
         return (mc, ts);
+    }
+
+    /// <summary>
+    ///     Every skill/ability requirement on the crystal's UseCriteria, formatted for the dry-run report
+    ///     (e.g. "MaterialCreation>=554, SpaceTime>=554, Level>=50"). GreaterThan reqs are inclusive-of
+    ///     value+1 in AO; we show the real threshold. Not Engineer-specific - dumps whatever gates exist
+    ///     (an MP pet shows MatMet/BioMet/PsychoModi) so nothing is hidden.
+    /// </summary>
+    private static string ReqSkills(ItemBase nano)
+    {
+        if (nano.Criteria == null || !nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+        {
+            return "(no use reqs)";
+        }
+
+        var parts = new List<string>();
+        foreach (var c in use)
+        {
+            // Skip the structural profession/expansion gates - those are reported elsewhere; show stat thresholds.
+            if (c.Operator == UseCriteriaOperator.GreaterThan)
+            {
+                parts.Add($"{(Stat)c.Param1}>={c.Param2 + 1}");
+            }
+            else if (c.Operator == UseCriteriaOperator.EqualTo && (c.Param1 == (int)Stat.Profession || c.Param1 == 368))
+            {
+                parts.Add($"Profession=={(Profession)c.Param2}");
+            }
+        }
+
+        return parts.Count == 0 ? "(no use reqs)" : string.Join(", ", parts);
     }
 
     // ---- Shells -----------------------------------------------------------------------------
@@ -715,35 +913,54 @@ public sealed class EngineerPetBrain : PetBrain
         var tsNow0 = me.TryGetStat(Stat.SpaceTime, out var tt0) ? tt0 : 0;
         var ncuNow0 = me.TryGetStat(Stat.MaxNCU, out var nn0) ? nn0 : 0;
         var running = me.Buffs ?? (IReadOnlyList<Buff>)Array.Empty<Buff>();
-        var runNames = running.Count == 0 ? "NONE" : $"{running.Count} [{string.Join(", ", running.Select(b => NanoLibrary.NameOf(b.Id)))}]";
+        var runNames = running.Count == 0
+            ? "NONE"
+            : $"{running.Count} [{string.Join(", ", running.Select(b => NanoLibrary.NameOf(b.Id)))}]";
         _logger.LogInformation($"PET DRYRUN: skills now - MC {mcNow0}, TS {tsNow0}, MaxNCU {ncuNow0}. Running buffs: {runNames}.");
 
-        var crystals = new List<NanoItem>();
-
-        void Consider(Item it)
+        // Buff-refresh survey: only the buffs DUE for refresh (under the 15-min lead) - one compact line, or
+        // nothing when all are stable. (The stable ones are not spelled out; keeps the dry run readable.)
+        var due = running.Where(b => (b.Cooldown?.RemainingTime ?? 0) < RefreshSoonSec).ToList();
+        if (due.Count > 0)
         {
-            if (it == null || !ItemData.Find(it.Id, out NanoItem ni) || ni == null)
+            _logger.LogInformation("PET DRYRUN: refresh due (<15m): " +
+                string.Join(", ", due.Select(b => $"{NanoLibrary.NameOf(b.Id)} {(b.Cooldown?.RemainingTime ?? 0) / 60:F0}m")));
+        }
+
+        var crystals = new List<ItemBase>();
+        var gated = new List<(ItemBase Item, string Where)>(); // anything with a use-gate, for diagnostics
+
+        // A nano CRYSTAL in inventory is a DummyItem (it uploads a nano on use) - NOT a NanoItem - so we
+        // resolve as the common ItemBase, which matches both. (Find<NanoItem> silently missed every crystal.)
+        void Consider(Item it, string where)
+        {
+            if (it == null || !ItemData.Find(it.Id, out ItemBase ib) || ib == null)
             {
                 return;
             }
 
-            var (mc, ts) = PetReq(ni);
-            if (mc > 0 && ts > 0 && IsEngineerSummonCrystal(ni))
+            if (ib.Criteria != null && ib.Criteria.ContainsKey(ItemActionInfo.UseCriteria))
             {
-                crystals.Add(ni);
+                gated.Add((ib, where));
+            }
+
+            var (mc, ts) = PetReq(ib);
+            if (mc > 0 && ts > 0 && IsEngineerSummonCrystal(ib))
+            {
+                crystals.Add(ib);
             }
         }
 
         foreach (var it in Inventory.Items ?? Enumerable.Empty<Item>())
         {
-            Consider(it);
+            Consider(it, "inventory");
         }
 
         foreach (var c in Inventory.Containers ?? Enumerable.Empty<Container>())
         {
             foreach (var it in c.Items ?? Enumerable.Empty<Item>())
             {
-                Consider(it);
+                Consider(it, "bag");
             }
         }
 
@@ -753,16 +970,21 @@ public sealed class EngineerPetBrain : PetBrain
         if (crystals.Count == 0)
         {
             _logger.LogInformation(
-                "PET DRYRUN: looked in my bags - no pet-summon nano crystal found (an Engineer robot crystal " +
-                $"gates on MC+TS+profession). My MC/TS now {mcNow}/{tsNow}. Taking NO action.");
+                "PET DRYRUN: no Engineer robot crystal matched (needs MC+TS+Profession==Engineer gate). " +
+                $"My MC/TS now {mcNow}/{tsNow}. Items with a use-gate I can see: {gated.Count}.");
+            foreach (var (ib, where) in gated.OrderByDescending(x => x.Item.Ql).Take(25))
+            {
+                _logger.LogInformation($"PET DRYRUN:   [{where}] '{ib.Name}' id{ib.Id} ql{ib.Ql} - reqs: {ReqSkills(ib)}.");
+            }
+
+            _logger.LogInformation("PET DRYRUN: taking NO action.");
             return;
         }
 
         _logger.LogInformation($"PET DRYRUN: found {crystals.Count} pet crystal(s) in my bags (my MC/TS now {mcNow}/{tsNow}):");
         foreach (var ni in crystals.OrderByDescending(x => x.Ql))
         {
-            var (mc, ts) = PetReq(ni);
-            _logger.LogInformation($"PET DRYRUN:   - '{ni.Name}' ql{ni.Ql}, needs MC/TS {mc}/{ts}.");
+            _logger.LogInformation($"PET DRYRUN:   - '{ni.Name}' ql{ni.Ql}, needs {ReqSkills(ni)}.");
         }
 
         var best = BestLearnedRobot(me);
@@ -781,37 +1003,125 @@ public sealed class EngineerPetBrain : PetBrain
         var baseTs = UnbuffedBase(me, Stat.SpaceTime);
         var plan = _catalog.BuildControlPlan(me, baseMc, baseTs, rmc, rts, paid, "Engineer");
 
+        var myLevel = me.TryGetStat(Stat.Level, out var lv) ? lv : 0;
         _logger.LogInformation(
-            $"PET DRYRUN: I WANT '{target.Name}' ql{target.Ql} (needs MC/TS {rmc}/{rts}); best learned is " +
-            $"'{best?.Name}' ql{best?.Ql ?? 0}. paid={paid}, unbuffed base {baseMc}/{baseTs}.");
+            $"PET DRYRUN: want '{target.Name}' ql{target.Ql} (needs {rmc}/{rts}); best known '{best?.Name}' ql{best?.Ql ?? 0}; " +
+            $"base {baseMc}/{baseTs}, MaxNCU {ncuNow0}.");
+
+        // NCU buff - the pillar. One readable line: already up (and when to refresh), what we CAN get now, or
+        // nothing gettable at our level.
+        if (plan.Ncu == null)
+        {
+            _logger.LogInformation(
+                $"PET DRYRUN: NCU - need a buff, but none I can get on me at L{myLevel} (self-only/level-locked). Budget stays {plan.MaxNcu}.");
+        }
+        else if (plan.NcuAlreadyUp)
+        {
+            _logger.LogInformation(
+                $"PET DRYRUN: NCU - '{plan.Ncu.Name}' +{plan.Ncu.MaxNcuAdded} already UP ({plan.NcuRemainingSec / 60:F0}m left) - refresh at T-15m. MaxNCU {plan.MaxNcu}.");
+        }
+        else
+        {
+            _logger.LogInformation(
+                $"PET DRYRUN: NCU - need it; CAN get +{plan.Ncu.MaxNcuAdded} '{plan.Ncu.Name}' now " +
+                $"({(plan.Ncu.NeedsTeam ? "team-cast" : "single-target")}) -> MaxNCU {ncuNow0}->{plan.MaxNcu}.");
+        }
+
+        // Step-by-step build-up: each DURABLE skill buff in turn with the running MC/TS and NCU, then the
+        // durable hold verdict, then the WRANGLE last (short summon-moment peak) with the summon yes/no.
+        var runMc = baseMc;
+        var runTs = baseTs;
+        var usedNcu = 0;
+        var maxNcu = plan.MaxNcu;
+        foreach (var step in plan.Steps.Where(s => !s.Wrangle && s.MaxNcuAdded == 0))
+        {
+            var addMc = step.AddFor((int)Stat.MaterialCreation);
+            var addTs = step.AddFor((int)Stat.SpaceTime);
+            runMc += addMc;
+            runTs += addTs;
+            usedNcu += step.Ncu;
+            _logger.LogInformation(
+                $"PET DRYRUN:   + {step.Name} +{addMc}/{addTs} -> skills {runMc}/{runTs}, NCU {usedNcu}/{maxNcu} ({maxNcu - usedNcu} free).");
+        }
+
         _logger.LogInformation(
-            $"PET DRYRUN: durable I could reach {plan.DurableMc}/{plan.DurableTs} (floor {plan.FloorMc}/{plan.FloorTs}) -> " +
-            (plan.CanControl ? $"I CAN hold it at {plan.MarginPct:F0}%." : "I CANNOT hold it - I would pick a smaller pet."));
+            $"PET DRYRUN: durable hold {runMc}/{runTs} (floor {plan.FloorMc}/{plan.FloorTs}, {plan.MarginPct:F0}%) -> " +
+            (plan.CanControl ? "CAN hold." : "CANNOT hold - would take a smaller pet."));
+
+        var wrangleStep = plan.Steps.FirstOrDefault(s => s.Wrangle);
+        if (wrangleStep != null)
+        {
+            var wMc = wrangleStep.AddFor((int)Stat.MaterialCreation);
+            var wTs = wrangleStep.AddFor((int)Stat.SpaceTime);
+            usedNcu += wrangleStep.Ncu;
+            _logger.LogInformation(
+                $"PET DRYRUN:   + {wrangleStep.Name} +{wMc}/{wTs} [LAST - short summon-moment buff] -> peak {runMc + wMc}/{runTs + wTs}, " +
+                $"NCU {usedNcu}/{maxNcu}; need {rmc}/{rts} -> " + (plan.CanSummon ? "CAN SUMMON. YES." : "cannot reach it. NO."));
+        }
+        else
+        {
+            _logger.LogInformation($"PET DRYRUN:   (no wrangle) peak {runMc}/{runTs} vs need {rmc}/{rts} -> " +
+                (plan.CanSummon ? "CAN SUMMON. YES." : "cannot reach it. NO."));
+        }
 
         if (plan.CanControl)
         {
-            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName ?? "",
-                (me.SpellList ?? Array.Empty<int>()).Contains, StableStrains(me));
-            var desc = actions.Count == 0 ? "(already buffed / nothing needed)" : string.Join("; ", actions.Select(a => a.Describe));
+            var learned = me.SpellList ?? Array.Empty<int>();
+            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName ?? "", learned.Contains, StableStrains(me));
+            var getList = actions.Where(a => a.Source != BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
+            var blocked = actions.Where(a => a.Source == BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
+            _logger.LogInformation("PET DRYRUN: get: " + (getList.Count > 0 ? string.Join(", ", getList) : "nothing to add"));
+            if (blocked.Count > 0)
+            {
+                _logger.LogInformation("PET DRYRUN: blocked (no bot/not learned): " + string.Join(", ", blocked));
+            }
+
+            // Survival once the wrangle lapses: what I can actually request into the real free NCU.
+            var durableCtrlNcu = plan.Steps.Where(s => !s.Wrangle).Sum(s => s.Ncu);
+            var survivalFree = Math.Max(0, plan.MaxNcu - durableCtrlNcu);
+            var survival = _catalog.SurvivalFill(me, survivalFree, paid, "Engineer", _config.BuffBotName ?? "",
+                learned.Contains, StableStrains(me));
+            var sGet = survival.Where(a => a.Source != BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
+            _logger.LogInformation($"PET DRYRUN: survival (~{survivalFree} NCU free): " +
+                (sGet.Count > 0 ? string.Join(", ", sGet) : "none I can get yet"));
+
             _logger.LogInformation(
-                $"PET DRYRUN: plan would be - learn the crystal (use it once MC/TS >= {rmc}/{rts}), then: {desc}; " +
-                "then summon, drop the wrangle, fill survival.");
+                "PET DRYRUN: => learn crystal, summon it, request survival -> then WAITING (ready for team-buddy/mission).");
         }
 
-        _logger.LogInformation("PET DRYRUN: taking NO action (dry run). Clear PetDryRun to let me act.");
+        _logger.LogInformation("PET DRYRUN: no action (dry run).");
     }
 
-    private static bool IsEngineerSummonCrystal(NanoItem ni)
+    // The nano-skill stats other than MC(130)/TS(131). A ROBOT SUMMON requires ONLY Matter Creation +
+    // Time & Space (at the same value) + Profession == 3 (engineer-pets.json: "Every summon needs Matter
+    // Creation (130) + Time & Space (131) at the same value plus Profession(60) == 3"). A pet HEAL / BUFF
+    // crystal is also an Engineer MC+TS item but gates on an EXTRA nano skill (e.g. Patchy Repairs needs
+    // BiologicalMetamorphosis 147) - that extra skill is how we tell a heal/buff crystal from a summon.
+    private static readonly int[] ForeignNanoSkills =
+    {
+        (int)Stat.MaterialMetamorphosis, (int)Stat.BiologicalMetamorphosis,
+        (int)Stat.PsychologicalModification, (int)Stat.SensoryImprovement,
+    };
+
+    private static bool IsEngineerSummonCrystal(ItemBase ni)
     {
         if (ni?.Criteria == null || !ni.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
         {
             return false;
         }
 
-        // Engineer gate: Profession(60) == 3 or VisualProfession(368) == 3, paired with the MC+TS reqs
-        // the caller already confirmed via PetReq.
-        return use.Any(c => c.Operator == UseCriteriaOperator.EqualTo
-                            && (c.Param1 == (int)Stat.Profession || c.Param1 == 368) && c.Param2 == 3);
+        // Engineer gate: Profession(60) == 3 or VisualProfession(368) == 3 (the MC+TS reqs are confirmed by
+        // the caller via PetReq).
+        var engineer = use.Any(c => c.Operator == UseCriteriaOperator.EqualTo
+                                    && (c.Param1 == (int)Stat.Profession || c.Param1 == 368) && c.Param2 == 3);
+        if (!engineer)
+        {
+            return false;
+        }
+
+        // A summon gates on NO other nano skill. If it does (BioMet/MatMet/PsyMod/SensImp), it is a pet
+        // heal or buff crystal (like 'Patchy Repairs'), not a robot summon - exclude it.
+        return !use.Any(c => c.Operator == UseCriteriaOperator.GreaterThan && ForeignNanoSkills.Contains(c.Param1));
     }
 
     // The summon watchdog: several attempts with no pet appearing means something is wrong (no credits,

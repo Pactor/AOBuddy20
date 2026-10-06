@@ -9,7 +9,7 @@ Tools
   bot_log      lines,grep the latest lines of aobuddy.log, optionally only those matching grep (regex, case-insensitive)
 
 Environment
-  AOBUDDY_API   default http://127.0.0.1:5591
+  AOBUDDY_API   default http://127.0.0.1:5592
   AOBUDDY_LOG   default E:/Funcom/AOBuddy10/Build/Plugins/AOBuddy/aobuddy.log
 
 Register:  claude mcp add aobuddy -- python E:/Funcom/AOBuddy10/tools/aobuddy-mcp/server.py
@@ -21,7 +21,7 @@ import sys
 import urllib.error
 import urllib.request
 
-API = os.environ.get("AOBUDDY_API", "http://127.0.0.1:5591").rstrip("/")
+API = os.environ.get("AOBUDDY_API", "http://127.0.0.1:5592").rstrip("/")
 LOG = os.environ.get("AOBUDDY_LOG", r"E:/Funcom/AOBuddy10/Build/Plugins/AOBuddy/aobuddy.log")
 
 TOOLS = [

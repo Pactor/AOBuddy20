@@ -141,13 +141,17 @@ public static class NanoLibrary
                 var stats = ReadDictionary(reader);
 
                 var actions = ReadActions(reader);
-                var modifies = ReadEvents(reader, version);
+                var events = ReadEvents(reader, version);
                 if (version >= 2)
                 {
                     SkipRecordData(reader, version);
                 }
 
-                var nano = new NanoProfile { NanoId = id, Stats = stats, Actions = actions, Modifies = modifies };
+                var nano = new NanoProfile
+                {
+                    NanoId = id, Stats = stats, Actions = actions, Modifies = events.Modifies,
+                    Casts = events.Casts, TargetsOthers = events.TargetsOthers,
+                };
                 nanos.Add(nano);
                 byId[id] = nano;
             }
@@ -215,13 +219,28 @@ public static class NanoLibrary
     }
 
     private const int FuncModifyStat = 53045; // event function: ModifyStat (arg0 = stat, arg1 = amount)
+    private const int FuncCastNano = 53051;    // casts another nano ON SELF (arg0 = nano id) - self-only delivery
+    private const int FuncTeamCastNano = 53066; // casts another nano on the whole TEAM (arg0 = nano id) - needs team
+    private const int FuncAreaCastNano = 53087; // casts another nano on others in an area (arg0 = nano id) - no team
+    private const int TargetOnTargetChar = 3;   // effect Target: the cast TARGET (another character) vs User(1)/Wearer(2)=self
 
-    // Read the effect events, CAPTURING the flat ModifyStat functions (53045, two int args) into a
-    // stat -> summed-amount map. Everything else is still just walked past. Advancement matches the
-    // old SkipEvents exactly - the only change is that we keep the two ints instead of discarding them.
-    private static Dictionary<int, int> ReadEvents(BinaryReader reader, int version)
+    // What ReadEvents captures from a formula's effect functions: the flat ModifyStat buffs, the nanos it
+    // casts (with their cast-function type, the self-vs-team-vs-area delivery signal), and whether it has a
+    // direct effect on the cast TARGET (a standalone single-target-on-others buff). AOBuddy10's method -
+    // delivery, not the landed nano's own effect targets, decides self-vs-others.
+    private sealed class EventData
     {
-        var modifies = new Dictionary<int, int>();
+        public readonly Dictionary<int, int> Modifies = new();
+        public readonly List<(int Func, int NanoId)> Casts = new();
+        public bool TargetsOthers;
+    }
+
+    // Read the effect events, CAPTURING the flat ModifyStat functions, the cast-nano functions (self/team/
+    // area) and the "lands on the target" flag. Everything else is still walked past; advancement is
+    // unchanged from the old SkipEvents.
+    private static EventData ReadEvents(BinaryReader reader, int version)
+    {
+        var data = new EventData();
         var eventCount = reader.ReadInt32();
         for (var e = 0; e < eventCount; e++)
         {
@@ -229,19 +248,19 @@ public static class NanoLibrary
             var functionCount = reader.ReadInt32();
             for (var f = 0; f < functionCount; f++)
             {
-                ReadFunction(reader, version, modifies);
+                ReadFunction(reader, version, data);
             }
         }
 
-        return modifies;
+        return data;
     }
 
     // <paramref name="capture"/> null = skip-only (used for the record-data bare functions, which are
-    // not effect events); non-null = record a 53045 ModifyStat's (stat, amount) into it.
-    private static void ReadFunction(BinaryReader reader, int version, Dictionary<int, int>? capture)
+    // not effect events); non-null = record the ModifyStat/cast/target facts into it.
+    private static void ReadFunction(BinaryReader reader, int version, EventData? capture)
     {
         var functionType = reader.ReadInt32();
-        reader.ReadInt32(); // target
+        var target = reader.ReadInt32(); // User(1)/Wearer(2)=self, Target(3)=the cast target (another char)
         reader.ReadInt32(); // tick count
         reader.ReadInt32(); // tick interval
         reader.ReadBoolean(); // dolocalstats
@@ -263,10 +282,31 @@ public static class NanoLibrary
             }
         }
 
-        if (capture != null && functionType == FuncModifyStat && ints.Count >= 2)
+        if (capture != null)
         {
-            var stat = ints[0];
-            capture[stat] = capture.TryGetValue(stat, out var had) ? had + ints[1] : ints[1];
+            if (functionType is FuncCastNano or FuncTeamCastNano or FuncAreaCastNano)
+            {
+                // Casts ANOTHER nano - the delivery signal (self/team/area), judged by function type, not target.
+                if (ints.Count >= 1)
+                {
+                    capture.Casts.Add((functionType, ints[0]));
+                }
+            }
+            else
+            {
+                if (functionType == FuncModifyStat && ints.Count >= 2)
+                {
+                    capture.Modifies[ints[0]] = capture.Modifies.TryGetValue(ints[0], out var had) ? had + ints[1] : ints[1];
+                }
+
+                // ANY direct landing effect (ModifyStat/Hit/Skill/absorb/...) that targets the cast TARGET
+                // means this formula can be put on ANOTHER character (single-target-on-others). ModifyStat
+                // counts - most castable survival/skill buffs deliver their numbers this way.
+                if (target == TargetOnTargetChar)
+                {
+                    capture.TargetsOthers = true;
+                }
+            }
         }
 
         if (version >= 2 && reader.ReadBoolean())

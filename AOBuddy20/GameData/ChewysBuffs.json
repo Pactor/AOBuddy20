@@ -1143,7 +1143,7 @@
     },
     {
      "name": "Team Skill Wrangler (Premium)",
-     "effect": "+132 Weap/Nano skills",
+     "effect": "+131 Weap/Nano skills",
      "ncu": 58,
      "team": true,
      "id": 121320,

@@ -6,7 +6,7 @@ namespace AOBuddyMonitor
 {
     /// <summary>
     /// The monitor's own little config, monitor.json beside the exe (created with defaults on first run).
-    ///   host / port   where the bot's BotApi listens (same PC: 127.0.0.1, AccountInfo.BotApiPort — 5591)
+    ///   host / port   where the bot's BotApi listens (same PC: 127.0.0.1, AccountInfo.BotApiPort — 5592)
     ///   pluginDir     the bot's working folder, for GameData/Nav/&lt;pf&gt;/ (terrain) and nav/&lt;pf&gt;.json (footsteps);
     ///                 the default walks up from the exe until it finds the solution's shared Build/ folder
     ///                 (AOBuddy20: the whole solution builds flat into it — bot exe, GameData and nav all in
@@ -16,7 +16,7 @@ namespace AOBuddyMonitor
     public sealed class MonitorConfig
     {
         public string Host = "127.0.0.1";
-        public int Port = 5591;
+        public int Port = 5592;
         public string PluginDir = "";
 
         public string Base => $"http://{Host}:{Port}";

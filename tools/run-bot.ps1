@@ -5,7 +5,7 @@
 # restart brought him back). This script starts Test.exe, waits for it to exit and starts it again after a 75.
 # The plugin resumes the mission run by itself after such a restart (watchdog.json), so nothing is sent here.
 #
-#   powershell -ExecutionPolicy Bypass -File tools\run-bot.ps1                    # Build\, API 5591
+#   powershell -ExecutionPolicy Bypass -File tools\run-bot.ps1                    # Build\, API 5592
 #   powershell -ExecutionPolicy Bypass -File tools\run-bot.ps1 -BuildDir E:\Funcom\AOBuddy10\Build-MA -Port 5595
 #   ... -RestartOnCrash      also restart after any other non-zero exit, then send -ResumeCommands over the API
 #
@@ -15,7 +15,7 @@
 
 param(
     [string]$BuildDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Build'),
-    [int]$Port = 5591,
+    [int]$Port = 5592,
     [string]$Config = '',   # e.g. dadbod.json: Build\dadbod.json (+ Plugins\AOBuddy\dadbod.json if present) instead of config.json
     [switch]$RestartOnCrash,
     [string[]]$ResumeCommands = @('mission run shop on', 'mission run'),

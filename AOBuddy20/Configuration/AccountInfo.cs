@@ -76,7 +76,7 @@ public class AccountInfo
 
     // Local control API (BotApi): /status /nav /inventory /log and POST /command on 127.0.0.1 only -
     // the monitor (tools/AOBuddyMonitor), the MCP (tools/aobuddy-mcp) and run-bot.ps1 talk to it. 0 = off.
-    public int BotApiPort = 5591;
+    public int BotApiPort = 5592;
 
     // --- Hunt (HuntController, the 'hunt' command): the pets fight hostiles in a radius while the bot
     // stays put. Off until 'hunt on'. These are the per-bot defaults; a runtime 'hunt' command updates
