@@ -79,6 +79,28 @@ Rules:
 - Carry **10+ empty bags**, kept open as plasma destinations.
 - Done condition = N bags × plasma stack size filled. (Plasma stack size per bag = confirm in-game.)
 
+## Continuous farming — don't stop when bags fill (bank offload + rebuy)
+When all bags are full the bot does **not** stop. It cycles through the bank and keeps going:
+1. Travel to the nearest **bank** terminal and open it (`Inventory.Bank`, `BankOpen`).
+2. **Deposit the full plasma bags into the bank** — move each full bag (with its contents) via
+   `Item.MoveToBank()`. Storing the whole backpack is cleaner than emptying item-by-item.
+3. **Buy fresh empty bags** — reuse `ResupplyController`'s existing `buybags` path, **limited by
+   the farmer's current credits** (buy 10, or as many as credits allow).
+4. Resume farming and fill the new bags. Repeat.
+5. **Stop only when** it can no longer buy a bag (out of credits), the **bank is full**, or the
+   owner says stop — then announce.
+
+Important constraints this depends on:
+- **The farmer never sells**, so it earns no credits — bag-buying runs off a **seed credit
+  float** the owner gives it. Bags are cheap (a backpack is a few hundred credits), so a small
+  float lasts many cycles; still, it is finite and is the real stop condition. (Open: confirm
+  the empty-bag item id + cost, and seed amount.)
+- **Bank is per-character.** Depositing to the farmer's bank only *parks* plasma to free
+  inventory — it does **not** deliver to the Trader. Delivery is still a **face-to-face trade**:
+  the farmer (carrying current bags + whatever it withdraws from its bank) meets the Trader and
+  trades them over, then the Trader sells. Banking just means the farm run isn't wasted while
+  waiting for that handoff.
+
 ## Architecture / where it lives
 This is a **task**, so it is a new **`BloodPlasmaController`** in `AOBuddy20/Controller/`,
 alongside `HuntController` / `MissionController` — **not a new brain**. Brains
@@ -90,37 +112,35 @@ leans on existing pieces:
 |---|---|
 | Travel to the farm zone | `MovementController` / `NavController` (reuse) |
 | Find + kill biological mobs | `HuntController` + `CombatBrain` (reuse; add a biological + good-part-dropper filter) |
-| **Loot the corpse** | **NEW capability — does not exist yet (see below)** |
-| Comminute parts → plasma | **NEW**: use-item-on-item action + skill/QL gate + ruined-parts blacklist |
+| **Loot the corpse** | **NEW `LootController`** — no loot action exists yet (GAP 1, see LOOTCONTROLLER-PLAN.md) |
+| **Comminute parts → plasma** | **NEW tradeskill send** — NO item-on-item support exists in the SDK at all (GAP 2) + skill/QL gate + ruined-parts blacklist |
 | Bag management | `LootBagStore` exists for a designated destination bag; **NEW**: fill N bags, roll-over, done-condition, never-sell |
+| Bank offload + rebuy on full | `Item.MoveToBank()` + `ResupplyController` `buybags` exist; **NEW**: glue the full-bag-bank-and-rebuy loop (GAP 3, smallest) |
 | Trader-side selling | extend `SellController` for the Specialist Commerce terminal + buff-CL-before-sell |
 
-State machine (farmer): `Travel → Hunt → Loot → Comminute → Bag → (bags full?) → Announce`.
-The Trader side (buff Trading Mogul → sell at OT Specialist Commerce) is a separate, later mode.
+State machine (farmer): `Travel → Hunt → Loot → Comminute → Bag → (bags full? → Bank+Rebuy) → (credits out? → Announce)`.
+The Trader side (buff best Trading-line nano → sell at OT Specialist Commerce) is a separate, later mode.
 
-## Prerequisite: mob looting — NOT built yet
-The bot has corpse **awareness** (`CorpseFullUpdateMessage` marks mobs dead and names them,
-`Inventory.ContainerOpened`) and a loot-bag **destination** (`LootBagStore`, `lootbag`
-command), but there is **no loot action**: nothing walks to a corpse, opens it, and transfers
-items out. Blood Plasma farming is blocked on this, so it must be planned and built first.
-
-To design/build (its own task, likely a shared `LootController` so other modes benefit):
-1. **Target a lootable corpse** — from the dead-corpse list, within range, not yet looted.
-2. **Open it** — the corpse is a container; send the open/use, wait for `ContainerOpened`.
-3. **Transfer items out** — SDK item-transfer from the corpse container into inventory /
-   the designated loot bag (confirm the clientless transfer path exists; wire it if not).
-4. **Filter** — take only wanted IDs (here: the good Monster Parts), leave the rest.
-5. **Robustness** — corpse despawn mid-loot, out-of-range, full inventory, ghost/unmatched
-   corpses; move on without stalling the hunt.
-
-This is a general capability (missions, hunting and plasma all want it), so build it as a
-reusable `LootController` rather than inside `BloodPlasmaController`.
+## Three build gaps (the real work; none exist today)
+1. **`LootController`** — open a corpse, transfer wanted items out. Transfer primitives
+   (`Item.MoveToInventory/MoveToContainer`) exist; the corpse-open path must be verified/wired.
+   Fully specced in **LOOTCONTROLLER-PLAN.md**. **This blocks everything.**
+2. **Comminute = item-on-item tradeskill send** — the biggest unknown. `Item.Use()` only targets
+   a character/slot (GenericCmd Use), there is **no "use item A on item B"** send. Right-clicking
+   the comminutor onto Monster Parts is a distinct tradeskill action the server resolves. Must
+   capture it from a live sniff and wire the send + the result/skill-fail handling. Until this
+   exists, the whole mode is impossible — spike it early.
+3. **Bank-offload + rebuy glue** — smallest. `MoveToBank()` and `buybags` both exist; just the
+   state-machine wiring for the continuous loop.
 
 ## Sell-price scaling → the Trader (the payout model)
-Plasma isn't a fixed payout; shop price scales with the seller's **Computer Literacy** and
-faction. From `Utils/ItemValues.cs` (verified live at ICC Fair Trade): price = `Value ×
-SellMod/100 × CL discount`, and **CL knocks 1% off per full 40 Comp Lit**. Higher CL = better
-prices. So the Trader's job is to stack as much Comp Lit as possible, then sell.
+Plasma isn't a fixed payout; the **buy-back** a vendor pays scales with the seller's **Computer
+Literacy**, faction, and the terminal's BuyModifier (stat 426). Note the direction: the
+`Utils/ItemValues.cs` formula `Value × SellMod/100 × CL discount` is the **buy side** (what a
+terminal *charges* you, CL makes it cheaper). **Selling is the mirror** — higher CL and a higher
+BuyModifier *raise* what you receive. The exact sell-back formula is **not yet decoded** (open
+item); what is certain is the ranking: more CL + the top BuyModifier terminal = more credits. So
+the Trader's job is to stack Comp Lit, then sell at the right terminal.
 
 ### Trader self Comp Lit buff line (decoded from GameData/nanos.ocp, client v18.8.62)
 All three are gated `VisualProfession == Trader` and have **no Level requirement** — the cast
@@ -135,12 +155,18 @@ gate is the two nano skills (buffable/over-equippable), not character level.
 (The pack's skill reqs differ from community web tables — the client data above is authoritative.)
 
 ### Casting the best one (Trading Mogul, +260) below its natural level
-- **Not level-locked.** Bridge PsyMod to **780** and SensImp to **708** with buffs: a **+140
-  nanoskill buff** on each line plus a self **Supreme Wrangler** covers most of the gap.
-- **NCU is the real floor:** Mogul costs **51 NCU** to sit, plus headroom for the bridging
-  buffs while casting. A Trader can field a 51-NCU belt at roughly **level 50** — so **~L50 is
-  the practical target** to self-cast Trading Mogul and sell at full +260 CL.
-- Only un-buffable requirement is being a Trader (he is). Nothing here is level-gated.
+- **Not level-locked.** Bridge PsyMod to **780** and SensImp to **708** with buffs: +140
+  nanoskill buffs on each line plus a self **Supreme Wrangler**.
+- **The bridge math is unconfirmed** — a Trader's base PsyMod/SensImp at ~L50 is roughly
+  200–300; +140 + a wrangle may still fall short of 780/708. So **don't assume Mogul casts at
+  L50.** Needs the real L50 skill numbers (open item).
+- **Graceful fallback (design rule):** cast the **highest Trading-line buff the Trader's current
+  skills actually allow** — Frequent Customer (+55) → Bulk Trader (+160) → Trading Mogul (+260).
+  The bot picks the best it can land, not Mogul unconditionally. Any CL still beats none.
+- **NCU floor:** Mogul needs **51 NCU** to sit (+ headroom for the bridge buffs while casting).
+  A 51-NCU belt is roughly a **level-50** thing — so L50 is the NCU floor, while the *skill*
+  gate may push the full +260 higher.
+- Only un-buffable requirement is being a Trader (he is).
 
 ### Where to sell — the Trader's Specialist Commerce terminal
 The owner **can** sell plasma at any normal shop themselves, but the best buy-back comes from a
@@ -185,21 +211,24 @@ curve: `perBag(QL) ≈ 250,000 × Value(QL) / Value(70)`.
    well below the raw per-bag jump; the table is **credits per session of 10 bags**, not per hour.
 
 ### Faction + the best-price stack
-Same-faction shops pay more, so an **Omni-aligned** Trader at an Omni (or ICC) Specialized
-Commerce terminal is the ceiling. **Best price = Omni Trader, high enough level to self-buff
-QL 165 Trading Mogul (+260 CL), selling at a Specialized Commerce terminal.** Farmer level only
-sets which zone/part-QL it reaches; credits come from CL + faction + the right terminal.
+Same-faction shops pay more, so an **Omni-aligned** Trader at an Omni (or ICC) **Specialist
+Commerce** terminal is the ceiling. **Best price = Omni Trader with the highest Trading-line CL
+buff it can cast (ideally QL 165 Trading Mogul, +260 CL), selling at a Specialist Commerce
+terminal.** Farmer level only sets which zone/part-QL it reaches; credits come from CL + faction
++ the right terminal.
 
-### Target setup (locked)
-Trader **Omni**, level high enough to self-cast **QL 165 Trading Mogul (+260 CL)** on a 51-NCU
-belt (~L50 practical), selling at a **Specialized Commerce** terminal (ICC/Omni side). That is
-the price tier everything else scales from.
+### Target setup
+Trader **Omni**, casting the **best Trading-line CL buff its skills allow** (Mogul +260 when it
+can reach PsyMod 780 / SensImp 708 with buffs; Bulk Trader +160 earlier), selling at a
+**Specialist Commerce** terminal (ICC/Omni side). L50 is the **NCU** floor for Mogul (51 NCU);
+whether L50 also meets the buffed skill gate is unconfirmed (open item). That setup is the price
+tier everything else scales from.
 
 ### Config / user-facing copy (must appear in the mode's config or help text)
-> You can sell Blood Plasma at any shop yourself, but the Trader's **Specialized Commerce**
+> You can sell Blood Plasma at any shop yourself, but the Trader's **Specialist Commerce**
 > terminal pays the most (ICC, Borealis, and the clan/omni-side terminals). Best prices of all:
-> an **Omni-aligned Trader**, high enough level to self-buff **QL 165 Trading Mogul (+260 Comp
-> Lit)**, selling at a Specialized Commerce terminal.
+> an **Omni-aligned Trader** casting the highest **Trading-line** Comp Lit buff it can (up to
+> **Trading Mogul, +260 Comp Lit**), selling at a Specialist Commerce terminal.
 
 ## Level → zone → biological target
 | Char lvl | Part QL | Where / what |
@@ -215,15 +244,25 @@ biological-slanted slider preset.
 
 ## Resolved this pass (from AOBuddy20 GameData — no external sources)
 - Comminutor price curve (ItemValues.bin): QL1 = 420 → QL200 = 510,300, square-of-QL.
+- Blood Plasma Value (ItemValues.bin): QL1 = 1,240 → QL200 = 906,100, square-of-QL.
 - Trader self CL line (nanos.ocp): Frequent Customer +55 / Bulk Trader +160 / Trading Mogul
-  +260; NCU 7/30/51; skill reqs decoded; no Level lock.
-- Target setup: Trader ~L50 Omni, self-casts Trading Mogul (+260 CL) on a 51-NCU belt.
+  +260; NCU 7/30/51; skill reqs (PsyMod/SensImp) decoded; no Level lock.
+- Best buy-back terminal (ItemValues.bin stat 426): OT Specialist Commerce BuyMod 8 (vs median 4).
+- Comminutor is owner-supplied; bot never shops for it.
+- Three build gaps identified (Loot / Comminute-tradeskill-send / Bank-rebuy glue).
 
 ## Open items to close before build
-0. **BLOCKER: build a reusable `LootController`** (open corpse → transfer wanted items out).
-   Nothing loots corpses today; plasma farming cannot start without it.
-1. **Plasma stack size per bag** (sets the "N bags full" done condition).
-2. **Confirm the good-part loot-table** per zone (which mobs actually drop 42641/variants).
-3. Which comminutor QL to stock per level band (buy QL ≥ farmed part QL to avoid QL loss).
-4. Confirm the **Supreme Wrangler + +140 nanoskill buff** values actually bridge L50 PsyMod/
-   SensImp to 780/708 (compute once the Trader's base skills at L50 are known).
+1. **GAP 1 — build `LootController`** (open corpse → transfer wanted items out). Blocks all of
+   it. Spec in LOOTCONTROLLER-PLAN.md.
+2. **GAP 2 — comminute tradeskill send** (use-item-on-item). No SDK support; capture from a live
+   sniff and wire it + skill-fail handling. Spike early — highest risk.
+3. **GAP 3 — bank-offload + rebuy glue** (`MoveToBank` + `buybags` exist; wire the loop).
+4. **Plasma stack size per bag** (sets the "N bags full" done condition).
+5. **Empty-bag item id + cost + seed credit float** for the rebuy loop.
+6. **Good-part loot-table per zone** (which mobs actually drop 42641/42642/42644/42646).
+7. **Comminutor durability / charges** — confirm whether it has limited uses beyond breaking on
+   corrupted parts (affects how often the owner must resupply it).
+8. **Comminutor QL to stock per level band** (buy QL ≥ farmed part QL to avoid QL loss).
+9. **Exact sell-back formula** (how CL + BuyModifier set the payout) and the **L50 skill-bridge
+   math** (does +140 buffs + Supreme Wrangler reach PsyMod 780 / SensImp 708 at L50, or higher?).
+10. **Pharma Tech check** — how the farmer reads its live PT to set maxQL (which stat / packet).
