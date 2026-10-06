@@ -21,6 +21,7 @@ public class AccountInfo
     public string Dimension = ""; // "RubiKa" (default) or "RubiKa2019"
     public string Owner = ""; // OPTIONAL - the character whose /tells are obeyed. Empty: the bot runs
     // solo (no one commands it, owner-assist is off). The bot does not need an owner to run.
+    public bool AutoAcceptOwnerTeamInvite = true; // group up when the owner invites (AOBuddy10 passive teaming)
     public string Password = "";
     public string Username = "";
 

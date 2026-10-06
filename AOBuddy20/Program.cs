@@ -211,6 +211,7 @@ internal class Program
         instance.Start();
 
         provider.GetRequiredService<MovementController>().Start();
+        provider.GetRequiredService<TeamController>(); // force-create so it subscribes to owner team invites
         provider.GetRequiredService<BotLoop>().Start();
         provider.GetRequiredService<OwnerChat>().Start();
         provider.GetRequiredService<BotApiService>().Start();
@@ -236,6 +237,8 @@ internal class Program
         services.AddSingleton<ResupplyController>();
         services.AddSingleton<SellController>();
         services.AddSingleton<HealController>();
+        services.AddSingleton<OwnerAssist>();
+        services.AddSingleton<TeamController>();
         services.AddSingleton<HuntController>();
         services.AddSingleton<BuffCatalog>();
         services.AddSingleton<BuffBotController>();

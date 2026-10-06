@@ -53,6 +53,12 @@ public sealed class BrainBank
     public ExternalBuffingBrain? ExternalBuff { get; private set; }
     public PetBrain? Pet { get; private set; }
 
+    /// <summary>This character fights THROUGH pets - a concrete profession pet brain is registered for it
+    /// (not the dormant GeneralPetBrain). The data-driven "is a pet class" test (the brain registration IS
+    /// the determination; no hardcoded profession list): a pet-class buddy stays back and lets its pet
+    /// fight rather than meleeing the owner's target.</summary>
+    public bool IsPetClass => Pet is not null and not GeneralPetBrain;
+
     public BrainBank(BrainRegistry registry, IServiceProvider provider, ILogger<BrainBank> logger)
     {
         _registry = registry;

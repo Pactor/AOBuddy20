@@ -62,6 +62,7 @@ public sealed class HuntController
 
     private readonly ILogger<HuntController> _logger;
     private readonly AccountInfo _config;
+    private readonly OwnerAssist _ownerAssist;
     private readonly string _ownerName;
     private readonly HashSet<string> _perma = new(StringComparer.OrdinalIgnoreCase); // mob NAMES
 
@@ -83,10 +84,11 @@ public sealed class HuntController
     private bool _noPetLogged;
     private readonly Dictionary<Identity, double> _setAside = new();
 
-    public HuntController(AccountInfo config, ILogger<HuntController> logger)
+    public HuntController(AccountInfo config, OwnerAssist ownerAssist, ILogger<HuntController> logger)
     {
         _logger = logger;
         _config = config;
+        _ownerAssist = ownerAssist;
         _ownerName = config.Owner ?? "";
 
         // All defaults come from the one conf file; a 'hunt' command updates them and saves it back.
@@ -347,16 +349,16 @@ public sealed class HuntController
 
     private PlayerChar? ResolveOwner()
     {
-        return string.IsNullOrEmpty(_ownerName)
-            ? null
-            : DynelManager.Players.FirstOrDefault(p => string.Equals(p.Name, _ownerName, StringComparison.OrdinalIgnoreCase));
+        return _ownerAssist.Owner();
     }
 
+    // The mob the attack pets should assist on: the owner's current target from the shared resolver
+    // (the owner's own target, else what the owner's pets are on when the owner is a pet class), leashed
+    // to our hunt radius so a pet is not dragged across the zone.
     private SimpleChar? OwnerFightTarget(LocalPlayer me)
     {
-        var owner = ResolveOwner();
-        if (owner == null || !owner.FightingIdentity.HasValue
-            || !DynelManager.Find(owner.FightingIdentity.Value, out NpcChar mob) || !IsAlive(mob))
+        var mob = _ownerAssist.Target(me, out _);
+        if (mob == null)
         {
             return null;
         }

@@ -118,12 +118,19 @@ public abstract class CombatBrain
     /// <summary>
     ///     ENGINE: the wire-proven invariant - Attack ONCE per target, re-sent only when the
     ///     target CHANGES. Never gate on IsAttacking: a re-issue restarts the swing timer.
+    ///     The server's auto-attack follows our SELECTION, and a heal or a pet command this tick moves
+    ///     it (every Cast / CommandPets sets the target first, and BotLoop's heal preempts the combat
+    ///     tick while it casts on us). So re-assert the selection on the mob EVERY tick - SetTarget only,
+    ///     which does NOT reset the swing timer (AOBuddy10's "restore target, never re-Attack"). Without
+    ///     this a buddy stops swinging after a self-heal: the weapon is left selecting us.
     /// </summary>
     protected void Engage(LocalPlayer me, SimpleChar target)
     {
+        Targeting.SetTarget(target.Identity);
+
         if (_attackedTarget == target.Identity)
         {
-            return; // already on it - the server keeps swinging
+            return; // already on it - the server keeps swinging; the SetTarget above just restores selection
         }
 
         me.Attack(target.Identity);
