@@ -87,17 +87,74 @@ public sealed class BuffCatalog
 
     private readonly ILogger<BuffCatalog> _logger;
     private readonly List<BuffEntry> _buffs = new();
+    private readonly ServerProfile _server; // THE one server->bot mapping (resolved once, below)
+    private readonly string _botOverride;    // optional config.BuffBotName; empty = use the server's default
 
     public bool Loaded { get; private set; }
     public IReadOnlyList<BuffEntry> Buffs => _buffs;
 
+    // ---- The one Buffs system: everything server-specific lives here ------------------------
+    // Nothing outside this class names RubiKa/RubiKa2019/Chewy/Codedoc. The json is request DATA only
+    // (which code, is-it-team, nano ids) - it NEVER drives behaviour; all actions are server-agnostic code.
+
+    /// <summary>Who to /tell "cast &lt;code&gt;" on this server (config.BuffBotName overrides the default).</summary>
+    public string BotName => string.IsNullOrWhiteSpace(_botOverride) ? _server.DefaultBot : _botOverride;
+
+    /// <summary>The playfield to stand in to be buffed on this server.</summary>
+    public int SpotPf => _server.SpotPf;
+
+    /// <summary>Where in that playfield to stand (close enough for the bot's toons to cast on us).</summary>
+    public Vector3 SpotPos => _server.SpotPos;
+
+    /// <summary>The server we resolved (true = RubiKa2019/Codedoc, false = RubiKa/Chewy).</summary>
+    public bool Is2019 => _server.Is2019;
+
+    /// <summary>The wire tell for a buff: "cast &lt;code&gt;" (both bots; guarded against a double "cast").
+    /// This is the "pass the buff, get the tell to use" the caller asks for - the server/bot is resolved here.</summary>
+    public string TellFor(BuffEntry buff) => WireTell(buff?.Tell);
+
+    public static string WireTell(string code) =>
+        string.IsNullOrWhiteSpace(code) || code.StartsWith("cast ", StringComparison.OrdinalIgnoreCase)
+            ? code
+            : "cast " + code;
+
     public BuffCatalog(AccountInfo config, ILogger<BuffCatalog> logger)
     {
         _logger = logger;
-        var is2019 = (config.Dimension ?? "").Replace(" ", "").Equals("RubiKa2019", StringComparison.OrdinalIgnoreCase);
-        var file = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GameData",
-            is2019 ? "CodedocBuffs.json" : "ChewysBuffs.json");
-        Load(file);
+        _server = ServerProfile.Resolve(config.Dimension); // the ONE dimension read
+        _botOverride = config.BuffBotName ?? "";
+        Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GameData", _server.JsonFile));
+    }
+
+    /// <summary>
+    ///     The per-server facts the buff system owns: who the bot is (the /tell target's default name),
+    ///     which catalog json, and where to stand. The INVITING toon is NOT here - it varies (Chewysfix,
+    ///     Chewystrader, Codetrader, Enfocode...), so teaming accepts whatever non-owner invite arrives
+    ///     while a team buff is outstanding rather than matching a name. AOBuddy10's verified values.
+    /// </summary>
+    public sealed class ServerProfile
+    {
+        public bool Is2019;
+        public string DefaultBot = "";
+        public string JsonFile = "";
+        public int SpotPf;
+        public Vector3 SpotPos;
+
+        public static ServerProfile Resolve(string dimension)
+        {
+            var is2019 = (dimension ?? "").Replace(" ", "").Equals("RubiKa2019", StringComparison.OrdinalIgnoreCase);
+            return is2019
+                ? new ServerProfile
+                {
+                    Is2019 = true, DefaultBot = "Codedoc", JsonFile = "CodedocBuffs.json",
+                    SpotPf = 800, SpotPos = new Vector3(632.6f, 66.81f, 723.9f), // Borealis
+                }
+                : new ServerProfile
+                {
+                    Is2019 = false, DefaultBot = "Chewysfix", JsonFile = "ChewysBuffs.json",
+                    SpotPf = 655, SpotPos = new Vector3(3260f, 0f, 865f), // ICC
+                };
+        }
     }
 
     private void Load(string file)

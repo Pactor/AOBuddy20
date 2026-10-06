@@ -371,12 +371,12 @@ public sealed class EngineerPetBrain : PetBrain
 
         // Not castable yet. Buff toward the learn req the same way the summon sustain-gate does, when the
         // owner has enabled auto-buffing; otherwise leave buffing to the owner and summon what we can now.
-        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_catalog.BotName))
         {
             if (_loggedLearnOppFor != pick.Value.Inv.Id)
             {
                 _loggedLearnOppFor = pick.Value.Inv.Id;
-                var who = _config.BuffBotName.Length > 0 ? _config.BuffBotName : "the buff bot";
+                var who = _catalog.BotName.Length > 0 ? _catalog.BotName : "the buff bot";
                 _logger.LogInformation(
                     $"PET: crystal '{pick.Value.Data.Name}' (ql {pick.Value.Data.Ql}) needs MC {reqMc}/TS {reqTs} to learn - " +
                     $"holdable at {plan.MarginPct:F0}% once buffed; buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
@@ -569,12 +569,12 @@ public sealed class EngineerPetBrain : PetBrain
             return false; // BestControllableRobot already filtered on this, but stay safe
         }
 
-        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_catalog.BotName))
         {
             if (_loggedBuffOppFor != want.Id)
             {
                 _loggedBuffOppFor = want.Id;
-                var who = _config.BuffBotName.Length > 0 ? _config.BuffBotName : "the buff bot";
+                var who = _catalog.BotName.Length > 0 ? _catalog.BotName : "the buff bot";
                 _logger.LogInformation(
                     $"PET: '{want.Name}' (ql {want.Ql}) needs MC {reqMc}/TS {reqTs} - out of reach now but holdable " +
                     $"at {plan.MarginPct:F0}% once buffed; buffs would unlock it ('buffs pet' near {who}, or set PetAutoBuff).");
@@ -599,7 +599,7 @@ public sealed class EngineerPetBrain : PetBrain
     private bool DriveBuffsToward(LocalPlayer me, BuffCatalog.ControlPlan plan, string goal, string askReason, string askDetail)
     {
         var learned = me.SpellList ?? Array.Empty<int>();
-        var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me));
+        var actions = _catalog.RoutePlan(plan, "Engineer", _catalog.BotName, learned.Contains, StableStrains(me));
 
         // Self-cast what we can ourselves (Generics / Engineer own-prof), one per pass (the cast gate is
         // upstream in PolicyTick). This covers Composite Nano Expertise / Attribute Boost when learned.
@@ -631,7 +631,7 @@ public sealed class EngineerPetBrain : PetBrain
             if (_buffBot.RequestBuffs(botSteps, askReason))
             {
                 _buffAskedAt = _clock;
-                _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] {askDetail}.");
+                _logger.LogInformation($"PET: asking {_catalog.BotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] {askDetail}.");
                 return true;
             }
 
@@ -684,7 +684,7 @@ public sealed class EngineerPetBrain : PetBrain
     /// </summary>
     private void MaintainAndSurvive(LocalPlayer me)
     {
-        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_catalog.BotName))
         {
             return; // owner controls buffing
         }
@@ -699,7 +699,7 @@ public sealed class EngineerPetBrain : PetBrain
         {
             var plan = _catalog.BuildControlPlan(me, UnbuffedBase(me, Stat.MaterialCreation),
                 UnbuffedBase(me, Stat.SpaceTime), _activeReqMc, _activeReqTs, paid, "Engineer");
-            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName, learned.Contains, StableStrains(me));
+            var actions = _catalog.RoutePlan(plan, "Engineer", _catalog.BotName, learned.Contains, StableStrains(me));
             var marginLow = OeMargin(me, _activeReqMc, _activeReqTs) < RefreshMargin;
             if ((marginLow || actions.Count > 0) && TryApply(me, actions, "pet control refresh"))
             {
@@ -711,7 +711,7 @@ public sealed class EngineerPetBrain : PetBrain
         var free = (me.TryGetStat(Stat.MaxNCU, out var mx) ? mx : 0) - (me.TryGetStat(Stat.CurrentNCU, out var cu) ? cu : 0);
         if (free > 0)
         {
-            TryApply(me, _catalog.SurvivalFill(me, free, paid, "Engineer", _config.BuffBotName, learned.Contains,
+            TryApply(me, _catalog.SurvivalFill(me, free, paid, "Engineer", _catalog.BotName, learned.Contains,
                 StableStrains(me)), "pet-tank survival");
         }
     }
@@ -739,7 +739,7 @@ public sealed class EngineerPetBrain : PetBrain
         if (_buffBot.RequestBuffs(botSteps, why))
         {
             _buffAskedAt = _clock;
-            _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] - {why}.");
+            _logger.LogInformation($"PET: asking {_catalog.BotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] - {why}.");
             return true;
         }
 
@@ -1121,12 +1121,9 @@ public sealed class EngineerPetBrain : PetBrain
         {
             var learned = me.SpellList ?? Array.Empty<int>();
 
-            // Resolve the buff bot's NAME for the trace: the configured one, else the dimension's default
-            // (Codedoc on RubiKa2019, Chewy on RubiKa) so the tells show even before BuffBotName is set -
-            // the "cast <code>" tell is a property of the buff + dimension, not of the toon's name.
-            var botName = !string.IsNullOrWhiteSpace(_config.BuffBotName)
-                ? _config.BuffBotName
-                : _buffBot.SpotForDimension()?.Label ?? "the buff bot";
+            // The buff bot's NAME comes from the one Buffs system, resolved by server (Chewysfix / Codedoc,
+            // config override aside). No dimension fork here.
+            var botName = _catalog.BotName;
 
             var actions = _catalog.RoutePlan(plan, "Engineer", botName, learned.Contains, StableStrains(me));
             var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).ToList();
@@ -1151,7 +1148,7 @@ public sealed class EngineerPetBrain : PetBrain
                 var gate = isNcuGate
                     ? "  <= SEND FIRST; wait for it to LAND before any other tell (it expands Max NCU)"
                     : (i > 0 && !string.IsNullOrEmpty(ncuTell) ? "  (only after the NCU buff is up)" : "");
-                _logger.LogInformation($"PET DRYRUN:   {i + 1}. /tell {botName} {BuffBotController.WireTell(a.Tell)}   [{kind}] - {a.Name}{gate}");
+                _logger.LogInformation($"PET DRYRUN:   {i + 1}. /tell {botName} {BuffCatalog.WireTell(a.Tell)}   [{kind}] - {a.Name}{gate}");
             }
 
             if (selfCast.Count > 0)
@@ -1171,7 +1168,7 @@ public sealed class EngineerPetBrain : PetBrain
                 learned.Contains, StableStrains(me));
             var sTells = survival.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).ToList();
             _logger.LogInformation($"PET DRYRUN: survival tells (~{survivalFree} NCU free, after the pet is up): " +
-                (sTells.Count > 0 ? string.Join(", ", sTells.Select(a => $"/tell {botName} {BuffBotController.WireTell(a.Tell)} ({a.Name})")) : "none I can get yet"));
+                (sTells.Count > 0 ? string.Join(", ", sTells.Select(a => $"/tell {botName} {BuffCatalog.WireTell(a.Tell)} ({a.Name})")) : "none I can get yet"));
 
             _logger.LogInformation(
                 "PET DRYRUN: => NCU tell -> wait for land -> the rest -> wrangle -> learn+summon -> survival -> WAITING.");

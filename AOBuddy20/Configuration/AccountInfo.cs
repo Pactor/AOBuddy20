@@ -97,15 +97,10 @@ public class AccountInfo
     // and orders these; until then they are listed here verbatim, NCU first.
     public float BuffHandshakeSeconds = 45f; // the invite/buff window (AOBuddy10 Scotty uses 45)
 
-    // Where the public buff bot stands - the bot WALKS here before asking (4a.1b, ported from AOBuddy10's
-    // ChewyBuffs/CodedocBuffs travel step). Dimension-resolved at login (Client.Dimension): Chewy on
-    // RubiKa (ICC, pf 655), Codedoc on RubiKa2019 (Borealis, pf 800). Spots are AOBuddy10's verified
-    // coords. BuffTravelToSpot off = ask from wherever the bot already stands (no walk).
+    // The bot WALKS to the buff spot before asking (4a.1b). WHICH spot (and which bot) is owned by the one
+    // Buffs system per server (BuffCatalog.ServerProfile) - not here. BuffTravelToSpot off = ask from
+    // wherever the bot already stands (no walk).
     public bool BuffTravelToSpot = true;
-    public int ChewyBuffPf = 655; // ICC
-    public float ChewyBuffX = 3260f, ChewyBuffY = 0f, ChewyBuffZ = 865f;
-    public int CodedocBuffPf = 800; // Borealis
-    public float CodedocBuffX = 632.6f, CodedocBuffY = 66.81f, CodedocBuffZ = 723.9f;
     public float BuffSpotArriveMeters = 6f; // "standing at the bot" radius (close enough for its toons to cast on us)
 
     // Pet buff-first (4b): when ON, a pet brain that wants a better pet it cannot yet summon for lack

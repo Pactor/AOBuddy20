@@ -32,9 +32,9 @@ namespace AOBuddy20.Controlling;
 ///     owner's own invites stay manual). It sends the request tells by NAME through the chat client
 ///     (Client.Chat.SendPrivateMessage, logMessage false - off the console) and ends when the bot
 ///     kicks us or the window runs out.
-///     Travel to the buff spot (4a.1b) is the SpotForDimension/BeginTravelToSpot/AtSpot API: the
-///     dimension's standing spot (Chewy at ICC, Codedoc at Borealis - AOBuddy10's coords) is driven on
-///     the MovementController's travel machinery; a caller walks there first, then runs the handshake.
+///     Travel to the buff spot (4a.1b) is the BeginTravelToSpot/AtSpot API: the standing spot comes from
+///     the one Buffs system (BuffCatalog.SpotPf/SpotPos, resolved per server), driven on the
+///     MovementController's travel machinery; a caller walks there first, then runs the handshake.
 ///     NOT yet: computing WHICH buffs to ask for from the bot's catalogue, NCU- and receiver-aware
 ///     (4a.2). Runs on the update thread (BotLoop ticks it, and the packet pump raises Team.TeamRequest
 ///     on the same thread).
@@ -89,46 +89,25 @@ public sealed class BuffBotController
 
     // ---- The buff spot (4a.1b): walk to the bot before asking --------------------------------
 
-    /// <summary>The dimension's public buff spot (Chewy at ICC on RubiKa, Codedoc at Borealis on
-    /// RubiKa2019 - AOBuddy10's coords), or null when travel-to-spot is off or no spot is configured.
-    /// Resolved off Client.Dimension, the same gate CodedocBuffs/Zoning use.</summary>
-    public (int Pf, Vector3 Pos, string Label)? SpotForDimension()
-    {
-        if (!_config.BuffTravelToSpot)
-        {
-            return null;
-        }
-
-        var is2019 = Client.Dimension == AOSharp.Clientless.Common.Dimension.RubiKa2019;
-        var pf = is2019 ? _config.CodedocBuffPf : _config.ChewyBuffPf;
-        if (pf <= 0)
-        {
-            return null;
-        }
-
-        var pos = is2019
-            ? new Vector3(_config.CodedocBuffX, _config.CodedocBuffY, _config.CodedocBuffZ)
-            : new Vector3(_config.ChewyBuffX, _config.ChewyBuffY, _config.ChewyBuffZ);
-        return (pf, pos, is2019 ? "Codedoc" : "Chewy");
-    }
+    // The buff spot and the bot name come from the ONE Buffs system (BuffCatalog), resolved by server;
+    // nothing here forks on dimension. Travel-to-spot can still be turned off (ask from where we stand).
 
     /// <summary>Standing at the buff bot? True when travel-to-spot is off (nothing to walk to) OR we are
-    /// in the spot's playfield and the travel goal is reached / within the arrive radius.</summary>
+    /// in the system's spot playfield and the travel goal is reached / within the arrive radius.</summary>
     public bool AtSpot()
     {
-        var s = SpotForDimension();
-        if (s == null)
+        if (!_config.BuffTravelToSpot || _catalog.SpotPf <= 0)
         {
             return true;
         }
 
-        if ((int)Playfield.ModelId != s.Value.Pf)
+        if ((int)Playfield.ModelId != _catalog.SpotPf)
         {
             return false;
         }
 
         return _movement.IsGoalReached(ControlPriority.Travel)
-               || Vector3.Distance(_movement.CurrentPosition, s.Value.Pos) <= _config.BuffSpotArriveMeters;
+               || Vector3.Distance(_movement.CurrentPosition, _catalog.SpotPos) <= _config.BuffSpotArriveMeters;
     }
 
     /// <summary>Set the travel goal for the buff spot on the MovementController's travel machinery (the
@@ -136,8 +115,12 @@ public sealed class BuffBotController
     /// there is no spot to walk to.</summary>
     public string? BeginTravelToSpot()
     {
-        var s = SpotForDimension();
-        return s == null ? null : _movement.PlanTravel(s.Value.Pf, s.Value.Pos);
+        if (!_config.BuffTravelToSpot || _catalog.SpotPf <= 0)
+        {
+            return null;
+        }
+
+        return _movement.PlanTravel(_catalog.SpotPf, _catalog.SpotPos);
     }
 
     /// <summary>Is a buff-spot walk currently in flight? True when the MovementController holds a Travel
@@ -159,18 +142,17 @@ public sealed class BuffBotController
     /// <summary>A readable one-liner of where we are relative to the spot, for narration/logs.</summary>
     public string SpotStatus()
     {
-        var s = SpotForDimension();
-        if (s == null)
+        if (!_config.BuffTravelToSpot || _catalog.SpotPf <= 0)
         {
             return "no buff spot (travel-to-spot off)";
         }
 
-        if ((int)Playfield.ModelId == s.Value.Pf)
+        if ((int)Playfield.ModelId == _catalog.SpotPf)
         {
-            return $"{Vector3.Distance(_movement.CurrentPosition, s.Value.Pos):0}m from the {s.Value.Label} spot in {Zoning.Name(s.Value.Pf)}";
+            return $"{Vector3.Distance(_movement.CurrentPosition, _catalog.SpotPos):0}m from {_catalog.BotName}'s spot in {Zoning.Name(_catalog.SpotPf)}";
         }
 
-        return $"traveling to {Zoning.Name(s.Value.Pf)} for {s.Value.Label}";
+        return $"traveling to {Zoning.Name(_catalog.SpotPf)} for {_catalog.BotName}";
     }
 
     // ---- The 'buffs' owner command ---------------------------------------------------------
@@ -186,7 +168,7 @@ public sealed class BuffBotController
                 break;
             case "status":
                 reply($"Buffs: {(Active ? $"{_stage} ({_landed} landed, {_skipped} already up, {_failed} failed)" : "idle")}. " +
-                      $"Bot '{_config.BuffBotName}', catalog {(_catalog.Loaded ? $"{_catalog.Buffs.Count} entries" : "not loaded")}.");
+                      $"Bot '{_catalog.BotName}', catalog {(_catalog.Loaded ? $"{_catalog.Buffs.Count} entries" : "not loaded")}.");
                 break;
             case "pet":
                 // Convenience manual trigger: the simple pet-summon tells (NCU + the biggest safe nano-skill
@@ -216,7 +198,7 @@ public sealed class BuffBotController
         }
 
         var steps = tells
-            .Select(t => new BuffCatalog.BuffAction { Source = BuffCatalog.BuffSource.BuffBot, Name = t, Tell = t, BotName = _config.BuffBotName })
+            .Select(t => new BuffCatalog.BuffAction { Source = BuffCatalog.BuffSource.BuffBot, Name = t, Tell = t, BotName = _catalog.BotName })
             .ToList();
         return RequestBuffs(steps, why);
     }
@@ -244,11 +226,11 @@ public sealed class BuffBotController
             return false;
         }
 
-        // Any bot tell needs a real toon name to /tell. The dimension label ("Codedoc"/"Chewy") is only a
-        // placeholder for the dry-run trace - a live ask needs BuffBotName set.
-        if (steps.Any(s => s.Source == BuffCatalog.BuffSource.BuffBot) && string.IsNullOrWhiteSpace(_config.BuffBotName))
+        // Any bot tell needs a toon name to /tell. The Buffs system resolves it per server (Chewysfix /
+        // Codedoc by default, config.BuffBotName overrides), so this only fails if that came back empty.
+        if (steps.Any(s => s.Source == BuffCatalog.BuffSource.BuffBot) && string.IsNullOrWhiteSpace(_catalog.BotName))
         {
-            reply("Bot buffs are in the plan but BuffBotName is not set - set it (e.g. 'Codedoc') to ask.");
+            reply("Bot buffs are in the plan but no buff bot resolved for this server.");
             return false;
         }
 
@@ -271,7 +253,7 @@ public sealed class BuffBotController
         Enter(_walkFirst ? Stage.Walking : Stage.Working);
 
         var botCount = steps.Count(s => s.Source == BuffCatalog.BuffSource.BuffBot);
-        _logger.LogInformation($"BUFFS: acquire open ({what}): {steps.Count} steps ({botCount} from '{_config.BuffBotName}'), in order " +
+        _logger.LogInformation($"BUFFS: acquire open ({what}): {steps.Count} steps ({botCount} from '{_catalog.BotName}'), in order " +
             $"[{string.Join(", ", steps.Select(DescribeStep))}].");
         reply($"Buff acquire open ({what}): {steps.Count} steps{(_walkFirst ? ", walking to the spot first" : "")}.");
         return true;
@@ -435,31 +417,24 @@ public sealed class BuffBotController
         return buffs != null && buffs.Any(b => step.LandIds.Contains(b.Id));
     }
 
-    /// <summary>The wire text for a buff code: both Codedoc and Chewy expect "cast &lt;code&gt;" (AOBuddy10
-    /// CodedocBuffs/ChewyBuffs both prepend "cast "). The catalog stores the bare code (e.g. "60ncu"), so we
-    /// add the keyword here - guarded so a code already written "cast ..." is not doubled.</summary>
-    public static string WireTell(string code) =>
-        string.IsNullOrWhiteSpace(code) || code.StartsWith("cast ", StringComparison.OrdinalIgnoreCase)
-            ? code
-            : "cast " + code;
-
     private void SendTell(string code)
     {
-        var text = WireTell(code);
+        var bot = _catalog.BotName;
+        var text = BuffCatalog.WireTell(code); // "cast <code>" (the Buffs system owns the wire format)
         if (Client.Chat == null)
         {
-            _logger.LogInformation($"BUFFS: no chat client - tell to '{_config.BuffBotName}' not sent: '{text}'.");
+            _logger.LogInformation($"BUFFS: no chat client - tell to '{bot}' not sent: '{text}'.");
             return;
         }
 
         try
         {
-            Client.Chat.SendPrivateMessage(_config.BuffBotName, text, false);
-            _logger.LogInformation($"BUFFS: /tell {_config.BuffBotName} {text}.");
+            Client.Chat.SendPrivateMessage(bot, text, false);
+            _logger.LogInformation($"BUFFS: /tell {bot} {text}.");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning($"BUFFS: the tell to '{_config.BuffBotName}' failed: {ex.Message}");
+            _logger.LogWarning($"BUFFS: the tell to '{bot}' failed: {ex.Message}");
         }
     }
 
