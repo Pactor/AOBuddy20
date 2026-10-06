@@ -44,9 +44,10 @@ public sealed class BotLoop
     private readonly SellController _sell;
     private readonly NavController _navMemory;
     private readonly BuffBotController _buffBot;
+    private readonly PerkBonuses _perkBonuses;
     private bool _running;
 
-    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, BuffBotController buffBot, AccountInfo config, ILogger<BotLoop> logger)
+    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, BuffBotController buffBot, PerkBonuses perkBonuses, AccountInfo config, ILogger<BotLoop> logger)
     {
         _controlArbiter = controlArbiter;
         _missionController = missionController;
@@ -55,6 +56,7 @@ public sealed class BotLoop
         _heal = heal;
         _brains = brains;
         _navMemory = navMemory;
+        _perkBonuses = perkBonuses;
         _awareness = awareness;
         _buffBot = buffBot;
         _config = config;
@@ -112,6 +114,11 @@ public sealed class BotLoop
                 // AWARENESS: the monster picture (near / on bot / on pets) is sensory input - it
                 // refreshes before anything decides on it.
                 _awareness.Tick(me, deltaTime);
+
+                // PERKS: fold the trained-perk permanent stat bonuses onto the player BEFORE anything
+                // reads a stat, so MC/TS/NCU and every perk-boosted value are the honest final numbers
+                // (without this the perk layer is empty and e.g. an Engineer's MC/TS read 297 not 326).
+                _perkBonuses.Tick(me);
 
                 // BRAINS: pick this character's combat/selfbuffing/externalbuffing brains once the
                 // profession is on the wire. The DI container was built before login, so the bank
