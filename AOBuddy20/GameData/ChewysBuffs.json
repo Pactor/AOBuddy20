@@ -1,5 +1,15 @@
 {
  "_about": "Buff list (from Chewy's buff list, corrected 2026-09-24 against the live game), grouped by profession. 'effect' and 'ncu' as given; 'team': true marks a buff cast on the team. 'id' is the nano id, resolved by name (client names differ slightly for some entries - see 'note') against the 18.8.50_EP1 client data: omnicell/OmniCell/Datafiles/nanos.ocp (OmniCell content pack) for the nano records and their profession gates, with names from OmniCell.Database SqlTables/itemnames.sql (rows of type 'Nano'). Where several ids share a name, the one whose cast requirements gate it to this list's profession was taken.",
+ "location": {
+  "note": "Chewy's buffing bots - ICC Andromeda (RubiKa). Owner-provided spot (2026-10-06).",
+  "playfield": 655,
+  "playfieldName": "Andromeda",
+  "x": 3260.0,
+  "y": null,
+  "z": 866.0,
+  "botFamily": "Chewys",
+  "botName": "Chewysfix"
+ },
  "professions": [
   {
    "name": "Generic",

@@ -78,7 +78,12 @@ public sealed class MetaphysicistBrain : PetBrain
     // Decide roughly once a second, not every frame.
     private const double DecideEverySec = 1.0;
 
+    // A freshly petless roster waits this long before the auto cadence fills it - the window
+    // the external-buff brain's decide needs to engage its summon hold first (see PolicyTick).
+    private const double PetlessGraceSeconds = 3.0;
+
     private double _sinceDecide;
+    private double _petlessSince = -1; // when the roster first read incomplete under no hold (-1 = complete)
     private readonly Dictionary<int, double> _summonAt = new(); // nanoId -> last cast (_clock)
     private readonly HashSet<int> _commanded = new(); // pet instances we last sent Follow to
 
@@ -97,25 +102,45 @@ public sealed class MetaphysicistBrain : PetBrain
         // idempotent on the server, so re-sending it when a new pet lands is safe.
         EnsureCommanded(me);
 
-        // The buff-first hold wins over everything below: stay petless until the buffing side
+        // A buffing brain's request jumps the queue: a summon pass now, without the 1s cadence
+        // (IsCasting still gates - the wire takes one cast at a time; the request stays pending
+        // until a tick can act on it). The staged dance asks per line - fill exactly that line.
+        // Requests WORK under the summon hold: the dance holds the cadence shut while it arranges
+        // buffs, and drives the staged summons through it itself.
+        if (!me.IsCasting && ConsumeSummonRequest(out var requestedRole))
+        {
+            TrySummon(me, requestedRole);
+            return true;
+        }
+
+        // The buff-first hold gates the auto cadence: stay petless until the buffing side
         // resolves (pets already up stay commanded).
         if (SummonHeld)
         {
             return true;
         }
 
-        // A buffing brain's request jumps the queue: a summon pass now, without the 1s cadence
-        // (IsCasting still gates - the wire takes one cast at a time; the request stays pending
-        // until a tick can act on it).
-        if (!me.IsCasting && ConsumeSummonRequest())
-        {
-            TrySummon(me);
-            return true;
-        }
-
         // The roster is complete: let the chain continue (overlay, returns true - the body is
         // never held; ControlPriority.Pet stays reserved for a later step).
         if (RosterComplete(me))
+        {
+            _petlessSince = -1;
+            return true;
+        }
+
+        // The buff-first grace: a freshly petless roster waits this long before the cadence
+        // fills it, giving the external-buff brain its decide window - it engages the summon
+        // hold within a second of wanting a dance, and its staged swaps are the only fills
+        // that may overtake this (owner, 2026-10-06: the cadence raced the dance and put the
+        // attack pet out the same second the dance started arranging buffs). While the hold
+        // is on the timer freezes; on release an elapsed grace means fill at once - a dance
+        // that concluded empty-handed hands its petless lines back on purpose.
+        if (_petlessSince < 0)
+        {
+            _petlessSince = _clock;
+        }
+
+        if (_clock - _petlessSince < PetlessGraceSeconds)
         {
             return true;
         }
@@ -186,22 +211,29 @@ public sealed class MetaphysicistBrain : PetBrain
     /// <summary>
     ///     Fill the first missing line (priority order in <see cref="Slots" />): the best summon
     ///     for that line we know and can cast. One cast per decide window.
+    ///     <paramref name="only" /> scopes the pass to one wire role - the staged dance asks per
+    ///     line, and a pass that filled a DIFFERENT line with a weak pet would defeat it.
     /// </summary>
-    private void TrySummon(LocalPlayer me)
+    private void TrySummon(LocalPlayer me, PetType? only = null)
     {
         foreach (var (line, role) in Slots)
         {
+            if (only.HasValue && role != only.Value)
+            {
+                continue;
+            }
+
             if (me.Pets.Count(p => p.Role == role) >= 1)
             {
                 continue;
             }
 
-            CastBest(me, line);
+            CastBest(me, line, role);
             return; // one cast at a time - the next line waits for its decide window
         }
     }
 
-    private void CastBest(LocalPlayer me, PetLine line)
+    private void CastBest(LocalPlayer me, PetLine line, PetType role)
     {
         if (!_summonIds.TryGetValue(line, out var ids) || ids.Count == 0)
         {
@@ -216,6 +248,7 @@ public sealed class MetaphysicistBrain : PetBrain
 
         var learned = me.SpellList ?? Array.Empty<int>();
         NanoItem? best = null;
+        var bestTop = -1;
         foreach (var nanoId in learned)
         {
             if (!ids.Contains(nanoId))
@@ -245,8 +278,13 @@ public sealed class MetaphysicistBrain : PetBrain
                 continue;
             }
 
-            if (best == null || ni.Ql > best.Ql)
+            // Rank by the pack's branch-table top - the formula's true strength - and only then
+            // by QL: within these lines the crystal QL does NOT track power (the heal line's ids
+            // interleave; Valentyia outranks Restite on QL while being two tiers weaker).
+            var top = NanoLibrary.Find(nanoId)?.TopTemplateLevel ?? 0;
+            if (best == null || top > bestTop || (top == bestTop && ni.Ql > best.Ql))
             {
+                bestTop = top;
                 best = ni;
             }
         }
@@ -262,6 +300,7 @@ public sealed class MetaphysicistBrain : PetBrain
         }
 
         _summonAt[best.Id] = _clock;
+        RecordSummonCast(role, best.Id, me); // the tier we get is decided by THESE stats - keep them
         me.Cast(best.Id);
         _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, ql {best.Ql}) for the {LineName(line)} pet.");
     }

@@ -141,6 +141,27 @@ public sealed class HealController
     ///     never FIRE a trigger - they only shrink the deficits the triggers measure, over one
     ///     cooldown in combat and over the buffs' whole rest out of combat.
     /// </summary>
+    /// <summary>Whether a recharger rest is currently running - the pet-buff pump pauses its
+    /// casts while this is on (a seated body's casts are refused by the server).</summary>
+    public bool Resting => _resting;
+
+    // A forced nano want (the pet-buff stage's pump): the next cast costs this much and the
+    // pool cannot pay it - rest until the pool reaches the need, whatever the percentage
+    // triggers say. Cleared once the pool pays (Tick).
+    private int _forcedNanoNeed;
+    private string? _forcedWhy;
+
+    /// <summary>Ask for a recharger rest until the nano pool reaches <paramref name="needed"/> -
+    /// additive to the percentage triggers, evaluated in <see cref="Tick" />.</summary>
+    public void EnsureNano(int needed, string why)
+    {
+        if (needed > _forcedNanoNeed)
+        {
+            _forcedNanoNeed = needed;
+            _forcedWhy = why;
+        }
+    }
+
     public void SetRegen(double healthPerSecond, double nanoPerSecond, double remainingSeconds)
     {
         _regenHealth = Math.Max(0, healthPerSecond);
@@ -263,13 +284,23 @@ public sealed class HealController
         else
         {
             // Out of combat the horizon is the whole rest of the buffs: a long HoT that will close
-            // the wound on its own is exactly the case the recharger is not for.
+            // the wound on its own is exactly the case the recharger is not for. A FORCED nano
+            // want (the pet-buff stage's pump: the next cast cannot pay) rides on top of the
+            // percentage triggers.
             var missingNet = missingHealth - _regenHealth * _regenRemaining;
             var nanoShortNet = _config.HealNanoOutOfCombatPct / 100.0 * maxNano - nano - _regenNano * _regenRemaining;
-            want = missingNet > 0 || nanoShortNet > 0;
+            want = missingNet > 0 || nanoShortNet > 0 || (_forcedNanoNeed > 0 && nano < _forcedNanoNeed);
             reason = want
-                ? $"out of combat, {(missingNet > 0 ? $"{missingNet:0} health missing" : $"nano {nanoPct:0}%")}{RegenNote()}"
+                ? $"out of combat, {(missingNet > 0 ? $"{missingNet:0} health missing" : $"nano {nanoPct:0}%")}" +
+                  $"{(_forcedNanoNeed > 0 && nano < _forcedNanoNeed ? $" (pet buffs need {_forcedNanoNeed})" : "")}{RegenNote()}"
                 : "";
+        }
+
+        // The forced want is satisfied - retire it, so it does not re-arm on a later dip.
+        if (_forcedNanoNeed > 0 && nano >= _forcedNanoNeed)
+        {
+            _forcedNanoNeed = 0;
+            _forcedWhy = null;
         }
 
         if (!want)

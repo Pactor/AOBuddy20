@@ -84,6 +84,14 @@ public abstract class ExternalBuffingBrain
         return false;
     }
 
+    /// <summary>
+    ///     CROSS-BRAIN: whether an external-buffing episode is in flight (a dance, a renewal, a
+    ///     session). The chain gates SELF-BUFFING on this - the buff-up owns the cast window,
+    ///     and a selfbuff cast would collide with the pet summons the dance drives (one cast at
+    ///     a time on the wire). Base answer: never busy (the general brain is dormant).
+    /// </summary>
+    public virtual bool BuffingInProgress => false;
+
     /// <summary>ENGINE: the only legal way to change stage - every transition is logged.</summary>
     protected void EnterStage(Stage next, string why)
     {

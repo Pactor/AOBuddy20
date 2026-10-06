@@ -241,6 +241,10 @@ public abstract class PetBrain
     // One-shot: another brain asked for an immediate summon pass (consumed by the next tick).
     private bool _summonRequested;
 
+    // The role the request is scoped to - null = fill whatever line is missing (the dance asks
+    // per stage: attack, then heal, then mezz).
+    private PetType? _summonRole;
+
     // While held, the policy summons nothing - the buff-first "stay petless until it resolves".
     private bool _summonHold;
 
@@ -248,26 +252,34 @@ public abstract class PetBrain
     ///     CROSS-BRAIN: a buffing brain (the Selfbuffing / ExternalBuffing side, once the peak
     ///     skill stack is confirmed up - PETBRAIN-DESIGN.md, buff-first step 3) asks the pet
     ///     brain for an IMMEDIATE summon pass: the next tick runs the summon policy without the
-    ///     ~1s decide cadence. One-shot, and a no-op while <see cref="SetSummonHold" /> is held
-    ///     (release first, then request). Reachable as <c>BrainBank.Pet.RequestSummon()</c>.
+    ///     ~1s decide cadence. One-shot. Reachable as <c>BrainBank.Pet.RequestSummon()</c>.
     /// </summary>
     public void RequestSummon()
     {
-        if (_summonHold)
-        {
-            return;
-        }
-
-        _summonRequested = true;
-        _logger.LogInformation("PET: summon requested (buff-first handshake).");
+        RequestSummon(null);
     }
 
     /// <summary>
-    ///     CROSS-BRAIN: while held, the policy summons NOTHING - not on its own cadence, not on
-    ///     request - but keeps commanding pets already up. This is the buff-first gate ("stay
-    ///     petless until it resolves", owner 2026-10-05): hold while the NCU/skill buffs are
-    ///     being arranged, then release + <see cref="RequestSummon" /> at the peak. Releasing
-    ///     without a request simply returns to the normal auto cadence.
+    ///     CROSS-BRAIN, role-scoped: the staged dance asks for EXACTLY ONE line per stage
+    ///     (attack, then heal, then mezz) - a pass that filled the next line with a weak pet
+    ///     would defeat the staging. The policy summons only the given wire role this pass.
+    ///     Requests WORK under <see cref="SetSummonHold" /> - the hold gates the auto cadence
+    ///     only; the dance itself drives the staged summons through the hold.
+    /// </summary>
+    public void RequestSummon(PetType? role)
+    {
+        _summonRequested = true;
+        _summonRole = role;
+        _logger.LogInformation(role.HasValue
+            ? $"PET: summon requested for the {role.Value} line (buff-first handshake)."
+            : "PET: summon requested (buff-first handshake).");
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: while held, the policy's own CADENCE summons nothing - the buff-first
+    ///     "stay petless until it resolves" (owner 2026-10-05): hold while the NCU/skill buffs
+    ///     are being arranged. Cross-brain <see cref="RequestSummon" /> passes are NOT blocked
+    ///     (the staged dance summons through the hold); pets already up stay commanded.
     /// </summary>
     public void SetSummonHold(bool held)
     {
@@ -277,22 +289,172 @@ public abstract class PetBrain
         }
 
         _summonHold = held;
+        if (held && _summonRequested)
+        {
+            // A request pending from BEFORE the hold dies with it: from here the dance owns
+            // summoning, at its own swap points - a pre-dance request consumed mid-dance
+            // (the request path deliberately bypasses this hold) would put a pet out at the
+            // wrong moment and on the wrong stats (owner, 2026-10-06: the attack pet came
+            // out while the extbuff dance was still arranging buffs).
+            _summonRequested = false;
+            _summonRole = null;
+            _logger.LogInformation("PET: pending summon request dropped - the buff dance owns summoning now.");
+        }
+
         _logger.LogInformation($"PET: summon hold {(held ? "ON - staying petless until released" : "off")}.");
     }
 
     /// <summary>Whether summoning is currently held (the policy checks before any cast).</summary>
     protected bool SummonHeld => _summonHold;
 
-    /// <summary>Consume the pending summon request - true once, then it is gone.</summary>
-    protected bool ConsumeSummonRequest()
+    /// <summary>
+    ///     Consume the pending summon request - true once, then it is gone;
+    ///     <paramref name="role" /> carries the requested line (null = whatever is missing).
+    /// </summary>
+    protected bool ConsumeSummonRequest(out PetType? role)
     {
+        role = _summonRole;
         if (!_summonRequested)
         {
             return false;
         }
 
         _summonRequested = false;
+        _summonRole = null;
         return true;
+    }
+
+    // ---- ENGINE: the summon snapshots (which template tier did we actually get?) ------------
+
+    /// <summary>What the policy last cast per wire role, and the four nano skills held at the
+    /// cast instant - the ONLY way to know which template tier the server handed out, because
+    /// the pet never tells (owner, 2026-10-05, marked IMPORTANT).</summary>
+    public sealed class SummonSnapshot
+    {
+        public int NanoId;
+        public double Clock;
+
+        /// <summary>The buffed skills at the cast instant: stat id → value.</summary>
+        public Dictionary<int, int> Stats = new();
+    }
+
+    private readonly Dictionary<PetType, SummonSnapshot> _castSnapshots = new();
+
+    /// <summary>The last cast of that line, or null (nothing summoned yet this session).</summary>
+    public SummonSnapshot? LastSummonCast(PetType role)
+    {
+        return _castSnapshots.TryGetValue(role, out var s) ? s : null;
+    }
+
+    /// <summary>Engine hook: the policy records the cast with the skills held at that instant.</summary>
+    protected void RecordSummonCast(PetType role, int nanoId, LocalPlayer me)
+    {
+        var snapshot = new SummonSnapshot { NanoId = nanoId, Clock = _clock };
+        foreach (var stat in new[] { 127, 128, 130, 131 })
+        {
+            if (me.TryGetStat((Stat)stat, out var v))
+            {
+                snapshot.Stats[stat] = v;
+            }
+        }
+
+        _castSnapshots[role] = snapshot;
+    }
+
+    /// <summary>
+    ///     The template branch the server handed out for a cast: the HIGHEST SummonPet branch
+    ///     whose skill requirements the cast-time snapshot satisfies (Greater-than gates only -
+    ///     the heal pets' repeated healing-action calls gate on other stats and never select a
+    ///     tier). Null when the formula is unknown or no branch matches.
+    /// </summary>
+    protected static SummonBranch? ReachedBranch(int nanoId, IReadOnlyDictionary<int, int> castStats)
+    {
+        var nano = NanoLibrary.Find(nanoId);
+        if (nano == null)
+        {
+            return null;
+        }
+
+        SummonBranch? best = null;
+        foreach (var branch in nano.Summons)
+        {
+            if (branch.TemplateLevel <= (best?.TemplateLevel ?? 0))
+            {
+                continue;
+            }
+
+            var satisfied = true;
+            foreach (var r in branch.Requirements)
+            {
+                if (r.Operator != OpGreaterThan || !NanoSkillStats.Contains(r.Stat))
+                {
+                    continue;
+                }
+
+                if (castStats.GetValueOrDefault(r.Stat) <= r.Value)
+                {
+                    satisfied = false;
+                    break;
+                }
+            }
+
+            if (satisfied)
+            {
+                best = branch;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    ///     The per-skill obedience totals for a cast: 80% (<see cref="ControlFloor" />, rounded
+    ///     up) of the requirements of the tier the cast actually produced - the reached branch's
+    ///     gates, or the formula's own cast gates when every branch was a free bottom template.
+    ///     The stage-5 ask is planned against exactly these.
+    /// </summary>
+    protected static Dictionary<int, int> ObedienceTotals(int nanoId, IReadOnlyDictionary<int, int> castStats)
+    {
+        var totals = new Dictionary<int, int>();
+        var branch = ReachedBranch(nanoId, castStats);
+        IEnumerable<NanoRequirement> reqs;
+        if (branch != null)
+        {
+            reqs = branch.Requirements;
+        }
+        else
+        {
+            var nano = NanoLibrary.Find(nanoId);
+            reqs = nano?.Actions.SelectMany(a => a.Requirements) ?? Array.Empty<NanoRequirement>();
+        }
+
+        foreach (var r in reqs)
+        {
+            if (r.Operator == OpGreaterThan && NanoSkillStats.Contains(r.Stat))
+            {
+                var floor = (int)Math.Ceiling((r.Value + 1) * ControlFloor);
+                totals[r.Stat] = Math.Max(totals.GetValueOrDefault(r.Stat), floor);
+            }
+        }
+
+        return totals;
+    }
+
+    /// <summary>The pack's GreaterThan operator and the four pet-tier skill stats.</summary>
+    protected const int OpGreaterThan = 2;
+
+    protected static readonly HashSet<int> NanoSkillStats = new() { 127, 128, 130, 131 };
+
+    /// <summary>
+    ///     CROSS-BRAIN: the per-skill obedience floor for a line - 80% of the requirements of the
+    ///     template tier the last cast ACTUALLY produced (from the cast snapshot; the pet never
+    ///     tells) - or null when nothing was summoned for it. The obedience stage's ask is
+    ///     planned against the union of these.
+    /// </summary>
+    public IReadOnlyDictionary<int, int>? ObedienceFloor(PetType role)
+    {
+        var snapshot = LastSummonCast(role);
+        return snapshot == null ? null : ObedienceTotals(snapshot.NanoId, snapshot.Stats);
     }
 
     /// <summary>
@@ -321,6 +483,38 @@ public abstract class PetBrain
     /// <summary>Hook: the roster was just terminated - the policy drops its per-pet bookkeeping.</summary>
     protected virtual void OnRosterTerminated()
     {
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: /pet terminate for ONE line - the pets of the given wire role die, the
+    ///     rest of the roster stands. This is the staged dance's swap point (owner, 2026-10-06:
+    ///     terminate the old attack pet, THEN cast the new one - same for heal and mezz): the
+    ///     same-line summon gate ("they don't overwrite") forces the terminate, and doing it
+    ///     per line - only once that line's peak stack is verified in - keeps the other lines
+    ///     fighting while one rebuilds.
+    /// </summary>
+    public void TerminateRole(LocalPlayer me, PetType role)
+    {
+        if (me == null)
+        {
+            return;
+        }
+
+        var victims = me.Pets.Where(p => p.Role == role).Select(p => p.Identity).ToList();
+        if (victims.Count == 0)
+        {
+            return;
+        }
+
+        Command(me, PetCommand.Terminate, victims);
+        _logger.LogInformation($"PET: terminating the {role} pet ({victims.Count} up) - the line rebuilds at peak.");
+        if (role == PetType.Attack)
+        {
+            _attackTarget = null;    // the engine's attack bookkeeping is stale with that pet gone
+            _commandedInstance = 0;
+        }
+
+        OnRosterTerminated(); // the policy drops its per-pet bookkeeping; a re-Follow on the rest is harmless
     }
 }
 

@@ -53,6 +53,13 @@ public sealed class BrainBank
     public ExternalBuffingBrain? ExternalBuff { get; private set; }
     public PetBrain? Pet { get; private set; }
 
+    /// <summary>
+    ///     An external-buffing episode is in flight (the MP buff dance, a renewal, a session) -
+    ///     the chain gates self-buffing on this: the buff-up owns the cast window, and a selfbuff
+    ///     cast would collide with the dance's pet summons (one cast at a time on the wire).
+    /// </summary>
+    public bool ExternalBuffBusy => ExternalBuff?.BuffingInProgress ?? false;
+
     public BrainBank(BrainRegistry registry, IServiceProvider provider, ILogger<BrainBank> logger)
     {
         _registry = registry;

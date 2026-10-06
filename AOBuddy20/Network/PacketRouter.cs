@@ -88,7 +88,24 @@ public sealed class PacketRouter
 
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<N3MessageType, int> _unhandledN3 = new();
+    private readonly List<Action<N3Message>> _n3Observers = new();
+    private readonly List<Action<SystemMessage>> _systemObservers = new();
     private int _rawDoor;
+
+    /// <summary>Observe EVERY decoded N3 message, across all types - diagnostics that must see
+    /// the wire rather than one path's view of it (the buff window's invite watcher). Observers
+    /// never consume: whatever they do, type dispatch and the SDK's own callbacks run on.</summary>
+    public void RegisterN3Observer(Action<N3Message> observer)
+    {
+        _n3Observers.Add(observer);
+    }
+
+    /// <summary>Observe every decoded SystemMessage - the N3 observers' counterpart for the
+    /// text-channel packet space.</summary>
+    public void RegisterSystemObserver(Action<SystemMessage> observer)
+    {
+        _systemObservers.Add(observer);
+    }
 
     public void Dispatch(object? sender, AOMessage e)
     {
@@ -126,13 +143,25 @@ public sealed class PacketRouter
 
         if (e.Body is N3Message n3Message)
         {
+            foreach (var observer in _n3Observers)
+            {
+                try
+                {
+                    observer(n3Message);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "N3 observer threw.");
+                }
+            }
+
             if (!_n3Handlers.ContainsKey(n3Message.N3MessageType))
             {
                 _unhandledN3.TryAdd(n3Message.N3MessageType, 0);
                 if (_unhandledN3[n3Message.N3MessageType] < 3)
                 {
                     _unhandledN3[n3Message.N3MessageType]++;
-                    _logger.LogInformation($"ROUTER: no handler for N3 type {n3Message.N3MessageType} ({n3Message.GetType().Name}).");
+                    _logger.LogDebug($"ROUTER: no handler for N3 type {n3Message.N3MessageType} ({n3Message.GetType().Name}).");
                 }
             }
             else if (_n3Handlers.TryGetValue(n3Message.N3MessageType, out var list))
@@ -159,6 +188,18 @@ public sealed class PacketRouter
 
         if (e.Body is SystemMessage system)
         {
+            foreach (var observer in _systemObservers)
+            {
+                try
+                {
+                    observer(system);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "System observer threw.");
+                }
+            }
+
             if (_systemHandlers.TryGetValue(system.SystemMessageType, out var list))
             {
                 foreach (var entry in list.OrderBy(x => x.canEndSequence).ThenBy(x => x.receivePriority))

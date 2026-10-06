@@ -16,8 +16,8 @@ public enum ControlPriority
     None = 0,
     Travel = 100,
     Selling = 200,
-    ExternalBuffing = 300, // being buffed by someone else - above selling, below mission
-    Mission = 400,
+    ExternalBuffing = 400, // being buffed by someone else - ABOVE mission: the buff-up runs before a mission goes
+    Mission = 300, // the blitz run - waits while a buff dance is in flight
     Resupply = 500, // above mission (a run must not starve mid-mission), below combat
     Selfbuffing = 600, // buffing self - above resupply, below combat
     Pet = 650, // pet summon/maintain/command - above selfbuffing, below combat (the pet follows the fight)

@@ -119,6 +119,26 @@ public class LocalPlayer : PlayerChar
         });
     }
 
+    // Take a running nano off ourselves - the buff-first dance's "cancel the MC mocham" (owner,
+    // 2026-10-05). Wire contract proven in capture 20261005-235203 s4: the real client sends
+    // CharacterAction RemoveFriendlyNano (0x41) with Parameter1 = SpellFunction.Upload (53019)
+    // and Parameter2 = the nano id, Identity = self, Target = None; the server answers with a
+    // BuffMessage for the same nano, which the inbound handler (Client.OnBuffMessage) already
+    // turns into the local buff-list update.
+    public void CancelNano(int nanoId)
+    {
+        Client.Send(new CharacterActionMessage
+        {
+            Action = CharacterActionType.RemoveFriendlyNano,
+            Unknown1 = 0,
+            Target = Identity.None,
+            Parameter1 = (int)SpellFunction.Upload,
+            Parameter2 = nanoId,
+            Unknown2 = 0,
+            Identity = Identity,
+        });
+    }
+
 
     internal bool SetCastState(bool state)
     {

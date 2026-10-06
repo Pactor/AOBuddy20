@@ -132,11 +132,12 @@ public sealed class BotLoop
                 // The decision chain, in descending ControlPriority: heal (800) - the stims and
                 // rechargers go in before anything else looks at its state; combat (700) and
                 // selfbuffing (600) - the brains, log-only until their families are implemented;
-                // resupply (500); MISSION (400) - the blitz run, whose Tick answers false while it
-                // waits on the sell step so the chain falls through; external buffing (300) - also
-                // a brain; selling (200). A brain family that is unselected or disabled answers
-                // false and the chain moves on. Combat is skipped while the mission run is inside a
-                // building - blitz means fight nothing there (the heal keeps working).
+                // resupply (500); EXTERNAL BUFFING (400) - the buff-up runs BEFORE a mission goes
+                // (owner, 2026-10-06: get sufficiently buffed first); MISSION (300) - the blitz
+                // run, which waits while a buff dance is in flight; selling (200). A brain family
+                // that is unselected or disabled answers false and the chain moves on. Combat is
+                // skipped while the mission run is inside a building - blitz means fight nothing
+                // there (the heal keeps working).
                 // RESUPPLY (AOBuddy10 ResupplyController): the decision tick runs here on the update
                 // thread, the same one its packet handlers fire on. While a run is active it owns
                 // the body through a MovementController goal at ControlPriority.Resupply and holds
@@ -151,21 +152,23 @@ public sealed class BotLoop
                 {
                     CurrentTask = Tasks.Combat;
                 }
-                else if (_brains.TickSelfbuff(me, deltaTime))
+                else if (!_brains.ExternalBuffBusy && _brains.TickSelfbuff(me, deltaTime))
                 {
+                    // Self-buffing is gated while an external-buff episode runs: the buff-up owns
+                    // the cast window - a selfbuff cast would collide with the dance's pet summons.
                     CurrentTask = Tasks.Selfbuff;
                 }
                 else if (_resupply.Tick(me, deltaTime))
                 {
                     CurrentTask = Tasks.Resupply;
                 }
-                else if (_missionController.Tick(me, deltaTime))
-                {
-                    CurrentTask = Tasks.Mission;
-                }
                 else if (_brains.TickExternalBuff(me, deltaTime))
                 {
                     CurrentTask = Tasks.ExternalBuff;
+                }
+                else if (_missionController.Tick(me, deltaTime))
+                {
+                    CurrentTask = Tasks.Mission;
                 }
                 else if (_sell.Tick(me, deltaTime))
                 {

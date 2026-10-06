@@ -26,6 +26,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Serilog;
+using Serilog.Events;
 using ILogger = Serilog.ILogger;
 
 namespace AOBuddy20;
@@ -65,7 +66,7 @@ internal class Program
         }
 
         Log.Logger = loggerConfiguration
-            .WriteTo.Console()
+            .WriteTo.Console(LogEventLevel.Debug)
             .WriteTo.File(logfile, rollingInterval: RollingInterval.Month)
             .WriteTo.Sink(_logRing)
             .CreateLogger();

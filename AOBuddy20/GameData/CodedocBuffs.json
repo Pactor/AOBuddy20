@@ -1,5 +1,14 @@
 {
  "_about": "Codedoc buff list (RubiKa 2019 only). Parsed from the owner's sniff marked-20260927-104345 (tell Codedoc 'help' and 'buffs 1'..'buffs 9'; E:/Funcom/sniffs/codedoc-buffs-20260927.tsv): code = what follows 'cast ' in the tell, team = listed [Team]. 'ids' = nano ids with that exact name (OmniCell itemnames.sql, type Nano); several ids = the name is shared and the bot picks at runtime the one whose cast gate names the section's profession, or leaves it out. idSource 'sniff' = the id seen landing on the wire (ct 220331 cast by Codesmp; hgvt 162583 cast by Fixyourcode); 'chewy' = client name differs, id taken from ChewysBuffs.json where the same name was resolved; 'log' = client name differs, id from the bot's AUTO-BUFF log (compmoch1h = 'Composite Mochams (1 hour)' [220337]). Empty ids = unresolved, never asked.",
+ "location": {
+  "note": "Doc's buffing bots (RubiKa2019). Owner-provided spot (2026-10-06).",
+  "playfield": 800,
+  "playfieldName": "ICC",
+  "x": 632.0,
+  "y": null,
+  "z": 724.0,
+  "botName": "Codedoc"
+ },
  "buffs": [
   {
    "code": "catt",

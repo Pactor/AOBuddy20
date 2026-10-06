@@ -12,6 +12,7 @@
 using System.IO.Compression;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
+using AOSharp.Common.GameData;
 using Serilog.Events;
 
 namespace AOBuddy20.Brains;
@@ -33,9 +34,12 @@ namespace AOBuddy20.Brains;
 ///     "OMNICELL-CONTENT", a version, the kind byte and a count, then per formula five
 ///     int32s (ID, instance, item type, type, flags), three stat dictionaries (attack,
 ///     defend, Stats), the cast actions with requirement quintuples, the effect events with
-///     their functions (arguments tagged 1=int 2=float 3=string, function record flagged),
-///     and (version 2+) the rest of the client record. Unknown versions are refused loudly -
-///     omnicell owns the format; when it moves, this reader moves with it.
+///     their functions (arguments tagged 1=int 2=float 3=string, function record flagged)
+///     - of which the pet-creation functions (SummonPet 53167 / SpawnItem 53064) are KEPT
+///     with their requirement lists as the formula's <see cref="SummonBranch" />es, the
+///     multi-tier self-scaling summons' per-template gates - and (version 2+) the rest of
+///     the client record. Unknown versions are refused loudly - omnicell owns the format;
+///     when it moves, this reader moves with it.
 ///     Loaded once before the session starts, immutable afterwards - pure reads from any
 ///     thread (the Zoning.Load posture). A missing or unreadable pack logs an error and
 ///     leaves the library EMPTY - brains asking an empty library get nothing, and the log
@@ -99,6 +103,8 @@ public static class NanoLibrary
             return;
         }
 
+        int recordIndex = 0;
+        int lastNanoId = 0;
         try
         {
             using var compressed = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -127,29 +133,48 @@ public static class NanoLibrary
             var count = reader.ReadInt32();
             var nanos = new List<NanoProfile>(count);
             var byId = new Dictionary<int, NanoProfile>(count);
+            var nanosWithSummons = 0;
+            var totalSummonBranches = 0;
 
             for (var i = 0; i < count; i++)
             {
+                recordIndex = i;
                 var id = reader.ReadInt32();
                 reader.ReadInt32(); // instance
                 reader.ReadInt32(); // item type
                 reader.ReadInt32(); // type
                 reader.ReadInt32(); // flags
+                lastNanoId = id;
 
                 ReadDictionary(reader); // attack
                 ReadDictionary(reader); // defend
                 var stats = ReadDictionary(reader);
 
                 var actions = ReadActions(reader);
-                SkipEvents(reader, version);
+
+                var summons = new List<SummonBranch>();
+                var teamCastChild = ReadEvents(reader, version, summons);
+
                 if (version >= 2)
                 {
                     SkipRecordData(reader, version);
                 }
 
-                var nano = new NanoProfile { NanoId = id, Stats = stats, Actions = actions };
+                var nano = new NanoProfile
+                {
+                    NanoId = id,
+                    Stats = stats,
+                    Actions = actions,
+                    Summons = summons,
+                    TeamCastChild = teamCastChild,
+                };
                 nanos.Add(nano);
                 byId[id] = nano;
+                if (summons.Count > 0)
+                {
+                    nanosWithSummons++;
+                    totalSummonBranches += summons.Count;
+                }
             }
 
             _nanos.Clear();
@@ -161,14 +186,16 @@ public static class NanoLibrary
             }
 
             Loaded = true;
-            log($"NANOS: {_nanos.Count} formulas from {Path.GetFileName(file)} (pack v{version}).");
+            log($"NANOS: {_nanos.Count} formulas from {Path.GetFileName(file)} (pack v{version}), " +
+                $"{totalSummonBranches} pet-summon branches on {nanosWithSummons} formulas.");
         }
         catch (Exception ex)
         {
             _nanos.Clear();
             _byId.Clear();
             Loaded = true;
-            log($"NANOS: reading {file} failed - the library stays empty. {ex.GetType().Name}: {ex.Message}");
+            log($"NANOS: reading {file} failed after {recordIndex} records (last formula {lastNanoId}) - " +
+                $"the library stays empty. {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -214,8 +241,14 @@ public static class NanoLibrary
         return actions;
     }
 
-    private static void SkipEvents(BinaryReader reader, int version)
+    /// <summary>omnicell's extended function grammar (FunctionSets.cfg "53066=1n"; OmniCell.Enums
+    /// FunctionType.cs "TeamCastNano = 53066"): the team-side child cast, one int arg - the child
+    /// formula id. The caster-side CastNano (53051) lands on the bot, never on us.</summary>
+    private const int TeamCastNano = 53066;
+
+    private static int ReadEvents(BinaryReader reader, int version, List<SummonBranch> summons)
     {
+        var teamCastChild = 0;
         var eventCount = reader.ReadInt32();
         for (var e = 0; e < eventCount; e++)
         {
@@ -223,26 +256,58 @@ public static class NanoLibrary
             var functionCount = reader.ReadInt32();
             for (var f = 0; f < functionCount; f++)
             {
-                SkipFunction(reader, version);
+                var function = ReadFunction(reader, version);
+                if (function.FunctionType == TeamCastNano && function.IntArgs.Count > 0)
+                {
+                    teamCastChild = function.IntArgs[0];
+                }
+
+                if (function.FunctionType != (int)SpellFunction.SummonPet
+                    && function.FunctionType != (int)SpellFunction.SpawnItem)
+                {
+                    continue;
+                }
+
+                summons.Add(new SummonBranch
+                {
+                    FunctionType = function.FunctionType,
+                    TemplateLevel = function.IntArgs.Count > 0 ? function.IntArgs[0] : 0,
+                    Requirements = function.Requirements,
+                    Args = function.IntArgs,
+                });
             }
         }
+
+        return teamCastChild;
     }
 
-    private static void SkipFunction(BinaryReader reader, int version)
+    private static ParsedFunction ReadFunction(BinaryReader reader, int version)
     {
-        reader.ReadInt32(); // function type
+        var function = new ParsedFunction { FunctionType = reader.ReadInt32() };
         reader.ReadInt32(); // target
         reader.ReadInt32(); // tick count
         reader.ReadInt32(); // tick interval
         reader.ReadBoolean(); // dolocalstats
-        SkipRequirements(reader);
+
+        var reqCount = reader.ReadInt32();
+        for (var r = 0; r < reqCount; r++)
+        {
+            function.Requirements.Add(new NanoRequirement
+            {
+                ChildOperator = reader.ReadInt32(),
+                Operator = reader.ReadInt32(),
+                Stat = reader.ReadInt32(),
+                Target = reader.ReadInt32(),
+                Value = reader.ReadInt32(),
+            });
+        }
 
         var argCount = reader.ReadInt32();
         for (var a = 0; a < argCount; a++)
         {
             switch (reader.ReadByte())
             {
-                case 1: reader.ReadInt32(); break;
+                case 1: function.IntArgs.Add(reader.ReadInt32()); break;
                 case 2: reader.ReadSingle(); break;
                 case 3: reader.ReadString(); break;
                 default:
@@ -259,19 +324,16 @@ public static class NanoLibrary
             SkipIntList(reader);
             SkipBytes(reader);
         }
+
+        return function;
     }
 
-    private static void SkipRequirements(BinaryReader reader)
+    /// <summary>One event function as read: the pet-creation ones become <see cref="SummonBranch" />es.</summary>
+    private sealed class ParsedFunction
     {
-        var count = reader.ReadInt32();
-        for (var i = 0; i < count; i++)
-        {
-            reader.ReadInt32(); // child operator
-            reader.ReadInt32(); // operator
-            reader.ReadInt32(); // stat
-            reader.ReadInt32(); // target
-            reader.ReadInt32(); // value
-        }
+        public int FunctionType;
+        public List<NanoRequirement> Requirements = new();
+        public List<int> IntArgs = new();
     }
 
     private static void SkipIntList(BinaryReader reader)
@@ -350,7 +412,7 @@ public static class NanoLibrary
             var bareFunctions = reader.ReadInt32();
             for (var f = 0; f < bareFunctions; f++)
             {
-                SkipFunction(reader, version);
+                ReadFunction(reader, version);
             }
         }
     }

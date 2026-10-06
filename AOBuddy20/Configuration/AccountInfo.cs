@@ -95,6 +95,15 @@ public class AccountInfo
     // highest NCU buff first (owner, 2026-10-05: it expands Max NCU so the rest fit). 4a.2 computes
     // and orders these; until then they are listed here verbatim, NCU first.
     public float BuffHandshakeSeconds = 45f; // the invite/buff window (AOBuddy10 Scotty uses 45)
+    public string BuffTellPrefix = "cast "; // prefixed to every request tell - the Codedoc sniff
+                                            // (2026-09-27) shows the wire tells as "cast <code>";
+                                            // set empty if a bot wants the bare code
+    public string ComfortMode = "weapon"; // the comfort fill's skill buffs: "weapon" = a long-term
+                                          // Weap/Nano skill buff (covers whatever is wielded),
+                                          // "nano" = the attack-nano skill (MatMet) buff instead
+    public string BuffInviteTell = ""; // told to the buff bot the moment a session opens - the
+                                       // word that makes it invite us when its auto-inviter does
+                                       // not see a clientless toon (empty = off)
 
     // Pet buff-first (4b): when ON, a pet brain that wants a better pet it cannot yet summon for lack
     // of Matter Creation / Time and Space will ask the buff bot FIRST (near it and un-teamed), then
@@ -103,6 +112,8 @@ public class AccountInfo
     // can now and logs the buff opportunity.
     public bool PetAutoBuff = false;
     public float PetBuffWaitSeconds = 60f; // after asking, wait this long for the buffs before summoning anyway
+    // (PetQoLTells removed 2026-10-06: the pets are not buffed by the buffbots - the comfort
+    // fill is self-decided now, see ComfortMode and BuffCatalog.PlanForComfort.)
 
     // Where this config was loaded from (set at load; never serialized). Save() writes the whole
     // config back here so a runtime setting change persists in the one self-contained conf file.
