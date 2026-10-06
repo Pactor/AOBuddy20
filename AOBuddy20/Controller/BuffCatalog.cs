@@ -121,13 +121,15 @@ public sealed class BuffCatalog
                 var prof = (string?)p["name"] ?? "";
                 foreach (var b in p["buffs"] ?? new JArray())
                 {
-                    if ((bool?)b["team"] == true)
+                    // Only the TEAM WRANGLES stay out (owner, 2026-10-06: "let's not use the
+                    // team wrangles - maybe they only work while in a team, and the bot kicks
+                    // us right afterwards"): the kick races the cast, the buff never lands, and
+                    // the stage's gate stays open. Everything ELSE team-flagged STAYS - the NCU
+                    // extenders ("cast ncu") and the doc heals are the dance's lifeblood, and
+                    // banning the whole team flag hid exactly them.
+                    var rowName = ((string?)b["name"] ?? "").ToLowerInvariant();
+                    if (rowName.Contains("team wrangler") || rowName.Contains("team skill wrangler"))
                     {
-                        // TEAM-cast entries never enter the list (owner, 2026-10-06: "let's not
-                        // use the team wrangles - maybe they only work while in a team, and the
-                        // bot kicks us right afterwards"): the kick races the cast, the buff
-                        // never lands, and the stage's gate stays open. Plans use self-landed
-                        // buffs only.
                         continue;
                     }
 
