@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using AOSharp.Common.GameData;
+using Newtonsoft.Json.Linq;
 
 namespace AOBuddy20.Controlling
 {
@@ -43,6 +44,41 @@ namespace AOBuddy20.Controlling
         // "Enhance DNA 2", from which we recover the line ("Enhance DNA") and rank (2). The
         // character's trained rank of a line = the highest rank whose id is present.
         private readonly Dictionary<int, KeyValuePair<string, int>> _lineByPacketId = new Dictionary<int, KeyValuePair<string, int>>();
+
+        // Expansion (AI/LE) + all perks, from perks-expansion.json (Perks.xml x items.ocp, client truth):
+        // normalized line name -> rank -> (stat id -> INCREMENT for that rank). Covers every perk that
+        // grants stat bonuses - SL, Alien and Lost-Eden alike - so it is the PRIMARY bonus source; the
+        // perks.sql tables below are the fallback for any line this does not carry.
+        private readonly Dictionary<string, SortedDictionary<int, Dictionary<int, int>>> _expansion = new();
+        public bool ExpansionLoaded => _expansion.Count > 0;
+        public int ExpansionLineCount => _expansion.Count;
+
+        /// <summary>Load perks-expansion.json (line -> rank -> statId -> increment). Stat ids map straight
+        /// to the Stat enum, so no name resolution is needed. Returns false and stays empty on any failure.</summary>
+        public bool LoadExpansion(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return false;
+                var o = JObject.Parse(File.ReadAllText(path));
+                foreach (var line in o.Properties())
+                {
+                    if (line.Value is not JObject rankObj) continue;
+                    var ranks = new SortedDictionary<int, Dictionary<int, int>>();
+                    foreach (var rk in rankObj.Properties())
+                    {
+                        if (rk.Value is not JObject statObj || !int.TryParse(rk.Name, out int rank)) continue;
+                        var d = new Dictionary<int, int>();
+                        foreach (var sv in statObj.Properties())
+                            if (int.TryParse(sv.Name, out int sid)) d[sid] = (int)sv.Value;
+                        ranks[rank] = d;
+                    }
+                    _expansion[line.Name] = ranks;
+                }
+                return _expansion.Count > 0;
+            }
+            catch { return false; }
+        }
 
         public bool PerkXmlLoaded { get; private set; }
         public int PerkXmlCount => _lineByPacketId.Count;
@@ -196,6 +232,23 @@ namespace AOBuddy20.Controlling
                 int level = 1;
                 if (colon >= 0) int.TryParse(raw.Substring(colon + 1).Trim(), out level);
                 if (level < 1) level = 1;
+
+                // PRIMARY: the expansion map (client-truth, covers SL + Alien + LE). Sum the trained
+                // steps 1..level; stat ids map straight onto the Stat enum.
+                if (_expansion.TryGetValue(Norm(namePart), out var expRanks))
+                {
+                    for (int n = 1; n <= level; n++)
+                    {
+                        if (!expRanks.TryGetValue(n, out var d)) continue;
+                        foreach (var kv in d)
+                        {
+                            var st = (Stat)kv.Key;
+                            result[st] = (result.TryGetValue(st, out int cur0) ? cur0 : 0) + kv.Value;
+                        }
+                    }
+                    applied.Add($"{namePart} x{level}");
+                    continue;
+                }
 
                 if (!_perkIdByName.TryGetValue(Norm(namePart), out int perkId))
                 {

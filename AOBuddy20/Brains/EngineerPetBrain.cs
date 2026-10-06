@@ -709,6 +709,15 @@ public sealed class EngineerPetBrain : PetBrain
 
         _lastNarrateAt = _clock;
 
+        // Skills + running buffs first, every pass - so the owner can verify MC/TS read right (perks in)
+        // and that NO castable buffs are up for the raw-skill test.
+        var mcNow0 = me.TryGetStat(Stat.MaterialCreation, out var mm0) ? mm0 : 0;
+        var tsNow0 = me.TryGetStat(Stat.SpaceTime, out var tt0) ? tt0 : 0;
+        var ncuNow0 = me.TryGetStat(Stat.MaxNCU, out var nn0) ? nn0 : 0;
+        var running = me.Buffs ?? (IReadOnlyList<Buff>)Array.Empty<Buff>();
+        var runNames = running.Count == 0 ? "NONE" : $"{running.Count} [{string.Join(", ", running.Select(b => NanoLibrary.NameOf(b.Id)))}]";
+        _logger.LogInformation($"PET DRYRUN: skills now - MC {mcNow0}, TS {tsNow0}, MaxNCU {ncuNow0}. Running buffs: {runNames}.");
+
         var crystals = new List<NanoItem>();
 
         void Consider(Item it)

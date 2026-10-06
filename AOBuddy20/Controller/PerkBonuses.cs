@@ -59,15 +59,18 @@ public sealed class PerkBonuses
             var xmlPath = Path.Combine(_baseDir, "GameData", "Perks.xml");
             var sqlOk = _perkData.Load(sqlPath);
             var xmlOk = _perkData.LoadPerkXml(xmlPath);
+            var expOk = _perkData.LoadExpansion(Path.Combine(_baseDir, "GameData", "perks-expansion.json"));
 
-            if (!sqlOk)
+            if (!xmlOk && !sqlOk)
             {
-                _diag = $"perks.sql not loaded ({sqlPath}) - perk bonuses OFF";
+                _diag = $"neither Perks.xml nor perks.sql loaded ({_baseDir}GameData) - perk bonuses OFF";
                 _logger.LogWarning($"PERKS: {_diag}");
                 return;
             }
 
-            _diag = $"perks.sql {_perkData.PerkCount} perks, Perks.xml {(xmlOk ? _perkData.PerkXmlCount + " ids" : "FAIL - auto-detect OFF")}. " +
+            _diag = $"perks.sql {(sqlOk ? _perkData.PerkCount + " SL perks" : "FAIL")}, " +
+                    $"perks-expansion.json {(expOk ? _perkData.ExpansionLineCount + " bonus lines (SL+Alien+LE)" : "FAIL")}, " +
+                    $"Perks.xml {(xmlOk ? _perkData.PerkXmlCount + " ids" : "FAIL - auto-detect OFF")}. " +
                     "Auto-detecting trained perks from the wire at login.";
             _logger.LogInformation($"PERKS: {_diag}");
         }
