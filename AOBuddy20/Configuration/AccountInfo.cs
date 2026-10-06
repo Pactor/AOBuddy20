@@ -115,6 +115,11 @@ public class AccountInfo
     public bool PetAutoBuff = false;
     public float PetBuffWaitSeconds = 60f; // after asking, wait this long for the buffs before summoning anyway
 
+    // Include the short summon-moment Skill Wrangler in a buff acquisition. OFF (default) gets only the
+    // DURABLE stack (NCU + Mocham's + Composites) so the run is repeatable and the resulting skills are the
+    // durable hold, not a wrangle peak; flip ON once the durable flow is proven and we want to actually summon.
+    public bool BuffIncludeWrangle = false;
+
     // DRY RUN (owner's first-run safety): when ON, the pet brain performs NO actions - no summon, no
     // buff request, no learning a crystal, no casting anything. It only LOOKS: scans the bags for a
     // pet-summon nano crystal and narrates, step by step, what it found and what it WOULD do (the pet it

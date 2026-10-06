@@ -79,8 +79,7 @@ public sealed class EngineerPetBrain : PetBrain
     private double _lastNoCastWarnAt = double.NegativeInfinity;
     private double _lastNarrateAt = double.NegativeInfinity;
     private double _lastWalkLogAt = double.NegativeInfinity;
-    private bool _dryTravelPlanned; // dry run: have we set the walk-to-the-buff-spot goal this trip?
-    private bool _dryArrived;       // dry run: are we standing at the buff spot (narrate from here)?
+    private bool _dryArrived; // dry run: are we standing at the buff spot (narrate from here)?
     private const int SummonTriesWarn = 4;
     private const double StuckWarnEverySec = 30.0;
 
@@ -612,8 +611,12 @@ public sealed class EngineerPetBrain : PetBrain
             return true;
         }
 
-        var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).Select(a => a.Tell).ToList();
-        if (tells.Count == 0)
+        // The bot steps to acquire = the routed bot actions, minus the short wrangle unless enabled (the
+        // durable set is requested first; the wrangle is a summon-moment prop added only when summoning).
+        var botSteps = actions
+            .Where(a => a.Source == BuffCatalog.BuffSource.BuffBot && (_config.BuffIncludeWrangle || !a.IsWrangleStep))
+            .ToList();
+        if (botSteps.Count == 0)
         {
             return false; // nothing left to request - act now
         }
@@ -625,10 +628,10 @@ public sealed class EngineerPetBrain : PetBrain
 
         if (_clock - _buffAskedAt >= BuffRetrySec)
         {
-            if (_buffBot.RequestBuffs(tells, askReason))
+            if (_buffBot.RequestBuffs(botSteps, askReason))
             {
                 _buffAskedAt = _clock;
-                _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] {askDetail}.");
+                _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] {askDetail}.");
                 return true;
             }
 
@@ -725,16 +728,18 @@ public sealed class EngineerPetBrain : PetBrain
             return true;
         }
 
-        var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).Select(a => a.Tell).ToList();
-        if (tells.Count == 0 || _buffBot.Active || _clock - _buffAskedAt < BuffRetrySec)
+        var botSteps = actions
+            .Where(a => a.Source == BuffCatalog.BuffSource.BuffBot && (_config.BuffIncludeWrangle || !a.IsWrangleStep))
+            .ToList();
+        if (botSteps.Count == 0 || _buffBot.Active || _clock - _buffAskedAt < BuffRetrySec)
         {
             return _buffBot.Active; // waiting on a running session counts as acted
         }
 
-        if (_buffBot.RequestBuffs(tells, why))
+        if (_buffBot.RequestBuffs(botSteps, why))
         {
             _buffAskedAt = _clock;
-            _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", tells)}] - {why}.");
+            _logger.LogInformation($"PET: asking {_config.BuffBotName} for [{string.Join(" ", botSteps.Select(a => a.Tell))}] - {why}.");
             return true;
         }
 
@@ -908,25 +913,29 @@ public sealed class EngineerPetBrain : PetBrain
         // No spot to walk to (travel-to-spot off / unset) -> AtSpot() is true -> narrate in place, as before.
         if (!_buffBot.AtSpot())
         {
-            if (!_dryTravelPlanned)
+            _dryArrived = false;
+
+            // (Re)issue the walk whenever no travel goal is in flight. This SELF-HEALS the login race: the
+            // first attempt can land before we are on the ground, when PlanTravel has nothing to plan yet
+            // (it returns "not in a playfield" and sets no goal) - so we must keep trying until a goal
+            // actually takes, rather than latching after one failed attempt.
+            if (!_buffBot.TravelGoalActive())
             {
-                _dryTravelPlanned = true;
-                var line = _buffBot.BeginTravelToSpot();
-                _logger.LogInformation($"PET DRYRUN: walking to the buff spot first - {line ?? "no spot configured"}.");
+                _buffBot.BeginTravelToSpot();
             }
 
             if (_clock - _lastWalkLogAt >= 20.0)
             {
                 _lastWalkLogAt = _clock;
                 _logger.LogInformation(
-                    $"PET DRYRUN: en route ({_buffBot.SpotStatus()}) - I will narrate the plan once I'm standing at the bot.");
+                    $"PET DRYRUN: walking to the buff spot ({_buffBot.SpotStatus()}) - I will narrate the plan once I'm standing at the bot.");
             }
 
             return; // don't narrate until we're at the buffer
         }
 
         // Arrived (or nothing to walk to): drop the travel goal once, announce, then narrate from here.
-        if (_dryTravelPlanned && !_dryArrived)
+        if (!_dryArrived)
         {
             _dryArrived = true;
             _buffBot.ClearTravelToSpot();
@@ -1111,26 +1120,61 @@ public sealed class EngineerPetBrain : PetBrain
         if (plan.CanControl)
         {
             var learned = me.SpellList ?? Array.Empty<int>();
-            var actions = _catalog.RoutePlan(plan, "Engineer", _config.BuffBotName ?? "", learned.Contains, StableStrains(me));
-            var getList = actions.Where(a => a.Source != BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
-            var blocked = actions.Where(a => a.Source == BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
-            _logger.LogInformation("PET DRYRUN: get: " + (getList.Count > 0 ? string.Join(", ", getList) : "nothing to add"));
-            if (blocked.Count > 0)
+
+            // Resolve the buff bot's NAME for the trace: the configured one, else the dimension's default
+            // (Codedoc on RubiKa2019, Chewy on RubiKa) so the tells show even before BuffBotName is set -
+            // the "cast <code>" tell is a property of the buff + dimension, not of the toon's name.
+            var botName = !string.IsNullOrWhiteSpace(_config.BuffBotName)
+                ? _config.BuffBotName
+                : _buffBot.SpotForDimension()?.Label ?? "the buff bot";
+
+            var actions = _catalog.RoutePlan(plan, "Engineer", botName, learned.Contains, StableStrains(me));
+            var tells = actions.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).ToList();
+            var selfCast = actions.Where(a => a.Source == BuffCatalog.BuffSource.SelfCast).Select(a => a.Name).ToList();
+            var cantGet = actions.Where(a => a.Source == BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
+
+            // THE TELLS, in the order he would send them. The NCU buff is FIRST and is TEAM-cast: he sends
+            // that one tell, accepts the invite, waits for it to LAND (Max NCU expands, e.g. ->208) and the
+            // auto-disband - and sends NOTHING else until it is up, because the rest only fit the bigger NCU.
+            var ncuTell = plan.Ncu?.Tell;
+            _logger.LogInformation($"PET DRYRUN: tells I'd send '{botName}' ({tells.Count}, in order):");
+            if (tells.Count == 0)
             {
-                _logger.LogInformation("PET DRYRUN: blocked (no bot/not learned): " + string.Join(", ", blocked));
+                _logger.LogInformation("PET DRYRUN:   (none route to the bot)");
+            }
+
+            for (var i = 0; i < tells.Count; i++)
+            {
+                var a = tells[i];
+                var isNcuGate = !string.IsNullOrEmpty(ncuTell) && a.Tell == ncuTell;
+                var kind = a.NeedsTeam ? "team: accept invite, they auto-disband" : "self: direct cast, no team";
+                var gate = isNcuGate
+                    ? "  <= SEND FIRST; wait for it to LAND before any other tell (it expands Max NCU)"
+                    : (i > 0 && !string.IsNullOrEmpty(ncuTell) ? "  (only after the NCU buff is up)" : "");
+                _logger.LogInformation($"PET DRYRUN:   {i + 1}. /tell {botName} {BuffBotController.WireTell(a.Tell)}   [{kind}] - {a.Name}{gate}");
+            }
+
+            if (selfCast.Count > 0)
+            {
+                _logger.LogInformation("PET DRYRUN: self-cast (no tell): " + string.Join(", ", selfCast));
+            }
+
+            if (cantGet.Count > 0)
+            {
+                _logger.LogInformation($"PET DRYRUN: not in {botName}'s menu / not learned: " + string.Join(", ", cantGet));
             }
 
             // Survival once the wrangle lapses: what I can actually request into the real free NCU.
             var durableCtrlNcu = plan.Steps.Where(s => !s.Wrangle).Sum(s => s.Ncu);
             var survivalFree = Math.Max(0, plan.MaxNcu - durableCtrlNcu);
-            var survival = _catalog.SurvivalFill(me, survivalFree, paid, "Engineer", _config.BuffBotName ?? "",
+            var survival = _catalog.SurvivalFill(me, survivalFree, paid, "Engineer", botName,
                 learned.Contains, StableStrains(me));
-            var sGet = survival.Where(a => a.Source != BuffCatalog.BuffSource.Unavailable).Select(a => a.Name).ToList();
-            _logger.LogInformation($"PET DRYRUN: survival (~{survivalFree} NCU free): " +
-                (sGet.Count > 0 ? string.Join(", ", sGet) : "none I can get yet"));
+            var sTells = survival.Where(a => a.Source == BuffCatalog.BuffSource.BuffBot).ToList();
+            _logger.LogInformation($"PET DRYRUN: survival tells (~{survivalFree} NCU free, after the pet is up): " +
+                (sTells.Count > 0 ? string.Join(", ", sTells.Select(a => $"/tell {botName} {BuffBotController.WireTell(a.Tell)} ({a.Name})")) : "none I can get yet"));
 
             _logger.LogInformation(
-                "PET DRYRUN: => learn crystal, summon it, request survival -> then WAITING (ready for team-buddy/mission).");
+                "PET DRYRUN: => NCU tell -> wait for land -> the rest -> wrangle -> learn+summon -> survival -> WAITING.");
         }
 
         _logger.LogInformation("PET DRYRUN: no action (dry run).");

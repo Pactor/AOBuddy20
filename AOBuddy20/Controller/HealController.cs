@@ -307,6 +307,16 @@ public sealed class HealController
             return _holding;
         }
 
+        // A CAST IN FLIGHT finishes first: a nano program takes time and SITTING ABORTS IT ("Nano program
+        // aborted"). Our own heal cast is handled above (_ourCastInFlight); any other cast here is a pet
+        // summon, a crystal upload, or a self-buff - all of which must complete before we drop to recharge,
+        // or they loop forever (owner, 2026-10-06: the recharger sit was aborting the pet summon every pass).
+        // The nano the cast is spending is recovered by the recharger AFTER it lands.
+        if (me.IsCasting)
+        {
+            return false;
+        }
+
         if (!_movement.Standing || _restCooldownLeft > 0)
         {
             return false; // a stand-up is in flight (the login one, say) or a rest just ended: no sit races it

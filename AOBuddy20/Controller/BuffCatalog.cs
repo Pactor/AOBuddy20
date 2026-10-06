@@ -731,11 +731,14 @@ public sealed class BuffCatalog
         public int SelfCastNanoId; // when Source == SelfCast
         public string BotName = ""; // when Source == BuffBot
         public string Tell = ""; // when Source == BuffBot
+        public bool NeedsTeam; // when Source == BuffBot: team-cast (accept the invite, they auto-disband) vs single-target (direct cast, no team)
+        public int[] LandIds = Array.Empty<int>(); // the landed nano id(s): "we have it" = any of these is running on us
+        public bool IsWrangleStep; // the short summon-moment wrangle - excluded from a durable acquisition run
 
         public string Describe => Source switch
         {
             BuffSource.SelfCast => $"self-cast {Name} (nano {SelfCastNanoId})",
-            BuffSource.BuffBot => $"tell {BotName} \"{Tell}\" for {Name}",
+            BuffSource.BuffBot => $"tell {BotName} \"{Tell}\" for {Name}" + (NeedsTeam ? " [team]" : " [self]"),
             _ => $"{Name} UNAVAILABLE (not learned, no bot)",
         };
     }
@@ -751,6 +754,9 @@ public sealed class BuffCatalog
         var nanoId = b.NanoId ?? (b.LandIds.Count > 0 ? b.LandIds[0] : 0);
         var action = new BuffAction { Name = b.Name, Ncu = b.Ncu };
 
+        action.LandIds = b.LandIds.Count > 0 ? b.LandIds.ToArray() : (nanoId != 0 ? new[] { nanoId } : Array.Empty<int>());
+        action.IsWrangleStep = IsWrangle(b);
+
         if (b.SelfCastableBy(myProfession) && nanoId != 0 && isLearned(nanoId))
         {
             action.Source = BuffSource.SelfCast;
@@ -765,6 +771,7 @@ public sealed class BuffCatalog
             action.Source = BuffSource.BuffBot;
             action.BotName = botName;
             action.Tell = b.Tell;
+            action.NeedsTeam = b.NeedsTeam;
             return action;
         }
 
@@ -806,7 +813,8 @@ public sealed class BuffCatalog
             actions.Add(new BuffAction
             {
                 Source = BuffSource.BuffBot, Name = $"+{plan.Ncu.MaxNcuAdded} Max NCU",
-                BotName = botName, Tell = plan.Ncu.Tell,
+                BotName = botName, Tell = plan.Ncu.Tell, NeedsTeam = plan.Ncu.NeedsTeam,
+                LandIds = plan.Ncu.LandId != 0 ? new[] { plan.Ncu.LandId } : Array.Empty<int>(),
             });
         }
 
