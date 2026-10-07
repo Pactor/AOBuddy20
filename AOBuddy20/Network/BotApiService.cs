@@ -167,10 +167,15 @@ public sealed class BotApiService
             o["casting"] = me.IsCasting;
             o["inCombat"] = me.IsAttacking || _awareness.OnBotCount > 0;
 
+            // Stat.XP is the TOTAL XP: the table's cumulative sums turn it into the way into the
+            // next level ("total" rides along so the monitor can rate xp/s across dings)
+            var xpTotal = me.TryGetStat(Stat.XP, out var xp) ? xp : -1L;
             o["xp"] = new JObject
             {
                 ["level"] = level,
-                ["total"] = me.TryGetStat(Stat.XP, out var xp) ? xp : -1L,
+                ["total"] = xpTotal,
+                ["into"] = XpTable.IntoLevel(level, xpTotal),
+                ["pctNext"] = XpTable.PercentToNext(level, xpTotal),
             };
 
             var pets = new JArray();

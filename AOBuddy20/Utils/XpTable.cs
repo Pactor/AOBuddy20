@@ -1,0 +1,85 @@
+// ---------------------------------------------------------------------------------------
+// Solution: AOBuddy20
+// Project: AOBuddy20
+// Filename: XpTable.cs
+//
+// Last modified: 2026-10-07
+// Created:       2026-10-07 (ported from AOBuddy10 XpTable.cs, the /status xp wire format)
+//
+// Long live OmniCell and AOBuddy
+// ---------------------------------------------------------------------------------------
+
+namespace AOBuddy20.Utils;
+
+/// <summary>
+///     XP required to advance through each level (1-200), transcribed from
+///     wiki.aodb.us/wiki/Level_Parameters (Helpbot's in-game data; the wiki page ends at
+///     level 149, 150-200 came from the OmniCell XPTable - see AOBuddy10's XP-TABLES.md).
+///     Stat.XP (0x34) is the character's TOTAL XP (observed live, 2026-09-26 - it is NOT
+///     the progress inside the current level), so the way through the current level is
+///     (XP - Sum(table[1..level-1])) / table[level]. Two rows disagree between the wiki and
+///     OmniCell (57: 161,900 vs 159,100; 133: 6,474,500 vs 6,476,500); these carry the
+///     wiki values - the live server's NextXP (0x15E) settles it.
+/// </summary>
+internal static class XpTable
+{
+    // Index = level, value = XP needed to get through that level. Row comments
+    // give the level range on that line.
+    private static readonly int[] XpPerLevel =
+    {
+        0,                                                                  // 0 (unused)
+        1450,    2600,    3100,    4000,    4500,    5000,    5500,    6000,    6500,    7000,    // 1-10
+        7700,    8300,    8900,    9600,    10400,   11000,   11900,   12700,   13700,   15400,   // 11-20
+        16400,   17600,   18800,   20100,   21500,   22900,   24500,   26100,   27800,   30900,   // 21-30
+        33000,   35100,   37400,   39900,   42400,   45100,   47900,   50900,   54000,   57400,   // 31-40
+        60900,   64500,   68400,   76400,   81000,   85900,   91000,   96400,   101900,  108000,  // 41-50
+        114300,  120800,  127700,  135000,  142600,  150700,  161900,  167800,  177100,  203500,  // 51-60
+        214700,  226700,  239100,  251900,  265700,  280000,  294800,  310600,  327000,  344400,  // 61-70
+        362300,  381100,  401000,  421600,  443300,  508100,  534200,  561600,  590200,  620000,  // 71-80
+        651000,  683700,  717900,  753500,  790800,  829400,  870000,  912600,  956800,  1003000, // 81-90
+        1051300, 1101500, 1153900, 1208800, 1266000, 1325500, 1387700, 1452300, 1519900, 1590300, // 91-100
+        1663500, 1739900, 1819600, 1902200, 1988900, 2078600, 2172100, 2269800, 2371100, 2476600, // 101-110
+        2586600, 2701000, 2819800, 2943600, 3072400, 3205800,  3345200, 3489700, 3640200, 3796500, // 111-120
+        3958900, 4128000, 4303400, 4485700, 4674800, 4871700, 5075700, 5288100, 5508200, 5736800, // 121-130
+        5974600, 6220700, 6474500, 6742200, 7017500, 7303700, 7600100, 7907600, 8227000, 8557700, // 131-140
+        8901000, 9256800, 9625800, 10008600, 10405300, 10816600, 11242500, 11684300, 12141900,     // 141-149
+        12616200, 13107200, 13816100, 14143600, 14689700, 15255300, 15841000, 16447900, 17075800,
+        17725900, 18399400, 19096100, 19817500, 20564100, 21336600, 22136100, 22963600, 23819700,
+        24705200, 25621100, 26569000, 27548800, 28562900, 29611100, 30695300, 31816300, 32975100,
+        34173500, 35412500, 36692500, 38016500, 39384400, 40797700, 42258500, 43768300, 45328100,
+        46939900, 48604900, 50324600, 52101200, 53936300, 55831600, 57788700, 59810000, 61897000,
+        64052200, 66277200, 68574400, 70945700, 73393900, 75920900
+    };
+
+    // TotalThrough[L] = Sum(table[1..L]) - the TOTAL XP a character has after getting THROUGH level L.
+    // Arrival at level L means TotalThrough[L-1] is already behind them; table[L] is what level L costs.
+    private static readonly long[] TotalThrough = BuildTotals();
+
+    private static long[] BuildTotals()
+    {
+        var t = new long[XpPerLevel.Length];
+        for (int i = 1; i < XpPerLevel.Length; i++) t[i] = t[i - 1] + XpPerLevel[i];
+        return t;
+    }
+
+    /// <summary>XP inside the current level, from the character's TOTAL XP; -1 outside the table.</summary>
+    internal static int IntoLevel(int level, long totalXp)
+    {
+        if (level < 1 || level >= XpPerLevel.Length) return -1;
+        long into = totalXp - TotalThrough[level - 1];
+        return into < 0 ? 0 : (into > int.MaxValue ? int.MaxValue : (int)into);
+    }
+
+    /// <summary>
+    ///     How far through the given level the character is, as a whole percent (0-100), computed
+    ///     from the TOTAL XP: (XP - Sum(table[1..level-1])) of table[level] - at level 1 that is
+    ///     simply XP of 1450, the way to level 2. -1 when the level is outside the table.
+    /// </summary>
+    internal static int PercentToNext(int level, long totalXp)
+    {
+        if (level < 1 || level >= XpPerLevel.Length) return -1;
+        long into = totalXp - TotalThrough[level - 1];
+        int pct = (int)(into * 100 / XpPerLevel[level]);
+        return Math.Max(0, Math.Min(100, pct));
+    }
+}
