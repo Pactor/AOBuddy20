@@ -85,6 +85,7 @@ public class PetFirstBuffCycle
     private const double NcuWaitSec = 90.0, PetWaitSec = 30.0;
     private const double WaitLogEverySec = 30.0; // progress line cadence while a line waits for its stack
     private const double AskSettleSec = 0.5; // after the LAST landing registers: the 500ms beat before the summon
+    private const double PreCastWaitSec = 0.5; // one more beat right before the summon: the server applies the last buff's stats
     private const double CastRetrySec = 1.0; // a refused cast never sets IsCasting - pace the retries
 
     // Expansion flag bits (Stat.Expansion): 2 = Shadowlands (PetBrain.IsPaid), 8 = Lost Eden.
@@ -559,12 +560,25 @@ public class PetFirstBuffCycle
                             $"PETCYCLE: the old {_line.Label} pet did not confirm termination in {RosterTimeoutSec:0}s - casting anyway.");
                     }
 
-                    Cast(me); // into WaitPet (the slot is free)
+                    _phase = Phase.Cast;
+                    _phaseAt = _c._t;
                     return false;
                 }
 
                 case Phase.Cast:
-                    return false; // Update never runs here - Cast() advanced straight to WaitPet
+                {
+                    // THE FINAL BEAT (owner, 2026-10-07): 500ms more before the summon - the
+                    // client can already see the last buff running while the server is still
+                    // applying it, and a pet summoned in that gap resolves a tier low
+                    // (107 instead of 131).
+                    if (_c._t - _phaseAt < PreCastWaitSec)
+                    {
+                        return false;
+                    }
+
+                    Cast(me); // into WaitPet
+                    return false;
+                }
 
                 case Phase.WaitPet:
                 default:
