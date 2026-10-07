@@ -1254,63 +1254,6 @@
      "tell": "131"
     },
     {
-     "name": "Team Skill Wrangler (Premium)",
-     "effect": "+131 Weap/Nano skills",
-     "ncu": 58,
-     "team": true,
-     "id": 121320,
-     "landIds": [
-      121215
-     ],
-     "note": "the team-cast child 121215 is what lands on the receiver (the CastNano child 121232 is the caster's)",
-     "tell": "132"
-    },
-    {
-     "name": "Umbral Wrangler (Premium)",
-     "effect": "Umbral 153",
-     "ncu": 0,
-     "team": true,
-     "id": 235291,
-     "landIds": [
-      235064,
-      235263,
-      235264,
-      235265
-     ],
-     "tell": "umb1",
-     "note": "landIds: the nanos that actually land on the receiver (the cast nano 235291 team-casts these four); the receiver's level gate (Level >= 205; the landed nanos store 204 and GreaterThan is strict) lives on THEM, so check them, not the cast nano"
-    },
-    {
-     "name": "Umbral Wrangler (Exceptional)",
-     "effect": "Umbral 146",
-     "ncu": 0,
-     "team": true,
-     "id": 235289,
-     "landIds": [
-      235063,
-      235260,
-      235261,
-      235262
-     ],
-     "tell": "umb2",
-     "note": "receiver's level gate (Level >= 195) lives on the landed nanos, see Umbral Wrangler (Premium)"
-    },
-    {
-     "name": "Umbral Wrangler (Greater)",
-     "effect": "Umbral 138",
-     "ncu": 0,
-     "team": true,
-     "id": 235287,
-     "landIds": [
-      235062,
-      235257,
-      235258,
-      235259
-     ],
-     "tell": "umb3",
-     "note": "receiver's level gate (Level >= 185) lives on the landed nanos, see Umbral Wrangler (Premium)"
-    },
-    {
      "name": "Skill Wrangler (Advanced)",
      "effect": "+74 Weap/Nano skills",
      "ncu": 35,
