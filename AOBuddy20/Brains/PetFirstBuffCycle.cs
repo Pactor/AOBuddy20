@@ -90,7 +90,7 @@ public class PetFirstBuffCycle
     // stats AT the cast. The pet's own requirement per stat = min(formula gate, cast-time stat)
     // - fixed formulas are gate-bound, self-scaling ones are bound by the stats they were cast
     // with - and the floor phase lifts 80% of THAT (the obedience floor).
-    private readonly Dictionary<PetType, Dictionary<int, int>> _petReqByRole = new Dictionary<PetType, Dictionary<int, int>>();
+    private readonly Dictionary<PetType, Dictionary<int, int>> _petFloorByRole = new Dictionary<PetType, Dictionary<int, int>>();
 
     private readonly List<IStep> _steps;
 
@@ -249,18 +249,12 @@ public class PetFirstBuffCycle
 
     internal void RecordSnapshot(PetType role, int formulaId, LocalPlayer me)
     {
-        var reqs = new Dictionary<int, int>();
-        foreach (var kv in BuffCatalog.CasterSkillReqs(formulaId))
-        {
-            me.TryGetStat((Stat)kv.Key, out var cur);
-            reqs[kv.Key] = Math.Min(kv.Value, cur);
-        }
-
-        _petReqByRole[role] = reqs;
-        _logger.LogInformation($"PETCYCLE: {role} snapshot - pet requirements: " +
-                               (reqs.Count > 0
-                                   ? string.Join(", ", reqs.Select(r => $"{(Stat)r.Key} {r.Value}"))
-                                   : "(no skill gates)") +
+        var floors = BuffCatalog.PetFloor(formulaId, me);
+        _petFloorByRole[role] = floors;
+        _logger.LogInformation($"PETCYCLE: {role} floor snapshot - " +
+                               (floors.Count > 0
+                                   ? string.Join(", ", floors.Select(r => $"{(Stat)r.Key} {r.Value}"))
+                                   : "(no skill-gated variants)") +
                                ".");
     }
 
@@ -1291,14 +1285,14 @@ public class PetFirstBuffCycle
         {
             var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
 
-            // the aggregated 80% floor per stat across all lines' snapshots
+            // the aggregated floor per stat across all lines' snapshots (the snapshots ARE the
+            // floors: 0.8 of the selected pet variant's thresholds)
             var floors = new Dictionary<int, int>();
-            foreach (var (_, reqs) in _c._petReqByRole)
+            foreach (var (_, lineFloors) in _c._petFloorByRole)
             {
-                foreach (var kv in reqs)
+                foreach (var kv in lineFloors)
                 {
-                    var floor = (int)Math.Ceiling(0.80 * kv.Value);
-                    floors[kv.Key] = Math.Max(floors.TryGetValue(kv.Key, out var had) ? had : 0, floor);
+                    floors[kv.Key] = Math.Max(floors.TryGetValue(kv.Key, out var had) ? had : 0, kv.Value);
                 }
             }
 
@@ -1457,7 +1451,7 @@ public class PetFirstBuffCycle
             var missing = _comfort.Where(b => !Landed(me, b)).ToList();
             if (missing.Count == 0)
             {
-                var roles = string.Join(", ", _c._petReqByRole.Keys.Select(r => r.ToString()));
+                var roles = string.Join(", ", _c._petFloorByRole.Keys.Select(r => r.ToString()));
                 _c._logger.LogInformation(
                     $"PETCYCLE: floor + comfort complete - pets out ({roles}), the floor set is in, comfort landed.");
                 return true;

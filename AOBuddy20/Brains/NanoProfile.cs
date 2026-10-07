@@ -49,6 +49,16 @@ public sealed class NanoProfile
     public IReadOnlyList<(int Func, int NanoId)> Casts = Array.Empty<(int, int)>();
 
     /// <summary>
+    ///     The formula's SummonPet calls (function 53167), one per pet VARIANT the formula can
+    ///     produce: the template is in Args[1] and each call carries its own requirement leaves -
+    ///     the TS/MC THRESHOLDS that select the variant (owner, 2026-10-07: "if you have >=692
+    ///     TS/MC the highest one"). The highest variant whose thresholds the caster's stats meet
+    ///     at cast time is the pet they get - and 80% of ITS thresholds is the obedience floor.
+    ///     Calls without skill-gate leaves (op 93 chains) are template-fixed fallbacks.
+    /// </summary>
+    public IReadOnlyList<NanoSummonPet> SummonPets = Array.Empty<NanoSummonPet>();
+
+    /// <summary>
     ///     True when this formula has a direct effect function targeting the cast TARGET (Target == 3), i.e.
     ///     a STANDALONE buff a bot can land on another character (single-target-on-others). Self-only
     ///     standalone buffs carry only User(1)/Wearer(2) effect targets. Not set by the cast functions above
@@ -78,4 +88,12 @@ public sealed class NanoRequirement
     public int Stat;
     public int Target;
     public int Value;
+}
+
+/// <summary>One SummonPet call of a formula: the template arguments and the requirement leaves
+/// that select this variant (the TS/MC thresholds).</summary>
+public sealed class NanoSummonPet
+{
+    public IReadOnlyList<int> Args = Array.Empty<int>();
+    public IReadOnlyList<NanoRequirement> Requirements = Array.Empty<NanoRequirement>();
 }

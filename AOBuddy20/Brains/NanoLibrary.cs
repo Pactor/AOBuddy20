@@ -151,6 +151,9 @@ public static class NanoLibrary
                 {
                     NanoId = id, Stats = stats, Actions = actions, Modifies = events.Modifies,
                     Casts = events.Casts, TargetsOthers = events.TargetsOthers,
+                    SummonPets = events.SummonPets
+                        .Select(sp => new NanoSummonPet { Args = sp.Args, Requirements = sp.Reqs })
+                        .ToList(),
                 };
                 nanos.Add(nano);
                 byId[id] = nano;
@@ -222,16 +225,19 @@ public static class NanoLibrary
     private const int FuncCastNano = 53051;    // casts another nano ON SELF (arg0 = nano id) - self-only delivery
     private const int FuncTeamCastNano = 53066; // casts another nano on the whole TEAM (arg0 = nano id) - needs team
     private const int FuncAreaCastNano = 53087; // casts another nano on others in an area (arg0 = nano id) - no team
+    private const int FuncSummonPet = 53167;   // summons a pet VARIANT (args carry the template; reqs the thresholds)
     private const int TargetOnTargetChar = 3;   // effect Target: the cast TARGET (another character) vs User(1)/Wearer(2)=self
 
     // What ReadEvents captures from a formula's effect functions: the flat ModifyStat buffs, the nanos it
     // casts (with their cast-function type, the self-vs-team-vs-area delivery signal), and whether it has a
     // direct effect on the cast TARGET (a standalone single-target-on-others buff). AOBuddy10's method -
-    // delivery, not the landed nano's own effect targets, decides self-vs-others.
+    // delivery, not the landed nano's own effect targets, decides self-vs-others. SummonPet calls are
+    // captured with their requirement leaves - the per-variant THRESHOLDS the floor math reads.
     private sealed class EventData
     {
         public readonly Dictionary<int, int> Modifies = new();
         public readonly List<(int Func, int NanoId)> Casts = new();
+        public readonly List<(IReadOnlyList<int> Args, IReadOnlyList<NanoRequirement> Reqs)> SummonPets = new();
         public bool TargetsOthers;
     }
 
@@ -264,7 +270,7 @@ public static class NanoLibrary
         reader.ReadInt32(); // tick count
         reader.ReadInt32(); // tick interval
         reader.ReadBoolean(); // dolocalstats
-        SkipRequirements(reader);
+        var reqs = ReadRequirements(reader);
 
         var argCount = reader.ReadInt32();
         var ints = new List<int>(2);
@@ -291,6 +297,12 @@ public static class NanoLibrary
                 {
                     capture.Casts.Add((functionType, ints[0]));
                 }
+            }
+            else if (functionType == FuncSummonPet)
+            {
+                // A pet-variant call: the template in the args, the selecting THRESHOLDS in the
+                // requirement leaves (TS/MC GreaterThan gates - the floor math reads them).
+                capture.SummonPets.Add((ints, reqs));
             }
             else
             {
@@ -320,17 +332,23 @@ public static class NanoLibrary
         }
     }
 
-    private static void SkipRequirements(BinaryReader reader)
+    private static List<NanoRequirement> ReadRequirements(BinaryReader reader)
     {
         var count = reader.ReadInt32();
+        var reqs = new List<NanoRequirement>(count);
         for (var i = 0; i < count; i++)
         {
-            reader.ReadInt32(); // child operator
-            reader.ReadInt32(); // operator
-            reader.ReadInt32(); // stat
-            reader.ReadInt32(); // target
-            reader.ReadInt32(); // value
+            reqs.Add(new NanoRequirement
+            {
+                ChildOperator = reader.ReadInt32(),
+                Operator = reader.ReadInt32(),
+                Stat = reader.ReadInt32(),
+                Target = reader.ReadInt32(),
+                Value = reader.ReadInt32(),
+            });
         }
+
+        return reqs;
     }
 
     private static void SkipIntList(BinaryReader reader)

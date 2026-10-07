@@ -1088,6 +1088,71 @@ public sealed class BuffCatalog
     public static bool IsWrangleBuff(BuffEntry b) => IsWrangle(b);
 
     /// <summary>
+    ///     THE PET FLOOR (owner, 2026-10-07): the obedience floor per stat for a pet formula,
+    ///     from the SummonPet variant thresholds in the pack. The caster's stats at cast time
+    ///     select the HIGHEST variant whose thresholds they all meet (e.g. Frenzy: 531/566/602/
+    ///     638/675/691 - "if you have >=692 TS/MC the highest one"); the formula's USE requirement
+    ///     is the bottom variant and is never left out. The floor = 0.8 of the selected variant's
+    ///     thresholds - the pet obeys while the caster keeps that much.
+    /// </summary>
+    public static Dictionary<int, int> PetFloor(int nanoId, LocalPlayer me)
+    {
+        var floor = new Dictionary<int, int>();
+        var nano = NanoLibrary.Find(nanoId);
+        if (nano == null || me == null)
+        {
+            return floor;
+        }
+
+        // the variants: per SummonPet call, stat -> the biggest GreaterThan skill threshold on it
+        var variants = new List<Dictionary<int, int>>();
+        foreach (var call in nano.SummonPets ?? Array.Empty<NanoSummonPet>())
+        {
+            var v = new Dictionary<int, int>();
+            foreach (var req in call.Requirements ?? Array.Empty<NanoRequirement>())
+            {
+                if (req.Operator == OpGreaterThan && req.Target != TargetReceiver && NanoSkillStats.Contains(req.Stat))
+                {
+                    v[req.Stat] = Math.Max(v.TryGetValue(req.Stat, out var had) ? had : 0, req.Value);
+                }
+            }
+
+            if (v.Count > 0)
+            {
+                variants.Add(v);
+            }
+        }
+
+        // the bottom variant: the USE requirement - a cast formula always satisfies it at cast
+        var selected = CasterSkillReqs(nanoId);
+        var selectedLevel = selected.Count > 0 ? selected.Values.Max() : 0;
+
+        // the highest variant whose every threshold the cast-time stats meet wins
+        foreach (var v in variants)
+        {
+            var fits = v.All(kv => me.TryGetStat((Stat)kv.Key, out var cur) && cur >= kv.Value);
+            if (!fits)
+            {
+                continue;
+            }
+
+            var level = v.Values.Max();
+            if (level > selectedLevel)
+            {
+                selected = v;
+                selectedLevel = level;
+            }
+        }
+
+        foreach (var kv in selected)
+        {
+            floor[kv.Key] = (int)Math.Ceiling(0.80 * kv.Value);
+        }
+
+        return floor;
+    }
+
+    /// <summary>
     ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established, in
     ///    THIS order - the first four are MUSTS (each takes the biggest castable tier that fits
     ///    the remaining NCU, downgrading tiers so a must is never crowded out), the rest are
