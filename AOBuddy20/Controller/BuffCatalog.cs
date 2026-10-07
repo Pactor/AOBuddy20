@@ -1051,6 +1051,124 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
+    ///     The caster-side skill REQUIREMENTS of one nano (stat -> gate value, inclusive), the
+    ///     snapshot basis of the floor phase: the same leaves <see cref="CasterSkillGaps" />
+    ///     reads, but the gate values themselves - at cast time the caster's stats mark which
+    ///     tier was reached, and the pet's own requirement follows the smaller of the two.
+    /// </summary>
+    public static Dictionary<int, int> CasterSkillReqs(int nanoId)
+    {
+        var reqs = new Dictionary<int, int>();
+        var nano = NanoLibrary.Find(nanoId);
+        if (nano == null)
+        {
+            return reqs;
+        }
+
+        foreach (var action in nano.Actions ?? Array.Empty<NanoAction>())
+        {
+            if (action.ActionType != 3)
+            {
+                continue;
+            }
+
+            foreach (var req in action.Requirements ?? Array.Empty<NanoRequirement>())
+            {
+                if (req.Operator == OpGreaterThan && req.Target != TargetReceiver && NanoSkillStats.Contains(req.Stat))
+                {
+                    reqs[req.Stat] = Math.Max(reqs.TryGetValue(req.Stat, out var had) ? had : 0, req.Value);
+                }
+            }
+        }
+
+        return reqs;
+    }
+
+    /// <summary>Is this entry the short summon-moment wrangle (never part of a durable set)?</summary>
+    public static bool IsWrangleBuff(BuffEntry b) => IsWrangle(b);
+
+    /// <summary>
+    ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established, in
+    ///    THIS order - the first four are MUSTS (each takes the biggest castable tier that fits
+    ///    the remaining NCU, downgrading tiers so a must is never crowded out), the rest are
+    ///    optionals (biggest that fits, dropped when nothing does):
+    ///      1. Fixer long HoT ("Long HoT" line), 2. Doctor health + long HoT,
+    ///      3. Fixer runspeed ("...RS" line) - the three musts; then
+    ///      4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen, 6. damage buffs.
+    ///    One buff per strain, receiver-gated, least-Ncu-first at equal fit.
+    /// </summary>
+    public List<BuffEntry> PlanComfort(LocalPlayer me, int ncuBudget, bool paid)
+    {
+        var plan = new List<BuffEntry>();
+        if (!Loaded || me == null || ncuBudget <= 0)
+        {
+            return plan;
+        }
+
+        var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
+
+        bool IsHot(BuffEntry b) => b.Effect.Contains("HoT", StringComparison.OrdinalIgnoreCase);
+        var categories = new (bool Must, Func<BuffEntry, bool> Match)[]
+        {
+            (true, b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
+                        && b.Effect.Contains("Long HoT", StringComparison.OrdinalIgnoreCase)),
+            (true, b => b.Profession.Equals("Doctor", StringComparison.OrdinalIgnoreCase)
+                        && (b.Effect.Contains("Max Health", StringComparison.OrdinalIgnoreCase) || IsHot(b))),
+            (true, b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
+                        && b.Effect.Contains(" RS", StringComparison.OrdinalIgnoreCase)),
+            (false, b => b.Profession.Equals("Enforcer", StringComparison.OrdinalIgnoreCase)
+                         && b.Name.Contains("Essence", StringComparison.OrdinalIgnoreCase)),
+            (false, b => b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)
+                         || b.Name.Contains("Screen", StringComparison.OrdinalIgnoreCase)),
+            (false, b => b.Effect.Contains("damage", StringComparison.OrdinalIgnoreCase)
+                         && !b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)),
+        };
+
+        var budget = ncuBudget;
+        var usedStrains = new HashSet<int>();
+        foreach (var (must, match) in categories)
+        {
+            var candidates = _buffs
+                .Where(b => match(b) && b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell)
+                            && Castable(b, myLevel, paid) && b.Ncu > 0 && !usedStrains.Contains(b.Strain))
+                .OrderByDescending(b => b.Ncu) // the biggest tier first - downgrade until it fits
+                .ToList();
+            if (candidates.Count == 0)
+            {
+                continue;
+            }
+
+            if (must)
+            {
+                var pick = candidates.FirstOrDefault(b => b.Ncu <= budget);
+                if (pick == null)
+                {
+                    continue; // even the smallest tier does not fit - the must is lost, logged by the caller
+                }
+
+                plan.Add(pick);
+                usedStrains.Add(pick.Strain);
+                budget -= pick.Ncu;
+            }
+            else
+            {
+                foreach (var b in candidates)
+                {
+                    if (b.Ncu <= budget)
+                    {
+                        plan.Add(b);
+                        usedStrains.Add(b.Strain);
+                        budget -= b.Ncu;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return plan;
+    }
+
+    /// <summary>
     ///     The caster-side SKILL shortfall of one nano (the pet-buff step's lift calculation,
     ///     owner 2026-10-07): from the pack's cast criteria, every GreaterThan gate on one of the
     ///     six nano skills that the CASTER must meet (receiver-tagged leaves are the target's
@@ -1095,13 +1213,15 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
-    ///     The LIFT plan for caster-side shortfalls (the pet-buff step): per NanoStrain the
-    ///     strongest candidate raising any NEEDED stat, greedily taken by still-needed
-    ///     coverage per NCU until every shortfall is covered or nothing affordable remains.
-    ///     Receiver-gated (level + expansion) like every plan; the wrangle goes last.
+    ///     The LIFT plan for caster-side shortfalls (the pet-buff step, and the floor phase with
+    ///     excludeWrangles): per NanoStrain the strongest candidate raising any NEEDED stat,
+    ///     greedily taken by still-needed coverage per NCU - and it STOPS the moment every
+    ///     shortfall is covered, so no NCU is spent beyond the needs. Receiver-gated (level +
+    ///     expansion) like every plan; the wrangle goes last (and is excluded entirely when
+    ///     <paramref name="excludeWrangles" /> - the floor's long-term-only rule).
     /// </summary>
     public List<BuffEntry> PlanCasterLift(LocalPlayer me, IReadOnlyDictionary<int, int> needByStat,
-        int ncuBudget, bool paid)
+        int ncuBudget, bool paid, bool excludeWrangles = false)
     {
         var plan = new List<BuffEntry>();
         if (!Loaded || me == null || needByStat.Count == 0 || ncuBudget <= 0)
@@ -1115,6 +1235,7 @@ public sealed class BuffCatalog
         var pool = _buffs
             .Where(b => b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell) && Castable(b, myLevel, paid))
             .Where(b => needStats.Any(s => GainFor(b, s) > 0))
+            .Where(b => !excludeWrangles || !IsWrangle(b))
             .GroupBy(b => b.Strain)
             .Select(g => g.OrderByDescending(b => needStats.Sum(s => GainFor(b, s))).ThenBy(b => b.Ncu).First())
             .ToList();
@@ -1149,7 +1270,7 @@ public sealed class BuffCatalog
 
             if (best == null)
             {
-                break;
+                break; // every need covered, or nothing affordable remains - no NCU beyond the needs
             }
 
             plan.Add(best);

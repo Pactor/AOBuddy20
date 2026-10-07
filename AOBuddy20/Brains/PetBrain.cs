@@ -520,6 +520,16 @@ public abstract class PetBrain
         Command(me, PetCommand.Terminate, ids);
         _logger.LogInformation($"PET: terminating {ids.Count} {role} pet(s) - the line's new summon follows.");
     }
+
+    /// <summary>
+    ///     CROSS-BRAIN: the formula the bot last cast for this wire role - the buff cycle's floor
+    ///     phase snapshots the cast-time stats against it. Null when the base doesn't track it;
+    ///     pet professions override.
+    /// </summary>
+    public virtual int? LastSummonNanoFor(PetType role)
+    {
+        return null;
+    }
 }
 
 /// <summary>

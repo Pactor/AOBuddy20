@@ -10,12 +10,12 @@
 // ---------------------------------------------------------------------------------------
 
 using AOBuddy20.Controlling;
-using AOBuddy20.Enums;
-using AOBuddy20.Utils; // MinLogLevel
+using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Serilog.Events;
+// MinLogLevel
 
 namespace AOBuddy20.Brains;
 
@@ -24,23 +24,23 @@ namespace AOBuddy20.Brains;
 ///     external-buffing brain runs against a public buff bot, shared by MP / Engineer / Bureaucrat
 ///     (each contributes its own <see cref="LineSpec" /> table; non-pet external buff brains never
 ///     touch this - their plain BuffBotController sessions are unchanged). The cycle, in order:
-///       1. CLEAR BUFFS   - strip every running nano (RemoveFriendlyNano, the click-a-buff-away
-///          packet; wire-verified per buff, stragglers tolerated) so the plan starts from a clean
-///          NCU and skill slate,
-///       2. NCU BUFF      - tell the bot for the best Max-NCU tier, and when it lands REMEMBER the
-///          NCU - that remembered Max is the budget every line plan spends against,
-///       3. PER LINE (attack, heal, support - the owner's table): plan the buff combination that
-///          lifts the line's skill pair (e.g. MatCrea+TS) the most OVERALL and BALANCED
-///          (BuffCatalog.PlanPetLine), send it as ONE multi-code tell ("cast tsmo mcmo 131 c2"),
-///          wait until ALL landed, 500ms settle, then TERMINATE THIS LINE'S OLD PET - the slot
-///          gate wants it free and a same-line recast is refused while it lives - while the REST
-///          of the roster keeps fighting the whole cycle (owner, 2026-10-07) - and only then cast
-///          the new pet at the peak, waiting for it on the wire with bounded re-issues. Before
-///          each NEXT line the leftovers are FIXED (owner 2026-10-07): running singles that raise
-///          neither of the line's skills are CANCELLED (the attack line's MatCrea chain before
-///          the heal line; on froob there are no composites to cover both), the freed NCU is
-///          tracked and priced into the budget, and the tell only asks for what is not already
-///          up - composites, wrangles and attribute buffs raise both lines' skills and stay.
+///     1. CLEAR BUFFS   - strip every running nano (RemoveFriendlyNano, the click-a-buff-away
+///     packet; wire-verified per buff, stragglers tolerated) so the plan starts from a clean
+///     NCU and skill slate,
+///     2. NCU BUFF      - tell the bot for the best Max-NCU tier, and when it lands REMEMBER the
+///     NCU - that remembered Max is the budget every line plan spends against,
+///     3. PER LINE (attack, heal, support - the owner's table): plan the buff combination that
+///     lifts the line's skill pair (e.g. MatCrea+TS) the most OVERALL and BALANCED
+///     (BuffCatalog.PlanPetLine), send it as ONE multi-code tell ("cast tsmo mcmo 131 c2"),
+///     wait until ALL landed, 500ms settle, then TERMINATE THIS LINE'S OLD PET - the slot
+///     gate wants it free and a same-line recast is refused while it lives - while the REST
+///     of the roster keeps fighting the whole cycle (owner, 2026-10-07) - and only then cast
+///     the new pet at the peak, waiting for it on the wire with bounded re-issues. Before
+///     each NEXT line the leftovers are FIXED (owner 2026-10-07): running singles that raise
+///     neither of the line's skills are CANCELLED (the attack line's MatCrea chain before
+///     the heal line; on froob there are no composites to cover both), the freed NCU is
+///     tracked and priced into the budget, and the tell only asks for what is not already
+///     up - composites, wrangles and attribute buffs raise both lines' skills and stay.
 ///     EXTENDABLE BY DESIGN: the cycle is just a list of <see cref="IStep" />s (BuildSteps) - a
 ///     later step (aura, perk setup, a second cast pass) is a new IStep appended there; a pet
 ///     class plugs in via its LineSpec table and the pet brain's CastLineRequest override. The
@@ -52,40 +52,15 @@ namespace AOBuddy20.Brains;
 [MinLogLevel(LogEventLevel.Debug)]
 public class PetFirstBuffCycle
 {
-    /// <summary>One pet line of the owner's table: the wire role it fills, its log label, and the
-    /// PRIMARY skill beside SpaceTime (attack MatCrea+TS, heal BioMet+TS, mezz MatMeta+TS).</summary>
-    public sealed class LineSpec
-    {
-        public readonly PetType Role;
-        public readonly string Label;
-        public readonly int PrimaryStat;
-
-        public LineSpec(PetType role, string label, Stat primary)
-        {
-            Role = role;
-            Label = label;
-            PrimaryStat = (int)primary;
-        }
-    }
-
-    /// <summary>One step of the pipeline. Update advances the step's own state machine (timers,
-    /// self-actions, completion checks) and returns true ONCE when the step is done; NextTurn is
-    /// what the session may send RIGHT NOW (null = nothing, keep the session waiting).</summary>
-    public interface IStep
-    {
-        string Describe { get; }
-        bool Update(LocalPlayer me, double dt);
-        BuffBotController.GuidedTurn? NextTurn(LocalPlayer me);
-    }
-
     // Per-step waits. A tell batch lands in seconds; the team-cast NCU waits out invite + cast;
     // a summon needs its recast window before the pet shows on the wire. The per-line landing
     // wait has NO timeout by design - the cast waits for the whole ask (see WaitLand).
+    private const double CastDelayTime = 0.5;
     private const double RosterTimeoutSec = 15.0, StripTimeoutSec = 10.0;
     private const double NcuWaitSec = 90.0, PetWaitSec = 30.0;
     private const double WaitLogEverySec = 30.0; // progress line cadence while a line waits for its stack
-    private const double AskSettleSec = 0.5; // after the LAST landing registers: the 500ms beat before the summon
-    private const double PreCastWaitSec = 0.5; // one more beat right before the summon: the server applies the last buff's stats
+    private const double AskSettleSec = CastDelayTime; // after the LAST landing registers: the 500ms beat before the summon
+    private const double PreCastWaitSec = CastDelayTime; // one more beat right before the summon: the server applies the last buff's stats
     private const double CastRetrySec = 1.0; // a refused cast never sets IsCasting - pace the retries
 
     // Expansion flag bits (Stat.Expansion): 2 = Shadowlands (PetBrain.IsPaid), 8 = Lost Eden.
@@ -93,33 +68,42 @@ public class PetFirstBuffCycle
     // families (composite mochams / infuses / masteries / teachings).
     internal const int ExpShadowlands = 0x2, ExpLostEden = 0x8;
 
-    internal static bool IsSlOrLe(LocalPlayer me) =>
-        me.TryGetStat(Stat.Expansion, out var e) && (e & (ExpShadowlands | ExpLostEden)) != 0;
-
     // WHICH PET-BUFF LINES LAND ON WHICH PET (owner, 2026-10-07): the damage/initiative families
     // (216 Instill, 217 Chant, 225 Evocation) gate on NPCFamily==97 - the ATTACK pet only; the
     // defensive (816), nano-resist (817) and heal-delta (843) lines land on every manifestation.
     private static readonly IReadOnlyDictionary<PetType, int[]> PetBuffLines =
         new Dictionary<PetType, int[]>
         {
-            [PetType.Attack] = new[] { 216, 217, 225, 816, 817, 843 },
-            [PetType.Heal] = new[] { 816, 817, 843 },
-            [PetType.Support] = new[] { 816, 817, 843 },
+            [PetType.Attack] = new[] { 216, 217, 225, 816, 817, 843, },
+            [PetType.Heal] = new[] { 816, 817, 843, },
+            [PetType.Support] = new[] { 816, 817, 843, },
         };
 
-    private readonly PetBrain _pet;
     private readonly BuffCatalog _catalog;
-    private readonly ILogger _logger;
-    private readonly List<LineSpec> _lines;
     private readonly HealController _heal;
+    private readonly List<LineSpec> _lines;
+    private readonly ILogger _logger;
+
+    private readonly PetBrain _pet;
+
+    // THE CAST SNAPSHOTS (owner, 2026-10-07): per line, the formula cast and the caster's gate
+    // stats AT the cast. The pet's own requirement per stat = min(formula gate, cast-time stat)
+    // - fixed formulas are gate-bound, self-scaling ones are bound by the stats they were cast
+    // with - and the floor phase lifts 80% of THAT (the obedience floor).
+    private readonly Dictionary<PetType, Dictionary<int, int>> _petReqByRole = new Dictionary<PetType, Dictionary<int, int>>();
 
     private readonly List<IStep> _steps;
-    private int _idx;
-    private double _t;
-    private bool _done;
-    private string _doneWhy = "";
 
-    public bool Done => _done;
+    // THE CAST WINDOW (owner, 2026-10-07): after ANY of our nanos - the summon included - the
+    // next cast waits that nano's attack+decay (+0.5s); while it runs the server refuses with
+    // "Already executing nanoprogram". Set by the summon AND every pet-buff/floor cast; shared
+    // so a cast in one step holds the steps after it.
+    internal double GateUntil = double.NegativeInfinity;
+    private string _doneWhy = "";
+    private int _idx;
+
+    private int? _rememberedMaxNcu;
+    private double _t;
 
     public PetFirstBuffCycle(PetBrain pet, BuffCatalog catalog, ILogger logger, IReadOnlyList<LineSpec> lines,
         HealController heal)
@@ -134,28 +118,40 @@ public class PetFirstBuffCycle
             $"PETCYCLE: open - {_steps.Count} steps: {string.Join(" -> ", _steps.Select(s => s.Describe))}.");
     }
 
-    /// <summary>THE PIPELINE. Subclasses (Engineer / Bureaucrat cycles) extend here: insert or
-    /// append steps around these; the contract is only <see cref="IStep" />. No whole-roster
-    /// clear: each line terminates its OWN old pet right before the new summon (the swap), so
-    /// the rest of the roster keeps fighting the whole cycle (owner, 2026-10-07).</summary>
+    public bool Done { get; private set; }
+
+    internal static bool IsSlOrLe(LocalPlayer me)
+    {
+        return me.TryGetStat(Stat.Expansion, out var e) && (e & (ExpShadowlands | ExpLostEden)) != 0;
+    }
+
+    /// <summary>
+    ///     THE PIPELINE. Subclasses (Engineer / Bureaucrat cycles) extend here: insert or
+    ///     append steps around these; the contract is only <see cref="IStep" />. No whole-roster
+    ///     clear: each line terminates its OWN old pet right before the new summon (the swap), so
+    ///     the rest of the roster keeps fighting the whole cycle (owner, 2026-10-07).
+    /// </summary>
     protected virtual List<IStep> BuildSteps()
     {
         var ncu = new NcuStep(this);
-        var steps = new List<IStep> { new ClearBuffsStep(this), ncu };
+        var steps = new List<IStep> { new ClearBuffsStep(this), ncu, };
         foreach (var l in _lines)
         {
             steps.Add(new PetLineStep(this, ncu, l));
             steps.Add(new PetBuffStep(this, ncu, l)); // lift + the pet's own buffs + the recharge beat
         }
 
+        steps.Add(new FloorStep(this, ncu)); // the obedience floor + the comfort fill (owner, 2026-10-07)
         return steps;
     }
 
-    /// <summary>Advance the pipeline one frame (dt 0 allowed: NextTurn re-checks completions so a
-    /// landing is seen at consult time, not a frame late).</summary>
+    /// <summary>
+    ///     Advance the pipeline one frame (dt 0 allowed: NextTurn re-checks completions so a
+    ///     landing is seen at consult time, not a frame late).
+    /// </summary>
     public void Advance(LocalPlayer me, double dt)
     {
-        if (_done || me == null)
+        if (Done || me == null)
         {
             return;
         }
@@ -178,19 +174,21 @@ public class PetFirstBuffCycle
         var roles = string.Join(", ", _lines.Select(l =>
             $"{l.Label}:{(me.Pets.Any(p => p.Role == l.Role) ? "up" : "MISSING")}"));
         _doneWhy = $"cycle complete ({roles}; MC {mc}, TS {ts})";
-        _done = true; // ONCE - without this the completion tail re-ran every tick (log spam) and
-                      // NextTurn indexed past the step list (ArgumentOutOfRangeException per tick)
+        Done = true; // ONCE - without this the completion tail re-ran every tick (log spam) and
+        // NextTurn indexed past the step list (ArgumentOutOfRangeException per tick)
         _logger.LogInformation($"PETCYCLE: {_doneWhy}.");
     }
 
-    /// <summary>The turn the guided session may send now: the current step's wire action, a wait,
-    /// or Done when the pipeline ran off its end.</summary>
+    /// <summary>
+    ///     The turn the guided session may send now: the current step's wire action, a wait,
+    ///     or Done when the pipeline ran off its end.
+    /// </summary>
     public BuffBotController.GuidedTurn NextTurn(LocalPlayer me)
     {
         Advance(me, 0);
-        if (_done)
+        if (Done)
         {
-            return new BuffBotController.GuidedTurn { Done = true, DoneWhy = _doneWhy };
+            return new BuffBotController.GuidedTurn { Done = true, DoneWhy = _doneWhy, };
         }
 
         return _steps[_idx].NextTurn(me) ?? new BuffBotController.GuidedTurn();
@@ -198,8 +196,10 @@ public class PetFirstBuffCycle
 
     // ---- Shared context the steps read ------------------------------------------------------
 
-    internal int RememberedMaxNcu(LocalPlayer me) =>
-        _rememberedMaxNcu ?? (me.TryGetStat(Stat.MaxNCU, out var n) ? n : 0);
+    internal int RememberedMaxNcu(LocalPlayer me)
+    {
+        return _rememberedMaxNcu ?? (me.TryGetStat(Stat.MaxNCU, out var n) ? n : 0);
+    }
 
     /// <summary>
     ///     THE INTER-LINE FIX, shared (owner, 2026-10-07): running single-skill nano buffs that
@@ -240,8 +240,6 @@ public class PetFirstBuffCycle
         return freed;
     }
 
-    private int? _rememberedMaxNcu;
-
     internal void RememberNcu(LocalPlayer me, string source)
     {
         _rememberedMaxNcu = me.TryGetStat(Stat.MaxNCU, out var n) ? n : 0;
@@ -249,18 +247,92 @@ public class PetFirstBuffCycle
                                $"free {_rememberedMaxNcu - (me.TryGetStat(Stat.CurrentNCU, out var c) ? c : 0)}.");
     }
 
+    internal void RecordSnapshot(PetType role, int formulaId, LocalPlayer me)
+    {
+        var reqs = new Dictionary<int, int>();
+        foreach (var kv in BuffCatalog.CasterSkillReqs(formulaId))
+        {
+            me.TryGetStat((Stat)kv.Key, out var cur);
+            reqs[kv.Key] = Math.Min(kv.Value, cur);
+        }
+
+        _petReqByRole[role] = reqs;
+        _logger.LogInformation($"PETCYCLE: {role} snapshot - pet requirements: " +
+                               (reqs.Count > 0
+                                   ? string.Join(", ", reqs.Select(r => $"{(Stat)r.Key} {r.Value}"))
+                                   : "(no skill gates)") +
+                               ".");
+    }
+
+    internal static bool Low(LocalPlayer me)
+    {
+        return Pct(me, Stat.CurrentNano, Stat.MaxNanoEnergy) < 50 || Pct(me, Stat.Health, Stat.MaxHealth) < 50;
+    }
+
+    internal static double Pct(LocalPlayer me, Stat cur, Stat max)
+    {
+        return me.TryGetStat(max, out var m) && m > 0 && me.TryGetStat(cur, out var v) ? v * 100.0 / m : 100.0;
+    }
+
+    internal static bool Landed(LocalPlayer me, BuffCatalog.BuffEntry b)
+    {
+        return me.Buffs != null && b.LandIds.Count > 0 && me.Buffs.Any(r => b.LandIds.Contains(r.Id));
+    }
+
+    internal static bool ActionLanded(LocalPlayer me, BuffCatalog.BuffAction a)
+    {
+        return me.Buffs != null && a.LandIds.Length > 0 && me.Buffs.Any(r => a.LandIds.Contains(r.Id));
+    }
+
+    internal void SetGate(double seconds)
+    {
+        GateUntil = Math.Max(GateUntil, _t + seconds);
+    }
+
+    /// <summary>
+    ///     One pet line of the owner's table: the wire role it fills, its log label, and the
+    ///     PRIMARY skill beside SpaceTime (attack MatCrea+TS, heal BioMet+TS, mezz MatMeta+TS).
+    /// </summary>
+    public sealed class LineSpec
+    {
+        public readonly string Label;
+        public readonly int PrimaryStat;
+        public readonly PetType Role;
+
+        public LineSpec(PetType role, string label, Stat primary)
+        {
+            Role = role;
+            Label = label;
+            PrimaryStat = (int)primary;
+        }
+    }
+
+    /// <summary>
+    ///     One step of the pipeline. Update advances the step's own state machine (timers,
+    ///     self-actions, completion checks) and returns true ONCE when the step is done; NextTurn is
+    ///     what the session may send RIGHT NOW (null = nothing, keep the session waiting).
+    /// </summary>
+    public interface IStep
+    {
+        string Describe { get; }
+        bool Update(LocalPlayer me, double dt);
+        BuffBotController.GuidedTurn? NextTurn(LocalPlayer me);
+    }
+
     // ---- The steps ---------------------------------------------------------------------------
 
-    /// <summary>Step 1: strip every running nano (RemoveFriendlyNano - what the game client sends
-    /// clicking a buff icon away; owner 2026-10-07, wire behaviour to be watched on first live
-    /// runs) so the NCU budget and the plan start clean. Buffs that refuse to leave are logged and
-    /// tolerated - the budget simply reads smaller.</summary>
+    /// <summary>
+    ///     Step 1: strip every running nano (RemoveFriendlyNano - what the game client sends
+    ///     clicking a buff icon away; owner 2026-10-07, wire behaviour to be watched on first live
+    ///     runs) so the NCU budget and the plan start clean. Buffs that refuse to leave are logged and
+    ///     tolerated - the budget simply reads smaller.
+    /// </summary>
     private sealed class ClearBuffsStep : IStep
     {
         private readonly PetFirstBuffCycle _c;
-        private bool _started;
         private double _at;
         private int _sent;
+        private bool _started;
 
         public ClearBuffsStep(PetFirstBuffCycle c)
         {
@@ -312,21 +384,26 @@ public class PetFirstBuffCycle
         }
     }
 
-    /// <summary>Step 3: the best Max-NCU tier (the Fixer ladder - team-cast on Chewys, so the
-    /// invite flow runs here), and when it lands the NCU is REMEMBERED: that Max is the budget
-    /// every line plan spends against (owner 2026-10-07). A menu without an NCU entry, or a tier
-    /// that never lands, degrades to the raw Max NCU - the cycle continues.</summary>
+    /// <summary>
+    ///     Step 3: the best Max-NCU tier (the Fixer ladder - team-cast on Chewys, so the
+    ///     invite flow runs here), and when it lands the NCU is REMEMBERED: that Max is the budget
+    ///     every line plan spends against (owner 2026-10-07). A menu without an NCU entry, or a tier
+    ///     that never lands, degrades to the raw Max NCU - the cycle continues.
+    /// </summary>
     private sealed class NcuStep : IStep
     {
         private readonly PetFirstBuffCycle _c;
         private BuffCatalog.NcuPick? _pick;
-        private bool _told;
         private double _startedAt = double.NegativeInfinity, _toldAt;
+        private bool _told;
 
         public NcuStep(PetFirstBuffCycle c)
         {
             _c = c;
         }
+
+        /// <summary>The landed nano id of the chosen NCU tier (the floor clear spares it).</summary>
+        public int? LandId => _pick?.LandId;
 
         public string Describe => "ncu buff";
 
@@ -379,48 +456,43 @@ public class PetFirstBuffCycle
                     BotName = _c._catalog.BotName,
                     Tell = _pick.Tell,
                     NeedsTeam = _pick.NeedsTeam,
-                    LandIds = _pick.LandId != 0 ? new[] { _pick.LandId } : Array.Empty<int>(),
+                    LandIds = _pick.LandId != 0 ? new[] { _pick.LandId, } : Array.Empty<int>(),
                 },
             };
         }
 
-        private static bool BuffUp(LocalPlayer me, int nanoId) =>
-            me.Buffs?.Any(b => b.Id == nanoId) ?? false;
+        private static bool BuffUp(LocalPlayer me, int nanoId)
+        {
+            return me.Buffs?.Any(b => b.Id == nanoId) ?? false;
+        }
     }
 
-    /// <summary>Step 4, one per line: fix the leftovers (cancel the previous line's singles that
-    /// raise neither of this line's skills, tracking the freed NCU into the budget), plan the
-    /// line's stack (PlanPetLine - most overall lift on the skill pair, balanced, NCU-budgeted),
-    /// tell the bot only what is NOT already up as ONE multi-code tell, wait until ALL landed -
-    /// however long that takes, never casting a half-stacked pet (owner 2026-10-07: a 107 pet
-    /// because c2 was still incoming is a downgrade for good) - ONLY THEN cast the line's pet
-    /// (CastLineRequest - the wrangle is freshest now) and wait for it on the wire. An empty ask
-    /// (nothing affordable / everything already up) goes straight to the cast at current
-    /// skills.</summary>
+    /// <summary>
+    ///     Step 4, one per line: fix the leftovers (cancel the previous line's singles that
+    ///     raise neither of this line's skills, tracking the freed NCU into the budget), plan the
+    ///     line's stack (PlanPetLine - most overall lift on the skill pair, balanced, NCU-budgeted),
+    ///     tell the bot only what is NOT already up as ONE multi-code tell, wait until ALL landed -
+    ///     however long that takes, never casting a half-stacked pet (owner 2026-10-07: a 107 pet
+    ///     because c2 was still incoming is a downgrade for good) - ONLY THEN cast the line's pet
+    ///     (CastLineRequest - the wrangle is freshest now) and wait for it on the wire. An empty ask
+    ///     (nothing affordable / everything already up) goes straight to the cast at current
+    ///     skills.
+    /// </summary>
     private sealed class PetLineStep : IStep
     {
-        private enum Phase
-        {
-            Plan,
-            WaitLand,
-            Settle, // the ask is fully in - breathe 500ms so the server's state settles before the summon
-            Terminate, // THIS line's old pet dies here (the slot gate wants it free); the rest of the roster keeps fighting
-            Cast,
-            WaitPet,
-        }
+        private const int MaxSummonRetries = 3;
 
         private readonly PetFirstBuffCycle _c;
-        private readonly NcuStep _ncu;
         private readonly LineSpec _line;
+        private readonly NcuStep _ncu;
+        private List<BuffCatalog.BuffEntry> _ask = new List<BuffCatalog.BuffEntry>(); // the planned entries NOT already up - what we tell the bot
         private Phase _phase = Phase.Plan;
-        private List<BuffCatalog.BuffEntry> _plan = new();
-        private List<BuffCatalog.BuffEntry> _ask = new(); // the planned entries NOT already up - what we tell the bot
-        private BuffBotController.GuidedTurn? _turn;
         private double _phaseAt;
-        private int _waitLogs; // progress lines emitted while waiting for the ask to land
+        private List<BuffCatalog.BuffEntry> _plan = new List<BuffCatalog.BuffEntry>();
         private int _summonRetries; // re-issues of the summon while the buffed window is still open
-        private const int MaxSummonRetries = 3;
         private bool _terminated; // the line's old pet terminate is out
+        private BuffBotController.GuidedTurn? _turn;
+        private int _waitLogs; // progress lines emitted while waiting for the ask to land
 
         public PetLineStep(PetFirstBuffCycle c, NcuStep ncu, LineSpec line)
         {
@@ -433,6 +505,13 @@ public class PetFirstBuffCycle
 
         public bool Update(LocalPlayer me, double dt)
         {
+            // THE SHARED CAST WINDOW: no new cast while a previous nano's attack/recharge runs -
+            // whether that was the previous line's last buff or our own earlier cast.
+            if (_c._t < _c.GateUntil)
+            {
+                return false;
+            }
+
             // HOLD WHILE A REST IS WANTED OR RUNNING (owner, 2026-10-07): a seated summon is
             // refused ("You must be standing up") - whoever sat (our recharge demand or the
             // HealController's own want), the summon waits for it to end.
@@ -449,7 +528,7 @@ public class PetFirstBuffCycle
                     // raise neither of THIS line's skills are cancelled (the shared helper), the
                     // freed NCU tracked and priced into the plan's budget.
                     var freed = _c.CancelForeignSingles(me,
-                        new[] { _line.PrimaryStat, (int)Stat.SpaceTime }, $"{_line.Label} line");
+                        new[] { _line.PrimaryStat, (int)Stat.SpaceTime, }, $"{_line.Label} line");
 
                     var curNcu = me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0;
                     var budget = _c.RememberedMaxNcu(me) - curNcu + freed;
@@ -643,10 +722,30 @@ public class PetFirstBuffCycle
             _phase = Phase.WaitPet;
             _phaseAt = _c._t;
             _c._pet.CastLineRequest(me, _line.Role);
+
+            // THE CAST SNAPSHOT (owner, 2026-10-07): which formula went out, and the caster's
+            // gate stats AT this instant - the pet's own requirement per stat is the smaller of
+            // the formula's gate and the cast-time stat, and the floor phase lifts 80% of THAT.
+            var formula = _c._pet.LastSummonNanoFor(_line.Role);
+            if (formula != null)
+            {
+                _c.RecordSnapshot(_line.Role, formula.Value, me);
+
+                // THE SUMMON'S OWN WINDOW (owner, 2026-10-07): after the last pet, the floor's
+                // casts must wait the summon nano's RECHARGE time + the CastDelayTime const
+                // (plus, not minus) - the pet appearing on the wire already covers the attack
+                // phase; the "Already executing" window that remains is the recharge.
+                if (ItemData.Find(formula.Value, out NanoItem sni) && sni != null)
+                {
+                    _c.SetGate(sni.RechargeDelay + CastDelayTime);
+                }
+            }
         }
 
-        private static bool Landed(LocalPlayer me, BuffCatalog.BuffEntry b) =>
-            me.Buffs != null && b.LandIds.Count > 0 && me.Buffs.Any(r => b.LandIds.Contains(r.Id));
+        private static bool Landed(LocalPlayer me, BuffCatalog.BuffEntry b)
+        {
+            return me.Buffs != null && b.LandIds.Count > 0 && me.Buffs.Any(r => b.LandIds.Contains(r.Id));
+        }
 
         /// <summary>
         ///     Already covered, so the bot is not asked again: the exact nano is running, or a
@@ -676,8 +775,8 @@ public class PetFirstBuffCycle
                     continue; // different overwrite group
                 }
 
-                var covers = (needA == 0 || BuffCatalog.SkillContributionOf(r.Id, statA) >= needA)
-                             && (needB == 0 || BuffCatalog.SkillContributionOf(r.Id, statB) >= needB);
+                var covers = (needA == 0 || BuffCatalog.SkillContributionOf(r.Id, statA) >= needA) &&
+                             (needB == 0 || BuffCatalog.SkillContributionOf(r.Id, statB) >= needB);
                 if (covers)
                 {
                     return true;
@@ -685,6 +784,16 @@ public class PetFirstBuffCycle
             }
 
             return false;
+        }
+
+        private enum Phase
+        {
+            Plan,
+            WaitLand,
+            Settle, // the ask is fully in - breathe 500ms so the server's state settles before the summon
+            Terminate, // THIS line's old pet dies here (the slot gate wants it free); the rest of the roster keeps fighting
+            Cast,
+            WaitPet,
         }
     }
 
@@ -705,22 +814,21 @@ public class PetFirstBuffCycle
     private sealed class PetBuffStep : IStep
     {
         private readonly PetFirstBuffCycle _c;
-        private readonly NcuStep _ncu;
         private readonly LineSpec _line;
-        private readonly List<int> _lines = new(); // the strain lines this pet accepts
-        private readonly HashSet<int> _skippedLines = new();
-        private List<BuffCatalog.BuffEntry> _lift = new(); // the external buffs the top formulas need
-        private BuffBotController.GuidedTurn? _turn;
-        private bool _planned;
+        private readonly List<int> _lines = new List<int>(); // the strain lines this pet accepts
+        private readonly NcuStep _ncu;
+        private readonly HashSet<int> _skippedLines = new HashSet<int>();
+        private double _lastCastAt = double.NegativeInfinity;
+        private List<BuffCatalog.BuffEntry> _lift = new List<BuffCatalog.BuffEntry>(); // the external buffs the top formulas need
         private bool _liftOut; // the lift tell was sent - wait for every buff to land
-        private bool _settling;
-        private double _phaseAt;
         private int _lineIdx; // cursor over _lines during the cast loop
+        private double _phaseAt;
+        private bool _planned;
+        private bool _settling;
+        private BuffBotController.GuidedTurn? _turn;
+        private int _waitLogs;
         private bool _waitingCastEnd;
         private bool _waitingRest;
-        private int _waitLogs;
-        private double _lastCastAt = double.NegativeInfinity;
-        private double _gateUntil = double.NegativeInfinity; // the running nano's attack+decay window (+0.2s)
 
         public PetBuffStep(PetFirstBuffCycle c, NcuStep ncu, LineSpec line)
         {
@@ -742,6 +850,14 @@ public class PetFirstBuffCycle
             if (_lines.Count == 0)
             {
                 return true; // nothing this pet accepts
+            }
+
+            // THE SHARED CAST WINDOW (unconditional - it must hold the FIRST cast of this step
+            // too, e.g. the summon's recharge before the first pet buff): no new cast while a
+            // previous nano's attack/recharge runs.
+            if (_c._t < _c.GateUntil)
+            {
+                return false;
             }
 
             // HOLD WHILE A REST IS WANTED OR RUNNING (owner, 2026-10-07): seated casts are refused
@@ -797,13 +913,11 @@ public class PetFirstBuffCycle
                 _settling = false;
             }
 
-            // the cast in flight must REALLY finish - IsCasting clear AND the nano's full
-            // attack+decay window (the server refuses the next program while it runs: "Already
-            // executing nanoprogram") - plus the 0.2s beat, before anything sits or re-casts
-            // (owner, 2026-10-07; pet summons are NOT gated by this).
+            // the cast in flight must REALLY finish - IsCasting clear (the shared window above
+            // covers the attack+decay clock) before anything re-casts
             if (_waitingCastEnd)
             {
-                if (me.IsCasting || _c._t < _gateUntil)
+                if (me.IsCasting || _c._t < _c.GateUntil)
                 {
                     return false;
                 }
@@ -861,9 +975,9 @@ public class PetFirstBuffCycle
 
                 me.Cast(petChar, pick.Value.ni.Id);
                 _lastCastAt = _c._t;
-                // the nano's own window: attack + decay (seconds) + 0.2s
-                var gate = pick.Value.ni.AttackDelay + pick.Value.ni.RechargeDelay + 0.2;
-                _gateUntil = _c._t + gate;
+                // the nano's own window: attack + decay (seconds) + 0.5s
+                var gate = pick.Value.ni.AttackDelay + pick.Value.ni.RechargeDelay + CastDelayTime;
+                _c.SetGate(gate);
                 _waitingCastEnd = true;
                 _c._logger.LogInformation(
                     $"PETCYCLE: {_line.Label} pet - casting '{pick.Value.ni.Name}' ({pick.Value.ni.Id}, tier {pick.Value.order}, " +
@@ -957,8 +1071,7 @@ public class PetFirstBuffCycle
             foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
             {
                 var profile = NanoLibrary.Find(nanoId);
-                if (profile == null || profile.Stat(75) != lineStrain
-                    || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+                if (profile == null || profile.Stat(75) != lineStrain || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
                 {
                     continue;
                 }
@@ -987,8 +1100,7 @@ public class PetFirstBuffCycle
             foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
             {
                 var profile = NanoLibrary.Find(nanoId);
-                if (profile == null || profile.Stat(75) != lineStrain
-                    || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+                if (profile == null || profile.Stat(75) != lineStrain || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
                 {
                     continue;
                 }
@@ -1023,13 +1135,350 @@ public class PetFirstBuffCycle
             return best;
         }
 
-        private static bool Landed(LocalPlayer me, BuffCatalog.BuffEntry b) =>
-            me.Buffs != null && b.LandIds.Count > 0 && me.Buffs.Any(r => b.LandIds.Contains(r.Id));
+        private static bool Landed(LocalPlayer me, BuffCatalog.BuffEntry b)
+        {
+            return me.Buffs != null && b.LandIds.Count > 0 && me.Buffs.Any(r => b.LandIds.Contains(r.Id));
+        }
 
-        private static bool Low(LocalPlayer me) =>
-            Pct(me, Stat.CurrentNano, Stat.MaxNanoEnergy) < 50 || Pct(me, Stat.Health, Stat.MaxHealth) < 50;
+        private static bool Low(LocalPlayer me)
+        {
+            return Pct(me, Stat.CurrentNano, Stat.MaxNanoEnergy) < 50 || Pct(me, Stat.Health, Stat.MaxHealth) < 50;
+        }
 
-        private static double Pct(LocalPlayer me, Stat cur, Stat max) =>
-            me.TryGetStat(max, out var m) && m > 0 && me.TryGetStat(cur, out var v) ? v * 100.0 / m : 100.0;
+        private static double Pct(LocalPlayer me, Stat cur, Stat max)
+        {
+            return me.TryGetStat(max, out var m) && m > 0 && me.TryGetStat(cur, out var v) ? v * 100.0 / m : 100.0;
+        }
+    }
+
+    /// <summary>
+    ///     Step 6, once after all pets are out (owner, 2026-10-07): THE OBEDIENCE FLOOR + the
+    ///     comfort fill. First every running buff EXCEPT the NCU buff is cleared - the floor set
+    ///     must be the smallest that obeys. Then, from the cast snapshots, each line's pet
+    ///     requirements (stat -> min(formula gate, cast-time stat)) are lifted to 80%: the
+    ///     LEAST-NCU durable set via BuildControlPlan per line (floor math, lowest rungs first),
+    ///     merged by strain, wrangles excluded - LONG-TERM buffs only. The actions walk one by
+    ///     one (self-casts and bot tells, each awaited, cast gates respected). Last, the comfort
+    ///     fill in the owner's order as ONE tell: Fixer long HoT, Doctor health + long HoT and
+    ///     Fixer runspeed are MUSTS (biggest tier that fits, downgrades so a must is never
+    ///     crowded out); Enforcer Essence, damage shields / Coruscating Screen and damage buffs
+    ///     fill whatever NCU is left.
+    /// </summary>
+    private sealed class FloorStep : IStep
+    {
+        private readonly List<BuffCatalog.BuffAction> _actions = new List<BuffCatalog.BuffAction>();
+
+        private readonly PetFirstBuffCycle _c;
+        private readonly NcuStep _ncu;
+        private bool _clearOut;
+        private List<BuffCatalog.BuffEntry> _comfort = new List<BuffCatalog.BuffEntry>();
+        private BuffCatalog.BuffAction? _current;
+        private int _idx;
+        private double _lastCastAt = double.NegativeInfinity;
+        private Phase _phase = Phase.Clear;
+        private double _phaseAt;
+        private BuffBotController.GuidedTurn? _turn;
+        private int _waitLogs;
+        private bool _waitingCastEnd;
+        private bool _waitingRest;
+
+        public FloorStep(PetFirstBuffCycle c, NcuStep ncu)
+        {
+            _c = c;
+            _ncu = ncu;
+        }
+
+        public string Describe => "floor + comfort";
+
+        public bool Update(LocalPlayer me, double dt)
+        {
+            // THE SHARED CAST WINDOW (unconditional - it must hold the FIRST cast of this step
+            // too, e.g. the last summon's recharge before the first floor cast): no new cast
+            // while a previous nano's attack/recharge runs.
+            if (_c._t < _c.GateUntil)
+            {
+                return false;
+            }
+
+            // HOLD WHILE A REST IS WANTED OR RUNNING (as everywhere: seated casts are refused,
+            // and a sit aborts a nano in flight).
+            if (_c._heal.RestActive)
+            {
+                return false;
+            }
+
+            // the cast in flight must REALLY finish - IsCasting clear (the shared window above
+            // covers the attack+decay clock)
+            if (_waitingCastEnd)
+            {
+                if (me.IsCasting)
+                {
+                    return false;
+                }
+
+                _waitingCastEnd = false;
+            }
+
+            // a refused cast never sets IsCasting - pace the retries
+            if (_c._t - _lastCastAt < CastRetrySec)
+            {
+                return false;
+            }
+
+            switch (_phase)
+            {
+                case Phase.Clear:
+                    return Clear(me);
+
+                case Phase.Walk:
+                    return Walk(me);
+
+                case Phase.ComfortWait:
+                default:
+                    return ComfortWait(me);
+            }
+        }
+
+        public BuffBotController.GuidedTurn? NextTurn(LocalPlayer me)
+        {
+            var turn = _turn;
+            _turn = null;
+            return turn;
+        }
+
+        private bool Clear(LocalPlayer me)
+        {
+            var exempt = _ncu.LandId ?? 0;
+            var leftovers = me.Buffs == null
+                ? new List<int>()
+                : me.Buffs.Where(b => b.Id != exempt).Select(b => b.Id).Distinct().ToList();
+
+            if (!_clearOut)
+            {
+                _clearOut = true;
+                _phaseAt = _c._t;
+                foreach (var id in leftovers)
+                {
+                    me.RemoveFriendlyNano(me.Identity, id);
+                }
+
+                _c._logger.LogInformation(
+                    $"PETCYCLE: floor - stripping {leftovers.Count} buff(s) (the NCU buff stays) before the obedience floor.");
+                return false;
+            }
+
+            if (leftovers.Count == 0 || _c._t - _phaseAt > StripTimeoutSec)
+            {
+                if (leftovers.Count > 0)
+                {
+                    _c._logger.LogWarning(
+                        $"PETCYCLE: floor - {leftovers.Count} buff(s) survived the clear - building the floor set around them.");
+                }
+
+                BuildFloorActions(me);
+                _phase = Phase.Walk;
+                return false;
+            }
+
+            return false; // the strips are confirming
+        }
+
+        // THE FLOOR SET (owner, 2026-10-07): the aggregated 80% floors per stat, the BASE
+        // shortfalls against them, then the LEAST-NCU cover - PlanCasterLift's greedy stops the
+        // moment every shortfall is covered (no mochams where a teaching would do, no buffs
+        // where the base is already above the floor). Wrangles excluded: long-term only.
+        private void BuildFloorActions(LocalPlayer me)
+        {
+            var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
+
+            // the aggregated 80% floor per stat across all lines' snapshots
+            var floors = new Dictionary<int, int>();
+            foreach (var (_, reqs) in _c._petReqByRole)
+            {
+                foreach (var kv in reqs)
+                {
+                    var floor = (int)Math.Ceiling(0.80 * kv.Value);
+                    floors[kv.Key] = Math.Max(floors.TryGetValue(kv.Key, out var had) ? had : 0, floor);
+                }
+            }
+
+            // the base shortfalls (post-clear stats vs the floors)
+            var needs = new Dictionary<int, int>();
+            foreach (var kv in floors)
+            {
+                me.TryGetStat((Stat)kv.Key, out var baseVal);
+                var need = Math.Max(0, kv.Value - baseVal);
+                if (need > 0)
+                {
+                    needs[kv.Key] = need;
+                }
+            }
+
+            _c._logger.LogInformation(
+                "PETCYCLE: floor - per stat (floor / base / still needed): " +
+                string.Join(", ", floors.OrderBy(f => f.Key).Select(f =>
+                {
+                    me.TryGetStat((Stat)f.Key, out var baseVal);
+                    return $"{(Stat)f.Key} {f.Value}/{baseVal}/-{needs.GetValueOrDefault(f.Key)}";
+                })) + ".");
+
+            if (needs.Count == 0)
+            {
+                _c._logger.LogInformation("PETCYCLE: floor - the base already meets every floor; no floor buffs needed.");
+                return;
+            }
+
+            var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
+            var set = _c._catalog.PlanCasterLift(me, needs, free, IsSlOrLe(me), excludeWrangles: true);
+            if (set.Count == 0)
+            {
+                _c._logger.LogWarning(
+                    "PETCYCLE: floor - nothing affordable covers the shortfalls " +
+                    $"({string.Join(", ", needs.Select(n => $"{(Stat)n.Key} +{n.Value}"))}, free NCU {free}) - the pets may disobey.");
+                return;
+            }
+
+            foreach (var b in set)
+            {
+                var action = _c._catalog.RouteFor(b, "Metaphysicist", _c._catalog.BotName, learned.Contains);
+                if (action.Source != BuffCatalog.BuffSource.Unavailable)
+                {
+                    _actions.Add(action);
+                }
+            }
+
+            if (_actions.Count > 0)
+            {
+                _c._logger.LogInformation(
+                    $"PETCYCLE: floor - {_actions.Count} action(s), least NCU to the floors: " +
+                    $"{string.Join(", ", _actions.Select(a => a.Describe))}.");
+            }
+        }
+
+        private bool Walk(LocalPlayer me)
+        {
+            // the current action's landing (bot tells are awaited here too - the controller's own
+            // wait runs in parallel and only closes its step)
+            if (_current != null)
+            {
+                if (ActionLanded(me, _current))
+                {
+                    _c._logger.LogInformation($"PETCYCLE: floor - '{_current.Name}' landed.");
+                    _current = null;
+                    _idx++;
+                }
+                else if (_c._t - _phaseAt > NcuWaitSec)
+                {
+                    _c._logger.LogWarning(
+                        $"PETCYCLE: floor - '{_current.Name}' did not land in {NcuWaitSec:0}s - moving on.");
+                    _current = null;
+                    _idx++;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            if (Low(me))
+            {
+                _c._logger.LogInformation(
+                    $"PETCYCLE: floor - under 50% (nano {Pct(me, Stat.CurrentNano, Stat.MaxNanoEnergy):0}%, " +
+                    $"health {Pct(me, Stat.Health, Stat.MaxHealth):0}%) - sitting for the rechargers.");
+                _c._heal.DemandRecharge("floor buffs");
+                _waitingRest = true;
+                return false;
+            }
+
+            while (_idx < _actions.Count)
+            {
+                var a = _actions[_idx];
+                if (a.Source == BuffCatalog.BuffSource.Unavailable || ActionLanded(me, a))
+                {
+                    _idx++;
+                    continue;
+                }
+
+                if (a.Source == BuffCatalog.BuffSource.SelfCast)
+                {
+                    me.Cast(a.SelfCastNanoId);
+                    _lastCastAt = _c._t;
+                    if (ItemData.Find(a.SelfCastNanoId, out NanoItem ni) && ni != null)
+                    {
+                        _c.SetGate(ni.AttackDelay + ni.RechargeDelay + CastDelayTime);
+                        _waitingCastEnd = true;
+                    }
+
+                    _current = a;
+                    _phaseAt = _c._t;
+                    _c._logger.LogInformation($"PETCYCLE: floor - self-casting '{a.Name}' ({a.SelfCastNanoId}).");
+                    return false;
+                }
+
+                _current = a;
+                _phaseAt = _c._t;
+                _turn = new BuffBotController.GuidedTurn { Action = a, };
+                return false; // the controller sends the tell and watches the landing
+            }
+
+            // THE FLOOR IS UP: the comfort fill, one tell.
+            var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
+            _comfort = _c._catalog.PlanComfort(me, free, IsSlOrLe(me));
+            if (_comfort.Count == 0)
+            {
+                _c._logger.LogInformation($"PETCYCLE: comfort - nothing affordable (free NCU {free}) - the cycle ends here.");
+                return true;
+            }
+
+            var codes = string.Join(" ", _comfort.Select(b => b.Tell));
+            _turn = new BuffBotController.GuidedTurn
+            {
+                Action = new BuffCatalog.BuffAction
+                {
+                    Source = BuffCatalog.BuffSource.BuffBot,
+                    Name = $"comfort fill ({_comfort.Count} buffs)",
+                    BotName = _c._catalog.BotName,
+                    Tell = codes,
+                    NeedsTeam = _comfort.Any(b => b.NeedsTeam),
+                    LandIds = _comfort.SelectMany(b => b.LandIds).Distinct().ToArray(),
+                    RequireAll = true,
+                },
+            };
+            _phase = Phase.ComfortWait;
+            _phaseAt = _c._t;
+            _c._logger.LogInformation(
+                $"PETCYCLE: comfort - asking '{_c._catalog.BotName} {codes}' ({_comfort.Count} buffs, " +
+                $"{_comfort.Sum(b => b.Ncu)} NCU of {free} free).");
+            return false;
+        }
+
+        private bool ComfortWait(LocalPlayer me)
+        {
+            var missing = _comfort.Where(b => !Landed(me, b)).ToList();
+            if (missing.Count == 0)
+            {
+                var roles = string.Join(", ", _c._petReqByRole.Keys.Select(r => r.ToString()));
+                _c._logger.LogInformation(
+                    $"PETCYCLE: floor + comfort complete - pets out ({roles}), the floor set is in, comfort landed.");
+                return true;
+            }
+
+            if (_c._t - _phaseAt > WaitLogEverySec * _waitLogs)
+            {
+                _waitLogs++;
+                _c._logger.LogInformation(
+                    $"PETCYCLE: comfort - still waiting for {missing.Count}/{_comfort.Count} " +
+                    $"({string.Join(", ", missing.Select(b => b.Name))}).");
+            }
+
+            return false;
+        }
+
+        private enum Phase
+        {
+            Clear, // strip everything but the NCU buff
+            Walk, // the floor set, one action at a time
+            ComfortWait, // the comfort tell is out - wait for all of it
+        }
     }
 }

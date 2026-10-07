@@ -87,6 +87,16 @@ public sealed class MetaphysicistBrain : PetBrain
     private readonly Dictionary<PetLine, HashSet<int>> _summonIds = new();
     private bool _warnedNoSummonData;
     private readonly HashSet<PetLine> _warnedNoLineFormula = new(); // "no formula learned" - once per line
+    private readonly Dictionary<PetLine, int> _lastSummonNano = new(); // line -> the formula last cast
+
+    /// <summary>The formula the bot last cast for this wire role - the floor phase's snapshot key
+    /// (the pet's own requirements follow the formula's gates and the cast-time stats).</summary>
+    public override int? LastSummonNanoFor(PetType role)
+    {
+        return _lastSummonNano.TryGetValue(Slots.FirstOrDefault(s => s.Role == role).Line, out var id)
+            ? id
+            : null;
+    }
 
     public MetaphysicistBrain(ILogger<MetaphysicistBrain> logger, ControlArbiter controlArbiter,
         BuffBotController buffBot)
@@ -264,6 +274,7 @@ public sealed class MetaphysicistBrain : PetBrain
         }
 
         _summonAt[best.Id] = _clock;
+        _lastSummonNano[line] = best.Id;
         me.Cast(best.Id);
         _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, tier {bestOrder}) for the {LineName(line)} pet; " +
                                $"buffs running at cast: {RunningBuffs(me)}");
