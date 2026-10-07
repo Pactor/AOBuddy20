@@ -357,6 +357,24 @@ public sealed class HealController
             return false; // a stand-up is in flight (the login one, say) or a rest just ended: no sit races it
         }
 
+        // NO USABLE RECHARGER, NO SIT (owner, 2026-10-07): sitting without one gains nothing over
+        // standing regen, strands the body seated until the stall guard gives up - and on a
+        // resupply run it is precisely in the way. Check the packs BEFORE the posture changes;
+        // an external demand dies with the drought, so nothing waits on a rest that cannot be.
+        if (BestUsable(Kind.Recharger, me) == null)
+        {
+            _rechargeDemanded = false;
+            if (!_loggedShort)
+            {
+                _loggedShort = true;
+                _logger.LogInformation(
+                    "HEAL: heal/nano want out of combat, but no usable recharger in the packs - not sitting (release; resupply stocks them).");
+            }
+
+            EndEpisode();
+            return false;
+        }
+
         // The rest takes the arbiter for its duration: "stay sitting until fully healed" is the
         // body's job, and a lower system's stage timer must not run out from under a seated bot.
         _holding = true;
