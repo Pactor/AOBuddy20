@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: BuffBotController.cs
 //
-// Last modified: 2026-10-05
+// Last modified: 2026-10-07
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -75,6 +75,23 @@ public sealed class BuffBotController
     private int _landed, _failed, _skipped;
     private string _what = "";
     private Action<string>? _reply; // the owner tell to answer as the session progresses
+
+    // GUIDED MODE (the pet-first buff cycle, owner 2026-10-07): instead of a fixed queue, the
+    // caller supplies a turn source consulted whenever the session is ready to send the next
+    // step. The source embodies the whole dance (strip, NCU, per-line buff+cast) and says
+    // "wait" (Action null) between its own phases. Only the pet-cycle brains use this - the
+    // plain RequestBuffs overloads and every other caller are untouched.
+    private Func<LocalPlayer, GuidedTurn>? _guided;
+    private double _sessionCap = SessionCapSec;
+
+    /// <summary>One consult of a guided session's turn source: the step to send now, or "keep
+    /// waiting"; <see cref="Done" /> closes the session.</summary>
+    public sealed class GuidedTurn
+    {
+        public BuffCatalog.BuffAction? Action; // null: nothing to send this consult (keep waiting)
+        public bool Done;                      // true: the dance is over - close the session
+        public string? DoneWhy;                // the closing reason when Done
+    }
 
     public bool Active => _stage != Stage.Idle;
 
@@ -218,6 +235,42 @@ public sealed class BuffBotController
         return StartAcquire(steps, why, true, s => _logger.LogInformation($"BUFFS: {s}"));
     }
 
+    /// <summary>
+    ///     GUIDED start (the pet-first buff cycle): the caller drives WHAT happens next via
+    ///     <paramref name="nextTurn" />, consulted every time the session is ready to send a step.
+    ///     A turn's Action is sent like any queue step (tell or self-cast, landing watched, per-step
+    ///     timeout); Action null keeps the session open while the source works through its own
+    ///     phases (stripping, waiting for a pet to appear); Done closes it. Walks to the buff spot
+    ///     first like every session. Returns false when it cannot start (already active, in a team).
+    ///     <paramref name="capSeconds" /> lifts the session cap - the full cycle (strip + NCU + a
+    ///     buff-then-summon pass per pet line) outlives the plain tell runs' 6 minutes.
+    /// </summary>
+    public bool RequestGuidedBuffs(string why, Func<LocalPlayer, GuidedTurn> nextTurn, double capSeconds = SessionCapSec)
+    {
+        if (Active || Team.IsInTeam || nextTurn == null)
+        {
+            return false;
+        }
+
+        _steps = new List<BuffCatalog.BuffAction>();
+        _stepIdx = 0;
+        _guided = nextTurn;
+        _sessionCap = Math.Max(SessionCapSec, capSeconds);
+        _current = null;
+        _teamWindow = false;
+        _landed = _failed = _skipped = 0;
+        _settleUntil = 0;
+        _startedAt = _clock;
+        _what = why;
+        _reply = s => _logger.LogInformation($"BUFFS: {s}");
+        _walkFirst = !AtSpot();
+        Enter(_walkFirst ? Stage.Walking : Stage.Working);
+
+        _logger.LogInformation($"BUFFS: guided session open ({why}), cap {_sessionCap:0}s{(_walkFirst ? ", walking to the spot first" : "")}.");
+        _reply($"Guided buff session open ({why}).");
+        return true;
+    }
+
     private bool StartAcquire(List<BuffCatalog.BuffAction> steps, string what, bool walkFirst, Action<string> reply)
     {
         if (steps == null || steps.Count == 0)
@@ -282,9 +335,9 @@ public sealed class BuffBotController
             return;
         }
 
-        if (_clock - _startedAt > SessionCapSec)
+        if (_clock - _startedAt > _sessionCap)
         {
-            End($"session cap {SessionCapSec:0}s reached");
+            End($"session cap {_sessionCap:0}s reached");
             return;
         }
 
@@ -322,6 +375,33 @@ public sealed class BuffBotController
     // Advance to the next step not already satisfied, and send/cast it.
     private void StartNextStep(LocalPlayer me)
     {
+        // GUIDED: the turn source decides what goes out - a step, "keep waiting" (it is between its
+        // own phases: stripping, a pet appearing), or done. No skip-if-have here: the source owns
+        // what still needs asking for.
+        if (_guided != null)
+        {
+            var turn = _guided(me);
+            if (turn.Done)
+            {
+                _guided = null;
+                if (!string.IsNullOrEmpty(turn.DoneWhy))
+                {
+                    _logger.LogInformation($"BUFFS: {turn.DoneWhy}.");
+                }
+
+                Finish(me);
+                return;
+            }
+
+            if (turn.Action != null)
+            {
+                _current = turn.Action;
+                SendStep(me, _current);
+            }
+
+            return;
+        }
+
         while (_stepIdx < _steps.Count)
         {
             var step = _steps[_stepIdx];
@@ -341,35 +421,40 @@ public sealed class BuffBotController
             }
 
             _current = step;
-            _stepSentAt = _clock;
-
-            if (step.Source == BuffCatalog.BuffSource.SelfCast)
-            {
-                try
-                {
-                    me.Cast(step.SelfCastNanoId);
-                    _logger.LogInformation($"BUFFS: self-casting '{step.Name}' ({step.SelfCastNanoId}).");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"BUFFS: self-cast of '{step.Name}' failed: {ex.Message}");
-                    _current = null;
-                    _failed++;
-                }
-
-                return;
-            }
-
-            // Bot tell. A team buff: open the window so the buffer toons' invites are accepted; a self
-            // (single-target) buff needs no team - they cast straight on us.
-            _teamWindow = step.NeedsTeam;
-            _logger.LogInformation($"BUFFS: asking for '{step.Name}'" +
-                $"{(step.NeedsTeam ? " (team - waiting for the invite)" : " (self cast)")}.");
-            SendTell(step.Tell);
+            SendStep(me, step);
             return;
         }
 
         Finish(me);
+    }
+
+    // Send one step out (self-cast or bot tell) - shared by the static queue and guided mode. A
+    // team buff opens the invite window; a single-target buff needs no team.
+    private void SendStep(LocalPlayer me, BuffCatalog.BuffAction step)
+    {
+        _stepSentAt = _clock;
+
+        if (step.Source == BuffCatalog.BuffSource.SelfCast)
+        {
+            try
+            {
+                me.Cast(step.SelfCastNanoId);
+                _logger.LogInformation($"BUFFS: self-casting '{step.Name}' ({step.SelfCastNanoId}).");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"BUFFS: self-cast of '{step.Name}' failed: {ex.Message}");
+                _current = null;
+                _failed++;
+            }
+
+            return;
+        }
+
+        _teamWindow = step.NeedsTeam;
+        _logger.LogInformation($"BUFFS: asking for '{step.Name}'" +
+            $"{(step.NeedsTeam ? " (team - waiting for the invite)" : " (self cast)")}.");
+        SendTell(step.Tell);
     }
 
     // Wait for the current step's nano to land, or time out and move on.
@@ -405,7 +490,8 @@ public sealed class BuffBotController
         _current = null;
     }
 
-    // "We have it" = any of the step's landed nano ids is running on us.
+    // "We have it" = any of the step's landed nano ids is running on us - or, for a RequireAll
+    // step (a multi-code tell), ALL of them: the stack must be complete before the next phase.
     private static bool Have(LocalPlayer me, BuffCatalog.BuffAction step)
     {
         if (step.LandIds.Length == 0)
@@ -414,7 +500,14 @@ public sealed class BuffBotController
         }
 
         var buffs = me.Buffs;
-        return buffs != null && buffs.Any(b => step.LandIds.Contains(b.Id));
+        if (buffs == null)
+        {
+            return false;
+        }
+
+        return step.RequireAll
+            ? step.LandIds.All(id => buffs.Any(b => b.Id == id))
+            : buffs.Any(b => step.LandIds.Contains(b.Id));
     }
 
     private void SendTell(string code)
@@ -450,10 +543,11 @@ public sealed class BuffBotController
 
     // THE BUFFER TOONS' INVITE. Codedoc casts team buffs from several toons (Enfocode, Fixyourcode, ...),
     // not from the one BuffBotName; Chewy likewise. So while a TEAM step is out, accept the first invite
-    // from anyone who is NOT the owner; otherwise leave every invite alone (the owner's own stay manual).
+    // from anyone who is NOT the owner; otherwise leave every invite alone (the owner's own stay manual) -
+    // EXCEPT the Chewys rule below, which does not wait for a team step.
     private void OnTeamRequest(object? sender, TeamRequestEventArgs e)
     {
-        if (_stage != Stage.Working || !_teamWindow || Team.IsInTeam)
+        if (_stage != Stage.Working || Team.IsInTeam)
         {
             return;
         }
@@ -467,6 +561,33 @@ public sealed class BuffBotController
         if (!string.IsNullOrEmpty(_config.Owner) && string.Equals(name, _config.Owner, StringComparison.OrdinalIgnoreCase))
         {
             return; // the owner's invite stays manual
+        }
+
+        // THE CHEWYS INVITE (RubiKa only - RK2019's Codedoc invites only on a team step, gated by the
+        // _teamWindow check below): the Chewys toons (name prefix "Chewys") team you the moment they
+        // process a tell - often before any team-cast step is out, so the window gate never opens and
+        // the invite was being left unanswered (owner, 2026-10-07). While the session is open, their
+        // invite IS the bot's: accept it.
+        if (Client.Dimension == AOSharp.Clientless.Common.Dimension.RubiKa
+            && !string.IsNullOrEmpty(name) && name.StartsWith("Chewys", StringComparison.OrdinalIgnoreCase))
+        {
+            Team.Accept(e.Requester);
+            _logger.LogInformation($"BUFFS: accepted the Chewys invite from '{name}' (they team on the first tell).");
+            return;
+        }
+
+        var rk19list = new string[] { "Codedoc", "Enfocode", "Pocketsize", "Codesolja", "Trandethecode", "Codesmp", "Gonnablastya" };
+
+        if (Client.Dimension == AOSharp.Clientless.Common.Dimension.RubiKa2019 && !string.IsNullOrEmpty(name) && rk19list.Contains(name))
+        {
+            Team.Accept(e.Requester);
+            _logger.LogInformation($"BUFFS: accepted the Codedocs invite from '{name}' (they team on the first tell).");
+            return;
+        }
+        
+        if (!_teamWindow)
+        {
+            return; // no team step is out - not ours to answer
         }
 
         Team.Accept(e.Requester);
@@ -508,5 +629,7 @@ public sealed class BuffBotController
         _current = null;
         _teamWindow = false;
         _reply = null;
+        _guided = null;
+        _sessionCap = SessionCapSec;
     }
 }

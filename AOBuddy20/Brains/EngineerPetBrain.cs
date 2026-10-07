@@ -114,7 +114,7 @@ public sealed class EngineerPetBrain : PetBrain
 
     public EngineerPetBrain(ILogger<EngineerPetBrain> logger, ControlArbiter controlArbiter,
         HuntController hunt, Awareness awareness, BuffCatalog catalog, BuffBotController buffBot, AccountInfo config)
-        : base(logger, controlArbiter)
+        : base(logger, controlArbiter, buffBot)
     {
         _hunt = hunt;
         _awareness = awareness;
@@ -160,6 +160,14 @@ public sealed class EngineerPetBrain : PetBrain
                 }
             }
 
+            return true;
+        }
+
+        // The external-buff gate (the base holds it while a BuffBotController session runs):
+        // summon nothing mid-session - a robot casting itself eats exactly the NCU the incoming
+        // stack needs. An up robot above keeps being driven and maintained.
+        if (SummonHeld)
+        {
             return true;
         }
 

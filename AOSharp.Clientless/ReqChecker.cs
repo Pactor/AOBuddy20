@@ -29,6 +29,8 @@ internal class ReqChecker
         //Default the end result to true
         _state[0] = true;
 
+        var combined = false; // an explicit And/Or/Not ran - the stack machine's result is final
+
         foreach (var criterion in _criteria)
         {
             var metReq = false;
@@ -64,13 +66,14 @@ internal class ReqChecker
                 var lastResult = _state[--prevReqsMet];
                 var result = _state[--prevReqsMet];
 
-                //We can early exit on AND 
+                //We can early exit on AND
                 if (!result || !lastResult)
                 {
                     return false;
                 }
 
                 metReq = true;
+                combined = true;
             }
             else if (criterion.Operator == UseCriteriaOperator.Or)
             {
@@ -83,6 +86,7 @@ internal class ReqChecker
                 var result = _state[--prevReqsMet];
 
                 metReq = result || lastResult;
+                combined = true;
             }
             else if (criterion.Operator == UseCriteriaOperator.Not)
             {
@@ -92,6 +96,7 @@ internal class ReqChecker
                 }
 
                 metReq = !_state[--prevReqsMet];
+                combined = true;
             }
             else
             {
@@ -99,6 +104,23 @@ internal class ReqChecker
             }
 
             _state[prevReqsMet++] = metReq;
+        }
+
+        // A combinator-less list never combines its pushes, so _state[0] holds ONLY the FIRST leaf
+        // and every later leaf would be silently ignored (owner 2026-10-07, the "heal pet not cast"
+        // bug: 'Calling of Restite' gates TS>518 AND BioMet>518 AND profession AND pet slot - the
+        // client check passed on TS alone while the server enforced all four and refused the cast).
+        // The server treats such a list as a conjunction, so fold it as one. (With a combinator
+        // present, the stack machine's _state[0] is the real result, as before.)
+        if (!combined)
+        {
+            for (var i = 0; i < prevReqsMet; i++)
+            {
+                if (!_state[i])
+                {
+                    return false;
+                }
+            }
         }
 
         return _state[0];

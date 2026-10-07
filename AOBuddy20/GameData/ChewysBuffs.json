@@ -633,21 +633,127 @@
      "tell": "bp"
     },
     {
-     "name": "NCU Nanos",
+     "name": "NCU Nanos1",
      "effect": "All NCU Buffs",
      "ncu": 1,
      "team": true,
      "ids": [
-      162995,
-      163079,
-      163081,
+      162995
+     ],
+     "landIds": [
+      162994
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos2",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163079
+     ],
+     "landIds": [
+      163005
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos3",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163081
+     ],
+     "landIds": [
+      163006
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos4",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163083
+     ],
+     "landIds": [
+      163008
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos5",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163085
+     ],
+     "landIds": [
+      163010
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos6",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
       163087
      ],
      "landIds": [
-      162994,
-      163005,
-      163006,
       163012
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos7",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163094
+     ],
+     "landIds": [
+      163015
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos8",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      163095
+     ],
+     "landIds": [
+      163057
+     ],
+     "tell": "ncu",
+     "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"
+    },
+    {
+     "name": "NCU Nanos9",
+     "effect": "All NCU Buffs",
+     "ncu": 1,
+     "team": true,
+     "ids": [
+      275043
+     ],
+     "landIds": [
+      275044
      ],
      "tell": "ncu",
      "note": "not one nano: the Fixer team Max-NCU line, +20/+40/+60/+150 Max NCU. ids = the team-cast nanos Chewy casts; landIds = what actually runs on the receiver (one per tier, ~5h) — match running buffs against landIds"

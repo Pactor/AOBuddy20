@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: MetaphysicistExternalBuffingBrain.cs
 //
-// Last modified: 2026-10-05
+// Last modified: 2026-10-07
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -25,20 +25,19 @@ namespace AOBuddy20.Brains;
 ///     side (PETBRAIN-DESIGN.md port order 4: "the buff step depends on the ExternalBuffingBrain
 ///     family... PetBrain waits on whichever applies"). The MP pet lines gap on THREE skill
 ///     pairs - attack MC(130)+TS(131), heal BioMet(128)+TS(131), mezz MatMet(127)+TS(131) - and
-///     the buff bots' safe all-nano-skill composites lift every one of them. So this brain,
-///     once a second, looks for a MISSING pet line whose best learned summon is one nano-skill
-///     gap away (level/expansion/credit gaps are NOT buffable - no ask), and then:
-///       1. holds the pet brain (SetSummonHold - "stay petless until it resolves"),
-///       2. opens a BuffBotController session with the computed plan (NCU tell first, then the
-///          smallest safe composite closing the gap),
-///       3. when the session ends - buffs landed OR the window closed - releases and fires
-///          RequestSummon(): the pet brain casts the best pet it can NOW, at the new skills.
+///     once a second this brain looks for a line whose best learned summon is one nano-skill gap
+///     away (level/expansion/credit gaps are NOT buffable - no ask). When one is found and the
+///     ask gates pass (PetAutoBuff on, a bot name, un-teamed, past the retry window), it opens
+///     the PET-FIRST BUFF CYCLE (PetFirstBuffCycle) as a GUIDED BuffBotController session:
+///     clear roster, strip every running buff, the best NCU buff (and REMEMBER the NCU), then
+///     per line the best primary+TS stack as ONE multi-code tell, wait ALL landed, cast the
+///     line's pet, next line. The pet brain is held petless the whole way (the session gate in
+///     PetBrain) and the per-line casts punch that hold via CastLineRequest.
 ///     Coordination runs even with PetAutoBuff off (an owner-started 'buffs pet' session gets
 ///     the same hold/release/request treatment around it); ASKING is what PetAutoBuff gates.
-///     This is the Engineer's internal BuffFirst re-homed per the family split (the Engineer
-///     keeps its in-policy variant); v1 only UNLOCKS missing pets - swapping an up pet for a
-///     stronger one (terminate + re-summon at the peak) needs combat awareness and is a later
-///     step. Runs on the update thread (BotLoop), like every brain.
+///     The MP contributes the LineSpec table; the cycle itself is shared with the Engineer and
+///     Bureaucrat pet classes and extends by appending steps. Runs on the update thread
+///     (BotLoop), like every brain.
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 [Brain(BrainKind.ExternalBuffing, Profession.Metaphysicist)]
@@ -72,6 +71,7 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     private readonly BuffBotController _buffBot;
     private readonly BuffCatalog _catalog;
     private readonly AccountInfo _config;
+    private readonly HealController _heal; // the pet-buff step's recharge demand lands here
 
     private readonly Dictionary<PetLine, HashSet<int>> _summonIds = new();
     private double _sinceDecide;
@@ -80,15 +80,24 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     private bool _sessionSeen;         // a buff session ran last tick - its end releases the hold
     private bool _claimed;             // the arbiter is ours at ControlPriority.ExternalBuffing
 
+    // THE CYCLE (owner, 2026-10-07): the pet-first pipeline (strip -> NCU -> per line buff+cast)
+    // running as a guided session; the brain only decides WHEN to open it and hands its turns to
+    // the controller. The MP's LineSpec table is fixed in the ctor.
+    private PetFirstBuffCycle? _cycle;
+    private IReadOnlyList<PetFirstBuffCycle.LineSpec> _lineSpecs = new List<PetFirstBuffCycle.LineSpec>();
+    private const double CycleCapSec = 600.0; // strip + NCU + three (tell, land, summon) passes outlives the plain 6 min
+
     public MetaphysicistExternalBuffingBrain(ILogger<MetaphysicistExternalBuffingBrain> logger,
         ControlArbiter controlArbiter, BrainBank bank, BuffBotController buffBot, BuffCatalog catalog,
-        AccountInfo config)
+        AccountInfo config, HealController heal)
         : base(logger, controlArbiter)
     {
         _bank = bank;
         _buffBot = buffBot;
         _catalog = catalog;
         _config = config;
+        _heal = heal;
+        _lineSpecs = Lines.Select(l => new PetFirstBuffCycle.LineSpec(l.Role, l.Label, l.Primary)).ToList();
         ScanSummonLines();
     }
 
@@ -99,6 +108,10 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         {
             return false; // no pet brain this session - nothing to hand the buffs to
         }
+
+        // The cycle advances every frame (its steps time against their own clock); the guided
+        // session machinery below carries its wire turns.
+        _cycle?.Advance(me, dt);
 
         // A buff session is running (ours, or the owner's 'buffs pet'): the pet brain stays
         // petless until it resolves.
@@ -115,13 +128,14 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         if (_sessionSeen)
         {
             _sessionSeen = false;
+            _cycle = null;
             pet.SetSummonHold(false);
             pet.RequestSummon();
             Release();
             return false;
         }
 
-        // Watching: once a second, is a missing line one nano-skill gap from a better pet?
+        // Watching: once a second, is a line one nano-skill gap from a better pet?
         _sinceDecide += dt;
         if (_sinceDecide < DecideEverySec)
         {
@@ -159,36 +173,43 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             return false; // asked recently - give the last session's outcome time to show
         }
 
-        var plan = _catalog.PlanForSkillGap(me, want.Value.Need);
-        if (!_buffBot.RequestBuffs(plan, $"{want.Value.Label}-first for {want.Value.Pet.Name}"))
+        // THE PET-FIRST CYCLE (owner, 2026-10-07): the pipeline runs as a GUIDED session - clear
+        // roster, strip buffs, NCU buff (and remember the NCU), then per line: the best
+        // primary+TS stack as ONE multi-code tell, wait ALL landed, cast the line's pet, next
+        // line. The pet brain is held petless by the session gate; the per-line casts punch that
+        // hold (CastLineRequest). The want above was only the TRIGGER - the cycle re-plans per
+        // line against the remembered NCU.
+        _cycle = new PetFirstBuffCycle(pet, _catalog, _logger, _lineSpecs, _heal);
+        if (!_buffBot.RequestGuidedBuffs(
+                $"pet-first cycle ({want.Value.Label}-first for {want.Value.Pet.Name})",
+                _cycle.NextTurn, CycleCapSec))
         {
-            return false; // cannot start (no bot/plan) - the pet brain summons what it can
+            _cycle = null; // cannot start (active/teamed) - the pet brain summons what it can
+            return false;
         }
 
         _askedAt = _clock;
         pet.SetSummonHold(true);
         _logger.LogInformation(
-            $"EXTBUFF: asking the buff bot for +{want.Value.Need} nano skills to summon " +
-            $"'{want.Value.Pet.Name}' ({want.Value.Label} pet).");
+            $"EXTBUFF: opening the pet-first cycle - trigger: '{want.Value.Pet.Name}' " +
+            $"({want.Value.Label}, needs +{want.Value.Need} nano skills).");
         return Claim();
     }
 
     // ---- The want ---------------------------------------------------------------------------
 
     /// <summary>
-    ///     The first MISSING line (pet-brain fill order: attack, heal, mezz) whose best learned
-    ///     summon is blocked by its skill pair alone. v1 ignores lines whose pet is already up -
-    ///     upgrading a live roster is terminate + re-summon at the peak, a later step.
+    ///     The first line (pet-brain fill order: attack, heal, mezz) whose best learned summon is
+    ///     blocked by its skill pair alone. Lines with their pet up are NOT skipped any more: the
+    ///     old "already have the pet" check made an up-but-inferior pet a done answer - now it is
+    ///     the roster the swap replaces (terminated before the ask, re-summoned at the peak).
+    ///     The scan's math is stat-based, so without a skill gap it stays quiet and a maxed
+    ///     roster is never disturbed.
     /// </summary>
     private (NanoItem Pet, int Need, string Label)? FindWant(LocalPlayer me)
     {
-        foreach (var (line, role, _, primary, label) in Lines)
+        foreach (var (line, _, _, primary, label) in Lines)
         {
-            if (me.Pets.Any(p => p.Role == role))
-            {
-                continue;
-            }
-
             var (pet, need) = BestLearned(me, line, primary);
             if (pet != null && need > 0)
             {

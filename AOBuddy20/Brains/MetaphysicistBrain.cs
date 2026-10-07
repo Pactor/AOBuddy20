@@ -9,6 +9,7 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using AOBuddy20.Controlling; // BuffBotController (the external-buff session the pet gate holds on)
 using AOBuddy20.Enums;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
@@ -38,8 +39,9 @@ namespace AOBuddy20.Brains;
 ///     whose pet level follows the skills held AT CAST TIME - which is exactly where the later
 ///     buff-first step plugs in. The charm-recovery nanos ("Pet Steal Back", line 1022) are a
 ///     different line and stay out by construction. Among the line's formulas the character has
-///     actually learned (SpellList) and can cast (MeetsUseReqs), the highest-QL one is chosen per
-///     line - no hardcoded ids. One cast at a time (gated on IsCasting) with a per-nano recast
+///     actually learned (SpellList) and can cast (MeetsUseReqs), the highest StackingOrder one is
+///     chosen per line (the tier rank within the strain - NOT QL: pet formulas all read ql 1 in
+///     ItemData) - no hardcoded ids. One cast at a time (gated on IsCasting) with a per-nano recast
 ///     cooldown so a pet gets time to appear.
 ///     Roles are read from the WIRE (<see cref="NpcChar.Role" />): attack/heal/support - the mezz
 ///     pet is PetType.Support, never guessed. A new pet is put on Follow once (conservative, no
@@ -84,9 +86,11 @@ public sealed class MetaphysicistBrain : PetBrain
 
     private readonly Dictionary<PetLine, HashSet<int>> _summonIds = new();
     private bool _warnedNoSummonData;
+    private readonly HashSet<PetLine> _warnedNoLineFormula = new(); // "no formula learned" - once per line
 
-    public MetaphysicistBrain(ILogger<MetaphysicistBrain> logger, ControlArbiter controlArbiter)
-        : base(logger, controlArbiter)
+    public MetaphysicistBrain(ILogger<MetaphysicistBrain> logger, ControlArbiter controlArbiter,
+        BuffBotController buffBot)
+        : base(logger, controlArbiter, buffBot)
     {
         ScanNanoLibrary();
     }
@@ -97,19 +101,19 @@ public sealed class MetaphysicistBrain : PetBrain
         // idempotent on the server, so re-sending it when a new pet lands is safe.
         EnsureCommanded(me);
 
+        // A buffing brain's request jumps the queue - AND punches the summon hold (RequestSummonNow,
+        // the buff cycle's per-line cast: the hold stays on, this ONE cast goes out). IsCasting still
+        // gates - the wire takes one cast at a time; the request stays pending until a tick can act.
+        if (!me.IsCasting && ConsumeSummonRequest())
+        {
+            TrySummon(me);
+            return true;
+        }
+
         // The buff-first hold wins over everything below: stay petless until the buffing side
         // resolves (pets already up stay commanded).
         if (SummonHeld)
         {
-            return true;
-        }
-
-        // A buffing brain's request jumps the queue: a summon pass now, without the 1s cadence
-        // (IsCasting still gates - the wire takes one cast at a time; the request stays pending
-        // until a tick can act on it).
-        if (!me.IsCasting && ConsumeSummonRequest())
-        {
-            TrySummon(me);
             return true;
         }
 
@@ -216,6 +220,7 @@ public sealed class MetaphysicistBrain : PetBrain
 
         var learned = me.SpellList ?? Array.Empty<int>();
         NanoItem? best = null;
+        var bestOrder = -1;
         foreach (var nanoId in learned)
         {
             if (!ids.Contains(nanoId))
@@ -228,32 +233,29 @@ public sealed class MetaphysicistBrain : PetBrain
                 continue;
             }
 
-            // ignorePetLimit: rank on skills/level, not on a pet slot being free (it is - we fill
-            // the first missing line, and a same-line cast while one is up never gets here).
-            bool castable;
-            try
-            {
-                castable = ni.MeetsUseReqs(me, false, true);
-            }
-            catch
-            {
-                castable = false;
-            }
-
-            if (!castable)
-            {
-                continue;
-            }
-
-            if (best == null || ni.Ql > best.Ql)
+            // THE PICK (owner, 2026-10-07): the highest StackingOrder formula the bot has LEARNED -
+            // no castability filter (the buff cycle's wait-for-all guarantees the stack is in
+            // before the cast; MeetsUseReqs's gate was silently skipping the whole line when its
+            // evaluation disagreed with the server). StackingOrder is the tier rank within the
+            // line - NOT QL: pet formulas all read ql 1 in ItemData.
+            var order = NanoLibrary.Find(nanoId)?.Stat((int)Stat.StackingOrder) ?? 0;
+            if (best == null || order > bestOrder)
             {
                 best = ni;
+                bestOrder = order;
             }
         }
 
         if (best == null)
         {
-            return; // nothing castable this pass (skills/level/NCU/expansion) - a later step adds buffs
+            if (!_warnedNoLineFormula.Contains(line))
+            {
+                _warnedNoLineFormula.Add(line);
+                _logger.LogWarning(
+                    $"PET: no {LineName(line)} formula learned - the {LineName(line)} pet stays down until one is uploaded.");
+            }
+
+            return;
         }
 
         if (_summonAt.TryGetValue(best.Id, out var last) && _clock - last < SummonRecastSec)
@@ -263,7 +265,8 @@ public sealed class MetaphysicistBrain : PetBrain
 
         _summonAt[best.Id] = _clock;
         me.Cast(best.Id);
-        _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, ql {best.Ql}) for the {LineName(line)} pet.");
+        _logger.LogInformation($"PET: summon - casting '{best.Name}' ({best.Id}, tier {bestOrder}) for the {LineName(line)} pet; " +
+                               $"buffs running at cast: {RunningBuffs(me)}");
     }
 
     // ---- Data -------------------------------------------------------------------------------
@@ -303,7 +306,7 @@ public sealed class MetaphysicistBrain : PetBrain
     {
         // Descending StackingOrder (0 when a formula does not carry it - the Stats dictionary
         // is sparse; the raw indexer would throw). The sets are membership only: selection
-        // ranks by QL over the learned list at cast time.
+        // ranks by StackingOrder over the learned list at cast time.
         foreach (var nano in NanoLibrary.InStrain((int)line).OrderByDescending(x => x.Stat((int)Stat.StackingOrder)))
         {
             _summonIds[petLine].Add(nano.NanoId);
@@ -321,6 +324,29 @@ public sealed class MetaphysicistBrain : PetBrain
             PetType.Support => "mezz",
             _ => role.ToString(),
         };
+    }
+
+    /// <summary>
+    ///     The buff cycle's per-line cast: summon the pet of THIS wire role (its buffs just landed),
+    ///     never an earlier-priority line. No-op while the role's slot is already filled or a cast is
+    ///     in flight (the pending summon request retries on a later tick).
+    /// </summary>
+    public override void CastLineRequest(LocalPlayer me, PetType role)
+    {
+        if (me.Pets.Count(p => p.Role == role) >= 1)
+        {
+            return; // already up - nothing to cast
+        }
+
+        if (me.IsCasting)
+        {
+            RequestSummonNow(); // a cast is in flight - the pending request retries once it clears
+            return;
+        }
+
+        var line = Slots.FirstOrDefault(s => s.Role == role).Line;
+        _logger.LogInformation($"PET: buff cycle cast - the {Describe(role)} pet's buffs are up.");
+        CastBest(me, line);
     }
 
     private static string LineName(PetLine line)

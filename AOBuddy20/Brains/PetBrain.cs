@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: PetBrain.cs
 //
-// Last modified: 2026-10-05
+// Last modified: 2026-10-07
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -41,6 +41,8 @@ namespace AOBuddy20.Brains;
 ///     POLICY (summon selection, the buff-first sequence, role assignment, the charm flow) belongs
 ///     to the profession subclass; the base is dormant until one overrides <see cref="PolicyTick" />.
 ///     The tick runs on the update thread (BotLoop), the same one every packet handler runs on.
+///     The base also owns the EXTERNAL-BUFF GATE (<see cref="ExternalBuffGate" />): while a buff
+///     session runs, every pet brain holds its summon - no pet casts itself into a buff stack.
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 public abstract class PetBrain
@@ -59,10 +61,11 @@ public abstract class PetBrain
     /// uniformly to the NCU buff (a 4h buff he often logs in with), the control stack and the survival set.</summary>
     protected const double RefreshSoonSec = 900.0;
 
-    protected PetBrain(ILogger logger, ControlArbiter controlArbiter)
+    protected PetBrain(ILogger logger, ControlArbiter controlArbiter, BuffBotController? buffBot = null)
     {
         _logger = logger;
         _controlArbiter = controlArbiter;
+        _buffBot = buffBot;
     }
 
     // ---- Shared buff-state primitives (every pet profession uses these) ---------------------
@@ -130,10 +133,33 @@ public abstract class PetBrain
 
     protected readonly ILogger _logger;
     protected readonly ControlArbiter _controlArbiter;
+    private readonly BuffBotController? _buffBot; // the external-buff session source (null: no gate)
 
     protected double _clock; // the brain's own clock, accumulated from dt
     private bool _holding;   // an episode is open: arbiter held at ControlPriority.Pet
     private double _lastTickErrorAt = double.NegativeInfinity; // throttle the recovery log
+
+    /// <summary>
+    ///     One line describing every nano running on the character at this instant (owner's
+    ///     under-tier summon diagnosis, 2026-10-07): name, id, strain, minutes left. Logged at
+    ///     every actual pet cast, whichever path ordered it.
+    /// </summary>
+    protected static string RunningBuffs(LocalPlayer me)
+    {
+        if (me?.Buffs == null)
+        {
+            return "NONE";
+        }
+
+        var all = string.Join(", ", me.Buffs.Select(b =>
+        {
+            var left = b.Cooldown?.RemainingTime ?? 0;
+            return $"'{b.NanoItem?.Name ?? NanoLibrary.NameOf(b.Id)}' {b.Id} " +
+                   $"(strain {BuffCatalog.StrainOf(b.Id)}, {left / 60:0}m)";
+        }));
+
+        return all.Length == 0 ? "NONE" : all;
+    }
 
     /// <summary>True while a pet episode is open (BotLoop claims Tasks.Pet).</summary>
     public bool Tick(LocalPlayer me, double dt)
@@ -144,6 +170,8 @@ public abstract class PetBrain
             ReleaseControl(); // zone/login loss
             return false;
         }
+
+        ExternalBuffGate();
 
         // A pet-brain decision must never wedge the bot: a throw here would otherwise skip every system
         // that ticks after the pet overlay this frame. Contain it, drop our control so nothing is held in
@@ -326,6 +354,46 @@ public abstract class PetBrain
         }
     }
 
+    // ---- ENGINE: the external-buff gate ------------------------------------------------------
+
+    // True while the summon hold below was set BY THE GATE (a session running) - only a gate-set
+    // hold is auto-released here; a policy's own hold (the buff-first dance) is never touched.
+    private bool _gateHeld;
+
+    /// <summary>
+    ///     The buff-session gate (owner, 2026-10-07): while a <see cref="BuffBotController" />
+    ///     acquire is open - the owner's 'buffs' command, the MP external brain's buff-first ask,
+    ///     the Engineer's sustain asks - the character's NCU must stay free for the incoming
+    ///     stack, and a pet auto-summoning itself mid-session eats exactly the headroom the buffs
+    ///     need. So the engine HOLDS the summon for the session's length (pets already up stay
+    ///     commanded and driven by the policy's own front matter) and, when the session ends,
+    ///     releases and fires <see cref="RequestSummon" /> so the roster refills immediately at
+    ///     the new skills. Brains without an injected controller (the dormant general) are ungated.
+    /// </summary>
+    private void ExternalBuffGate()
+    {
+        if (_buffBot == null)
+        {
+            return;
+        }
+
+        if (_buffBot.Active)
+        {
+            SetSummonHold(true);
+            _gateHeld = true;
+            return;
+        }
+
+        if (!_gateHeld)
+        {
+            return;
+        }
+
+        _gateHeld = false;
+        SetSummonHold(false);
+        RequestSummon();
+    }
+
     // ---- ENGINE: the cross-brain handshake (the buff-first summon) --------------------------
 
     // One-shot: another brain asked for an immediate summon pass (consumed by the next tick).
@@ -350,6 +418,28 @@ public abstract class PetBrain
 
         _summonRequested = true;
         _logger.LogInformation("PET: summon requested (buff-first handshake).");
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: like <see cref="RequestSummon" />, but it PUNCHES THROUGH the summon hold -
+    ///     the pet-first buff cycle's per-line cast: the buffs for THIS line just landed and the pet
+    ///     must go up NOW (the wrangle is ticking), while the session keeps holding every other
+    ///     summon. The policy consumes it even while held - one cast, then the hold resumes.
+    /// </summary>
+    public void RequestSummonNow()
+    {
+        _summonRequested = true;
+        _logger.LogInformation("PET: summon requested NOW (buff cycle line cast - punches the hold).");
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: ask for the pet of ONE wire role (the buff cycle's per-line cast). The base
+    ///     falls back to the plain now-request (the policy's own priority order fills the first
+    ///     missing line); pet professions override to target their line's mechanic exactly.
+    /// </summary>
+    public virtual void CastLineRequest(LocalPlayer me, PetType role)
+    {
+        RequestSummonNow();
     }
 
     /// <summary>
@@ -411,6 +501,24 @@ public abstract class PetBrain
     /// <summary>Hook: the roster was just terminated - the policy drops its per-pet bookkeeping.</summary>
     protected virtual void OnRosterTerminated()
     {
+    }
+
+    /// <summary>
+    ///     CROSS-BRAIN: /pet terminate for ONE role's pet(s) - the buff cycle's per-line swap
+    ///     (owner, 2026-10-07): the old pet dies right before the new summon (the server's
+    ///     pet-slot gate wants the slot free, and same-line recasts are refused while it lives),
+    ///     while the REST of the roster keeps fighting the whole cycle.
+    /// </summary>
+    public void TerminatePet(LocalPlayer me, PetType role)
+    {
+        var ids = me.Pets.Where(p => p.Role == role).Select(p => p.Identity).ToList();
+        if (ids.Count == 0)
+        {
+            return;
+        }
+
+        Command(me, PetCommand.Terminate, ids);
+        _logger.LogInformation($"PET: terminating {ids.Count} {role} pet(s) - the line's new summon follows.");
     }
 }
 

@@ -9,6 +9,7 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
 using AOBuddy20.Brains;
@@ -74,6 +75,32 @@ public sealed class BuffCatalog
 
         /// <summary>How much this buff adds to a stat (MC 130 / TS 131 / Max NCU 181 / ...), from the pack.</summary>
         public int Adds(int statId) => Modifies.TryGetValue(statId, out var v) ? v : 0;
+    }
+
+    /// <summary>
+    ///     How much a buff adds to one NANO skill for the pet-line planner: the pack's flat Modify
+    ///     where it names the stat directly, otherwise the all-nano-skills effect text ("+20 Nano
+    ///     Skills") parsed for its +N - the fallback catches a catalog entry whose rep nano came
+    ///     back without the six per-skill modifies.
+    /// </summary>
+    public static int GainFor(BuffEntry b, int statId)
+    {
+        var adds = b.Adds(statId);
+        if (adds != 0)
+        {
+            return adds;
+        }
+
+        if (b.Effect.Contains("nano skill", StringComparison.OrdinalIgnoreCase))
+        {
+            var m = Plus.Match(b.Effect);
+            if (m.Success)
+            {
+                return int.Parse(m.Groups[1].Value);
+            }
+        }
+
+        return 0;
     }
 
     // Raw requirement encoding in the pack (verified 2026-10-05 from the cast-criteria dump):
@@ -222,11 +249,11 @@ public sealed class BuffCatalog
         {
             entry.LandIds.AddRange(land.Select(x => (int)x));
         }
-        else if (entry.NanoId.HasValue)
+        if (entry.NanoId.HasValue)
         {
             entry.LandIds.Add(entry.NanoId.Value);
         }
-        else if (b["ids"] is JArray ids)
+        if (b["ids"] is JArray ids)
         {
             entry.LandIds.AddRange(ids.Select(x => (int)x));
         }
@@ -280,12 +307,25 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = casts.Any(c => c.Func == FuncTeamCastNano);
                 b.CanCastOnOthers = casts.Any(c => c.Func is FuncTeamCastNano or FuncAreaCastNano);
+                b.ReceiverLevel = casts.Max(x =>
+                {
+                    var nn = NanoLibrary.Find(x.NanoId);
+                    if (nn != null)
+                    {
+                        return ReceiverGate(nn).Level;
+                    }
+
+                    throw new KeyNotFoundException($"Nano {x.NanoId} not found???");
+                });
             }
             else
             {
                 b.NeedsTeam = false;
                 b.CanCastOnOthers = rep.TargetsOthers;
+                b.ReceiverLevel = 1;
             }
+
+            
         }
     }
 
@@ -297,6 +337,39 @@ public sealed class BuffCatalog
     // only). Attribute buffs raise abilities (16..21) and only TRICKLE to skill - a different line that stacks.
     private static readonly int[] NanoSkillStats = { 122, 127, 128, 129, 130, 131 };
     private static bool IsNanoSkillBuff(BuffEntry b) => NanoSkillStats.Any(ns => b.Adds(ns) > 0);
+
+    /// <summary>
+    ///     Is a RUNNING nano a cancel candidate for a pet line (the pet-first cycle's inter-line
+    ///     fix, owner 2026-10-07): it raises nano skills, but NONE of this line's pair - the attack
+    ///     line's MatCrea singles once the heal line (BioMet+TS) is planned. Composites, wrangles
+    ///     and attribute buffs raise the line's skills (directly or by trickle) and stay; the NCU
+    ///     buff and survival buffs raise no nano skill at all and stay.
+    /// </summary>
+    public static bool IsLineForeignNanoSkill(int nanoId, int statA, int statB)
+    {
+        return IsLineForeignNanoSkill(nanoId, new[] { statA, statB });
+    }
+
+    /// <summary>The same test against an arbitrary set of needed stats (the pet-buff lift's).</summary>
+    public static bool IsLineForeignNanoSkill(int nanoId, IReadOnlyCollection<int> neededStats)
+    {
+        foreach (var s in neededStats)
+        {
+            if (SkillContributionOf(nanoId, s) > 0)
+            {
+                return false;
+            }
+        }
+
+        return NanoSkillStats.Any(ns => SkillContributionOf(nanoId, ns) > 0);
+    }
+
+    /// <summary>The NCU footprint of a running nano, priced from the catalog (0 when unknown).</summary>
+    public int NcuOfNano(int nanoId)
+    {
+        var e = _buffs.FirstOrDefault(b => b.NanoId == nanoId || b.RepNanoId == nanoId || b.LandIds.Contains(nanoId));
+        return e?.Ncu ?? 0;
+    }
 
     // The RECEIVER's own gate on a nano - the Level we must meet and the Shadowlands flag. A buff cast on
     // others carries BOTH gates on the landed nano's criteria: the CASTER's level (the higher one - the bot
@@ -790,6 +863,8 @@ public sealed class BuffCatalog
         public string Tell = ""; // when Source == BuffBot
         public bool NeedsTeam; // when Source == BuffBot: team-cast (accept the invite, they auto-disband) vs single-target (direct cast, no team)
         public int[] LandIds = Array.Empty<int>(); // the landed nano id(s): "we have it" = any of these is running on us
+        public bool RequireAll; // false (default): ANY LandId up = landed. true: EVERY LandId must be up -
+                                // a multi-code tell ("cast tsmo mcmo 131 c2") waits for the whole stack.
         public bool IsWrangleStep; // the short summon-moment wrangle - excluded from a durable acquisition run
 
         public string Describe => Source switch
@@ -975,6 +1050,122 @@ public sealed class BuffCatalog
         return string.IsNullOrEmpty(ncu?.Tell) ? null : ncu.Tell;
     }
 
+    /// <summary>
+    ///     The caster-side SKILL shortfall of one nano (the pet-buff step's lift calculation,
+    ///     owner 2026-10-07): from the pack's cast criteria, every GreaterThan gate on one of the
+    ///     six nano skills that the CASTER must meet (receiver-tagged leaves are the target's
+    ///     business - the family gates - and are not stat lifts), as stat -> how far we fall
+    ///     short. AO's comparisons are inclusive (ReqChecker), so the requirement is the gate
+    ///     value itself. Empty = castable as-is.
+    /// </summary>
+    public static Dictionary<int, int> CasterSkillGaps(int nanoId, LocalPlayer me)
+    {
+        var gaps = new Dictionary<int, int>();
+        var nano = NanoLibrary.Find(nanoId);
+        if (nano == null || me == null)
+        {
+            return gaps;
+        }
+
+        foreach (var action in nano.Actions ?? Array.Empty<NanoAction>())
+        {
+            if (action.ActionType != 3)
+            {
+                continue; // the use/cast action (ActionToUse)
+            }
+
+            foreach (var req in action.Requirements ?? Array.Empty<NanoRequirement>())
+            {
+                if (req.Operator != OpGreaterThan || req.Target == TargetReceiver
+                    || !NanoSkillStats.Contains(req.Stat))
+                {
+                    continue;
+                }
+
+                me.TryGetStat((Stat)req.Stat, out var cur);
+                var need = req.Value - cur;
+                if (need > 0)
+                {
+                    gaps[req.Stat] = Math.Max(gaps.TryGetValue(req.Stat, out var had) ? had : 0, need);
+                }
+            }
+        }
+
+        return gaps;
+    }
+
+    /// <summary>
+    ///     The LIFT plan for caster-side shortfalls (the pet-buff step): per NanoStrain the
+    ///     strongest candidate raising any NEEDED stat, greedily taken by still-needed
+    ///     coverage per NCU until every shortfall is covered or nothing affordable remains.
+    ///     Receiver-gated (level + expansion) like every plan; the wrangle goes last.
+    /// </summary>
+    public List<BuffEntry> PlanCasterLift(LocalPlayer me, IReadOnlyDictionary<int, int> needByStat,
+        int ncuBudget, bool paid)
+    {
+        var plan = new List<BuffEntry>();
+        if (!Loaded || me == null || needByStat.Count == 0 || ncuBudget <= 0)
+        {
+            return plan;
+        }
+
+        var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
+        var needStats = needByStat.Keys.ToList();
+
+        var pool = _buffs
+            .Where(b => b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell) && Castable(b, myLevel, paid))
+            .Where(b => needStats.Any(s => GainFor(b, s) > 0))
+            .GroupBy(b => b.Strain)
+            .Select(g => g.OrderByDescending(b => needStats.Sum(s => GainFor(b, s))).ThenBy(b => b.Ncu).First())
+            .ToList();
+
+        var remaining = new Dictionary<int, int>(needByStat);
+        var budget = ncuBudget;
+
+        while (true)
+        {
+            BuffEntry? best = null;
+            var bestScore = 0.0;
+            foreach (var c in pool)
+            {
+                if (plan.Contains(c) || c.Ncu > budget)
+                {
+                    continue;
+                }
+
+                var covers = needStats.Sum(s => Math.Min(GainFor(c, s), Math.Max(0, remaining.GetValueOrDefault(s))));
+                if (covers <= 0)
+                {
+                    continue; // nothing this candidate still covers
+                }
+
+                var perNcu = covers / Math.Max(1, c.Ncu);
+                if (best == null || perNcu > bestScore)
+                {
+                    best = c;
+                    bestScore = perNcu;
+                }
+            }
+
+            if (best == null)
+            {
+                break;
+            }
+
+            plan.Add(best);
+            foreach (var s in needStats)
+            {
+                remaining[s] = Math.Max(0, remaining.GetValueOrDefault(s) - GainFor(best, s));
+            }
+
+            budget -= best.Ncu;
+        }
+
+        // Tell order: the durable stack first, the short wrangle last (freshest at the casts).
+        plan.Sort((x, y) => (IsWrangle(x) ? 1 : 0).CompareTo(IsWrangle(y) ? 1 : 0));
+        return plan;
+    }
+
     /// <summary>The chosen Max-NCU buff for a receiver: the tell to send, and how much Max NCU it adds.</summary>
     public sealed class NcuPick
     {
@@ -1120,5 +1311,79 @@ public sealed class BuffCatalog
         var curTs = me.TryGetStat(Stat.SpaceTime, out var ts) ? ts : 0;
         var need = Math.Max(Math.Max(0, reqMc - curMc), Math.Max(0, reqTs - curTs));
         return PlanForSkillGap(me, need);
+    }
+
+    /// <summary>
+    ///     THE PET-LINE PLAN (owner, 2026-10-07): the buff combination that lifts a pet line's skill
+    ///     pair (attack MatCrea+TS, heal BioMet+TS, mezz MatMeta+TS) the most OVERALL, kept BALANCED -
+    ///     a pet needs BOTH skills at its requirement, so stacking one side high while the other lags
+    ///     buys nothing ("not helpful to have 1000 TS and only 300 MC"). Candidates are the wrangle,
+    ///     the mocham/infuse/mastery/teaching families and the composites - per NanoStrain only the
+    ///     strongest variant is considered (same-strain buffs overwrite, never stack), everything is
+    ///     receiver-gated (level + expansion via <see cref="Castable" />) and NCU-budgeted.
+    ///     Selection is a greedy over value-per-NCU where the skill currently BEHIND scores double:
+    ///     that maximizes the pair's sum AND rebalances every round. The caller sends the returned
+    ///     entries' codes in ONE tell ("cast tsmo mcmo 131 c2").
+    /// </summary>
+    public List<BuffEntry> PlanPetLine(LocalPlayer me, int statA, int statB, int ncuBudget, bool paid)
+    {
+        var plan = new List<BuffEntry>();
+        if (!Loaded || me == null || ncuBudget <= 0)
+        {
+            return plan;
+        }
+
+        var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
+
+        // Candidates: anything raising either skill, deliverable by a bot (tell + casts on others),
+        // castable by us as the receiver - collapsed to the strongest variant per strain.
+        var pool = _buffs
+            .Where(b => b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell) && Castable(b, myLevel, paid))
+            .Where(b => GainFor(b, statA) > 0 || GainFor(b, statB) > 0)
+            .GroupBy(b => b.Strain)
+            .Select(g => g.OrderByDescending(b => GainFor(b, statA) + GainFor(b, statB)).ThenBy(b => b.Ncu).First())
+            .ToList();
+
+        var projA = me.TryGetStat((Stat)statA, out var a) ? a : 0;
+        var projB = me.TryGetStat((Stat)statB, out var v) ? v : 0;
+        var budget = ncuBudget;
+
+        while (true)
+        {
+            BuffEntry? best = null;
+            var bestScore = 0.0;
+            foreach (var c in pool)
+            {
+                if (plan.Contains(c) || c.Ncu > budget)
+                {
+                    continue;
+                }
+
+                var gA = GainFor(c, statA);
+                var gB = GainFor(c, statB);
+                var score = projA <= projB ? gA * 2.0 + gB : gB * 2.0 + gA;
+                var perNcu = score / Math.Max(1, c.Ncu);
+                if (best == null || perNcu > bestScore)
+                {
+                    best = c;
+                    bestScore = perNcu;
+                }
+            }
+
+            if (best == null)
+            {
+                break; // nothing affordable left - the stack is what the NCU budget allows
+            }
+
+            plan.Add(best);
+            projA += GainFor(best, statA);
+            projB += GainFor(best, statB);
+            budget -= best.Ncu;
+        }
+
+        // Tell order: the durable stack first, the short wrangle LAST - it must be freshest at the
+        // summon moment (it lapses right after the pet lands and is never refreshed).
+        plan.Sort((x, y) => (IsWrangle(x) ? 1 : 0).CompareTo(IsWrangle(y) ? 1 : 0));
+        return plan;
     }
 }

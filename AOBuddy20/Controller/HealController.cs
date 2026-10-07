@@ -123,6 +123,28 @@ public sealed class HealController
     // The rest cycle's state (out of combat, recharger): we sat for it, when, and what the body
     // has gained since - the stall guard reads the peaks, not the tick-to-tick deltas.
     private bool _resting;
+    private bool _rechargeDemanded; // an external system wants a FULL recharge (not just past the own thresholds)
+    private string _rechargeWhy = "";
+
+    /// <summary>External demand (the pet-first cycle's pet-buff step): sit for the rechargers until
+    /// the nano AND health are full, regardless of the own thresholds. Combat still interrupts; a
+    /// "no gain" end clears it (no rechargers left - re-sitting would loop). Cleared automatically
+    /// when full.</summary>
+    public void DemandRecharge(string why)
+    {
+        if (_rechargeDemanded)
+        {
+            return;
+        }
+
+        _rechargeDemanded = true;
+        _rechargeWhy = why;
+        _logger.LogInformation($"HEAL: recharge demanded ({why}).");
+    }
+
+    /// <summary>True while a rest is wanted or running (the demand counts even before the sit) -
+    /// a caller that needs the body NOT seated waits for this to clear.</summary>
+    public bool RestActive => _resting || _rechargeDemanded;
     private double _restStartedAt;
     private double _restLastGainAt;
     private int _restPeakHealth = -1, _restPeakNano = -1;
@@ -243,10 +265,23 @@ public sealed class HealController
 
         // THE WANT, per scenario: in combat stim-or-nano, out of combat rechargers. Both deficits
         // are NET of the buffs' regen: what the running HoTs pour in over the horizon we care
-        // about is need we do not have to spend an item on.
+        // about is need we do not have to spend an item on. An EXTERNAL DEMAND (the pet-first
+        // cycle's pet-buff step, owner 2026-10-07) overrides both: rest until the nano AND health
+        // are FULL - the summoned pets are worth more than the recharger items.
         string reason;
         bool want;
-        if (combat)
+        if (_rechargeDemanded)
+        {
+            var full = nano >= maxNano && health >= maxHealth;
+            if (full)
+            {
+                _rechargeDemanded = false;
+            }
+
+            want = !full;
+            reason = $"recharge demanded ({_rechargeWhy}) - nano {nano * 100.0 / maxNano:0}%, health {health * 100.0 / maxHealth:0}%";
+        }
+        else if (combat)
         {
             // In combat the horizon is one lock: the next stim may go in when its lock is up, so
             // regen beyond it does not argue against this one.
@@ -560,12 +595,14 @@ public sealed class HealController
 
         if (_clock - _restStartedAt > _config.HealRestMaxSeconds)
         {
+            _rechargeDemanded = false; // a timed-out demand must not re-sit on the spot forever
             EndRest("the rest ran out of time");
             return;
         }
 
         if (_clock - _restLastGainAt > RestStallSeconds)
         {
+            _rechargeDemanded = false; // no rechargers helping - re-sitting would loop
             EndRest("no gain - the item is not helping");
             return;
         }
@@ -630,6 +667,7 @@ public sealed class HealController
         }
 
         _resting = false;
+        _rechargeDemanded = false; // dead/zoned: the demand loses its context with the rest
         ReleaseHold("rest dropped");
         _restCooldownLeft = RestCooldownSeconds;
         _loggedShort = false;
