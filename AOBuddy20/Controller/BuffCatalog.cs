@@ -1272,53 +1272,73 @@ public sealed class BuffCatalog
         var budget = ncuBudget;
         var usedStrains = new HashSet<int>();
 
-        // THE MUSTS, PLANNED TOGETHER: start each at its biggest tier, then downgrade the largest
-        // consumer whenever the sum does not fit - the tier ladder exists exactly so all musts
-        // can be in at once.
-        var mustCategories = categories.Where(c => c.Must).ToList();
-        var mustCandidates = mustCategories.Select(c => Candidates(c.Name, c.Match)).ToList();
-        var mustPicks = mustCandidates.Select(c => c.FirstOrDefault()).ToList();
-        while (mustPicks.Sum(p => p?.Ncu ?? 0) > budget)
+        // THE MUSTS IN IMPORTANCE ORDER (owner, 2026-10-07: "a Heal over time is way more
+        // important than the XP buff"): start with every must at its biggest tier; when even the
+        // smallest tiers overflow the budget, the LEAST important must is dropped first; within
+        // what remains, the least important consumers downgrade first. The optionals (XP,
+        // evasion included) only get what is left - nice to have, by no means necessary.
+        var kept = categories.Where(c => c.Must)
+            .Select(c => (Name: c.Name, Cands: Candidates(c.Name, c.Match)))
+            .ToList();
+
+        int MinSum() => kept.Sum(k => k.Cands.Count > 0 ? k.Cands[^1].Ncu : 0);
+        while (kept.Count > 0 && MinSum() > budget)
         {
+            _logger.LogInformation(
+                $"COMFORT: must '{kept[^1].Name}' - the budget cannot hold every must; dropping it (least important first).");
+            kept.RemoveAt(kept.Count - 1);
+        }
+
+        var picks = kept.Select(k => k.Cands.Count > 0 ? k.Cands[0] : null).ToList(); // the biggest tier each
+        while (picks.Sum(p => p?.Ncu ?? 0) > budget)
+        {
+            // downgrade the LEAST important pick that still has a smaller tier
             var victim = -1;
-            var biggest = -1;
-            for (var i = 0; i < mustPicks.Count; i++)
+            for (var i = picks.Count - 1; i >= 0; i--)
             {
-                if (mustPicks[i] == null)
+                if (picks[i] == null)
                 {
                     continue;
                 }
 
-                var cur = mustPicks[i]!.Ncu;
-                if (mustCandidates[i].Any(c => c.Ncu < cur) && cur > biggest)
+                if (kept[i].Cands.Any(c => c.Ncu < picks[i]!.Ncu))
                 {
-                    biggest = cur;
                     victim = i;
+                    break;
                 }
             }
 
             if (victim < 0)
             {
-                break; // every must is at its smallest tier and the sum still does not fit
+                break; // everything is at its smallest tier
             }
 
-            mustPicks[victim] = mustCandidates[victim].First(c => c.Ncu < mustPicks[victim]!.Ncu);
+            picks[victim] = kept[victim].Cands.First(c => c.Ncu < picks[victim]!.Ncu);
         }
 
-        for (var i = 0; i < mustPicks.Count; i++)
+        // still overflowing at the smallest tiers: drop from the LEAST important end
+        while (picks.Sum(p => p?.Ncu ?? 0) > budget && picks.Any(p => p != null))
         {
-            var pick = mustPicks[i];
+            var i = picks.FindLastIndex(p => p != null);
+            _logger.LogWarning(
+                $"COMFORT: must '{kept[i].Name}' - even at its smallest tier it does not fit - dropped (least important first).");
+            picks[i] = null;
+        }
+
+        for (var i = 0; i < picks.Count; i++)
+        {
+            var pick = picks[i];
             if (pick == null)
             {
-                _logger.LogInformation($"COMFORT: must '{mustCategories[i].Name}' - nothing learned/castable - skipped.");
-                continue;
-            }
+                if (kept[i].Cands.Count > 0)
+                {
+                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - dropped for budget (least important first).");
+                }
+                else
+                {
+                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - nothing learned/castable - skipped.");
+                }
 
-            if (mustPicks.Sum(p => p?.Ncu ?? 0) > budget)
-            {
-                _logger.LogWarning(
-                    $"COMFORT: must '{mustCategories[i].Name}' - even at the smallest tiers the musts exceed the " +
-                    $"budget ({ncuBudget}) - dropped.");
                 continue;
             }
 
@@ -1331,7 +1351,7 @@ public sealed class BuffCatalog
             usedStrains.Add(pick.Strain);
             budget -= pick.Ncu;
             _logger.LogInformation(
-                $"COMFORT: must '{mustCategories[i].Name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
+                $"COMFORT: must '{kept[i].Name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
         }
 
         // THE OPTIONALS: the biggest tier that fits the remainder, in the owner's order.
