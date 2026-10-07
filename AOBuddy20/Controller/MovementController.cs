@@ -348,11 +348,15 @@ public sealed class MovementController : IPacketConsumer
         _logger = logger;
         _config = config;
         _follow = new FollowController(logger, _movement, SendIntervalMs, MaxStep);
+        _useTravel = new UseTravelController(logger, _movement, SendIntervalMs);
         _logger.LogInformation("Movement controller initialized.");
     }
 
     private readonly AccountInfo _config; // the owner name: follow's target
     private readonly FollowController _follow;
+    private readonly UseTravelController _useTravel; // ride the object the owner used (lift/grid/whompa/portal)
+    private bool _ownerWasVisible;   // last tick's owner visibility, to fire OnOwnerLost once on the transition
+    private double _ownerLostSince = -1; // movement-clock seconds when the owner went out of view, -1 while visible
 
     // The body driver and the owner's wire fingerprint, published for the packet thread. He is known
     // by dynel instance: his CharDCMove packets carry it.
@@ -773,6 +777,7 @@ public sealed class MovementController : IPacketConsumer
         Client.OnUpdate += PublishSnapshot;
         Client.PostureToggled += OnPostureToggled;
         Team.TeamRequest += OnTeamRequest; // the warp service's invite (Scotty legs)
+        DynelManager.DynelUsed += OnDynelUsed; // the owner using a travel object (lift/grid/whompa/portal) - ride it
         _thread = new Thread(WalkLoop)
         {
             IsBackground = true,
@@ -780,6 +785,13 @@ public sealed class MovementController : IPacketConsumer
         };
         _thread.Start();
         _logger.LogInformation("Movement loop started.");
+
+        // Follow the owner from login (AOBuddy10's idle default), unless the conf opted out. 'stay'
+        // turns it off at runtime; 'follow' back on.
+        if (_config.Follow && !string.IsNullOrEmpty(_config.Owner))
+        {
+            SetFollow(true);
+        }
     }
 
     public void Stop()
@@ -793,6 +805,7 @@ public sealed class MovementController : IPacketConsumer
         Client.OnUpdate -= PublishSnapshot;
         Client.PostureToggled -= OnPostureToggled;
         Team.TeamRequest -= OnTeamRequest;
+        DynelManager.DynelUsed -= OnDynelUsed;
         _thread?.Join(TimeSpan.FromSeconds(2));
         _logger.LogInformation("Movement loop stopped.");
     }
@@ -826,6 +839,22 @@ public sealed class MovementController : IPacketConsumer
         _seated = false;
         _sitConfirmed = false;
         _logger.LogInformation("Movement: server confirmed the posture change (stand-up echo).");
+    }
+
+    // The owner used a world object (GenericCmd Use, forwarded by the SDK as DynelUsed). Only the owner's
+    // uses matter: hand it to use-travel, which rides the same object if the owner then zones off it. Runs
+    // on the packet pump; it only records the "last used" trio, read on the walk thread (single producer).
+    private void OnDynelUsed(Identity user, Identity target)
+    {
+        if (_ownerInstance == 0 || user.Instance != _ownerInstance)
+        {
+            return; // not the owner's Use - not ours to ride
+        }
+
+        Vector3? pos = DynelManager.Find(target, out Dynel obj)
+            ? obj.Transform.Position
+            : _snap.OwnerVisible ? _snap.OwnerPos : null;
+        _useTravel.OnOwnerUsed(target, pos);
     }
 
     // Runs on the SDK update thread: the only place SDK state may be read (review.md #9).
@@ -983,6 +1012,9 @@ public sealed class MovementController : IPacketConsumer
             _movement.Stop(me, SendIntervalMs);
             _movement.Reset();
             _follow.Reset();
+            _useTravel.Reset();
+            _ownerWasVisible = false;
+            _ownerLostSince = -1;
             _route.Clear();
             _routeIdx = 0;
             _routePrio = -1;
@@ -1024,8 +1056,17 @@ public sealed class MovementController : IPacketConsumer
         // silently and rubberbands much later). Past a few metres of gap between the body's
         // dictated position and the server's last confirmed one, stop and wait for the truth; the
         // SetPos resets the position, the guard releases, and the route re-plans from there.
+        //
+        // NOT while mirroring the owner. The server does not echo our own moves, so _confirmedPosition
+        // only moves on a SetPos correction - during a run with no corrections (and especially across a
+        // zone/whompa crossing) it falls metres behind the live walk and this guard WRONGLY froze the
+        // body ("server is N m behind the walk"), which desynced the follow: teamed, the owner saw us at
+        // the stale spot. AOBuddy10's rule is explicit - the clientless controller OWNS its position and
+        // is never held on drift; it only applies real SetPos corrections. So while the mirror is locked
+        // the owner's packets dictate our position and this guard stands down (owner, 2026-10-07: port
+        // 10's behaviour, don't introduce different elements). The guard still protects the solo/goal walk.
         var drift = Movement.Flat(me.MovementComponent.Position, CurrentPosition);
-        if (drift > DriftGuardMetres && _movement.Moving)
+        if (drift > DriftGuardMetres && _movement.Moving && !_follow.MirrorLocked)
         {
             _movement.Hold(me, SendIntervalMs);
             if (!_driftHeld)
@@ -1107,6 +1148,31 @@ public sealed class MovementController : IPacketConsumer
             return;
         }
 
+        // USE-TRAVEL bookkeeping (every tick): age the owner's last Use, and fire OnOwnerLost once on the
+        // visible->not-visible edge so a Use right before he vanished arms a ride. ownerLostSeconds is how
+        // long he has been out of view (0 while visible), the grace the ride waits out.
+        _useTravel.Age(dt);
+        double ownerLostSeconds;
+        if (snap.OwnerVisible)
+        {
+            _ownerLostSince = -1;
+            ownerLostSeconds = 0;
+        }
+        else
+        {
+            if (_ownerWasVisible)
+            {
+                _ownerLostSince = now;
+                // No reliable last-seen owner spot to hand over here; the object's own position, captured
+                // at the moment of the Use (when the bot was stacked on him), is the ride target anyway.
+                _useTravel.OnOwnerLost(null);
+            }
+
+            ownerLostSeconds = _ownerLostSince < 0 ? 0 : now - _ownerLostSince;
+        }
+
+        _ownerWasVisible = snap.OwnerVisible;
+
         var goal = SelectActiveGoal(_pf);
         if (goal != null)
         {
@@ -1135,6 +1201,19 @@ public sealed class MovementController : IPacketConsumer
         // without it, hold.
         if (_followOn)
         {
+            // Use-travel first: when the owner rode a lift/grid/whompa/portal and then vanished, ride the
+            // same object before follow's lost-walk pushes toward a (walked) zone line that is not there.
+            if (_useTravel.Tick(me, dt, snap.OwnerVisible, ownerLostSeconds,
+                    (m, target, stepDt) => WalkStep(m, snap, target, stepDt)))
+            {
+                if (_follow.MirrorLocked)
+                {
+                    _follow.BreakMirror("use-travel took the body");
+                }
+
+                return;
+            }
+
             _follow.Tick(me, snap.OwnerVisible, snap.OwnerPos, snap.OwnerHeading, snap.OwnerMoveFresh,
                 RunVelocity(snap), dt, (m, target, stepDt) => WalkStep(m, snap, target, stepDt));
             return;

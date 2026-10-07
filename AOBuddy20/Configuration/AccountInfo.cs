@@ -22,6 +22,7 @@ public class AccountInfo
     public string Owner = ""; // OPTIONAL - the character whose /tells are obeyed. Empty: the bot runs
     // solo (no one commands it, owner-assist is off). The bot does not need an owner to run.
     public bool AutoAcceptOwnerTeamInvite = true; // group up when the owner invites (AOBuddy10 passive teaming)
+    public bool Follow = true; // follow the owner on login (AOBuddy10's idle default); 'stay'/'follow' toggle it at runtime
     public string Password = "";
     public string Username = "";
 
