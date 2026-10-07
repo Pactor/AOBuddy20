@@ -1166,6 +1166,7 @@ public class PetFirstBuffCycle
         private readonly NcuStep _ncu;
         private bool _clearOut;
         private List<BuffCatalog.BuffEntry> _comfort = new List<BuffCatalog.BuffEntry>();
+        private bool _comfortPlanned; // the comfort fill is planned once, then it rides the walk
         private BuffCatalog.BuffAction? _current;
         private int _idx;
         private double _lastCastAt = double.NegativeInfinity;
@@ -1225,11 +1226,8 @@ public class PetFirstBuffCycle
                     return Clear(me);
 
                 case Phase.Walk:
-                    return Walk(me);
-
-                case Phase.ComfortWait:
                 default:
-                    return ComfortWait(me);
+                    return Walk(me);
             }
         }
 
@@ -1415,41 +1413,36 @@ public class PetFirstBuffCycle
                 return false; // the controller sends the tell and watches the landing
             }
 
-            // THE FLOOR IS UP: the comfort fill, one tell.
-            var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
-            _comfort = _c._catalog.PlanComfort(me, free, IsSlOrLe(me));
-            if (_comfort.Count == 0)
+            // THE FLOOR IS UP: the comfort fill (planned ONCE) - routed like the floor set (a
+            // learned self-cast becomes me.Cast, the rest are bot tells), appended to the walk.
+            if (!_comfortPlanned)
             {
-                _c._logger.LogInformation($"PETCYCLE: comfort - nothing affordable (free NCU {free}) - the cycle ends here.");
-                return true;
+                _comfortPlanned = true;
+                var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
+                _comfort = _c._catalog.PlanComfort(me, free, IsSlOrLe(me), "Metaphysicist");
+                var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
+                foreach (var b in _comfort)
+                {
+                    var action = _c._catalog.RouteFor(b, "Metaphysicist", _c._catalog.BotName, learned.Contains);
+                    if (action.Source != BuffCatalog.BuffSource.Unavailable)
+                    {
+                        _actions.Add(action);
+                    }
+                }
+
+                if (_comfort.Count == 0)
+                {
+                    _c._logger.LogInformation($"PETCYCLE: comfort - nothing affordable (free NCU {free}) - the cycle ends here.");
+                }
+                else
+                {
+                    _c._logger.LogInformation(
+                        $"PETCYCLE: comfort - {_comfort.Count} pick(s), {_comfort.Sum(b => b.Ncu)} NCU of {free} free: " +
+                        $"{string.Join(", ", _comfort.Select(b => b.Name))}.");
+                }
             }
 
-            var codes = string.Join(" ", _comfort.Select(b => b.Tell));
-            _turn = new BuffBotController.GuidedTurn
-            {
-                Action = new BuffCatalog.BuffAction
-                {
-                    Source = BuffCatalog.BuffSource.BuffBot,
-                    Name = $"comfort fill ({_comfort.Count} buffs)",
-                    BotName = _c._catalog.BotName,
-                    Tell = codes,
-                    NeedsTeam = _comfort.Any(b => b.NeedsTeam),
-                    LandIds = _comfort.SelectMany(b => b.LandIds).Distinct().ToArray(),
-                    RequireAll = true,
-                },
-            };
-            _phase = Phase.ComfortWait;
-            _phaseAt = _c._t;
-            _c._logger.LogInformation(
-                $"PETCYCLE: comfort - asking '{_c._catalog.BotName} {codes}' ({_comfort.Count} buffs, " +
-                $"{_comfort.Sum(b => b.Ncu)} NCU of {free} free).");
-            return false;
-        }
-
-        private bool ComfortWait(LocalPlayer me)
-        {
-            var missing = _comfort.Where(b => !Landed(me, b)).ToList();
-            if (missing.Count == 0)
+            if (_idx >= _actions.Count)
             {
                 var roles = string.Join(", ", _c._petFloorByRole.Keys.Select(r => r.ToString()));
                 _c._logger.LogInformation(
@@ -1457,22 +1450,13 @@ public class PetFirstBuffCycle
                 return true;
             }
 
-            if (_c._t - _phaseAt > WaitLogEverySec * _waitLogs)
-            {
-                _waitLogs++;
-                _c._logger.LogInformation(
-                    $"PETCYCLE: comfort - still waiting for {missing.Count}/{_comfort.Count} " +
-                    $"({string.Join(", ", missing.Select(b => b.Name))}).");
-            }
-
-            return false;
+            return false; // continue walking (the appended comfort actions ride the same walk)
         }
 
         private enum Phase
         {
             Clear, // strip everything but the NCU buff
-            Walk, // the floor set, one action at a time
-            ComfortWait, // the comfort tell is out - wait for all of it
+            Walk, // the floor set, then the comfort fill - one action at a time
         }
     }
 }

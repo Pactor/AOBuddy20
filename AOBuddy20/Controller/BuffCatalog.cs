@@ -1189,12 +1189,14 @@ public sealed class BuffCatalog
     ///     MUSTS are planned TOGETHER, each taking its biggest tier with tiers downgrading -
     ///     largest consumer first - until ALL of them fit the remaining NCU (a smaller Fixer HoT
     ///     beats a missing Doctor health/HoT; owner's "take a smaller essence" rule, applied to
-    ///     the musts themselves). Only then the OPTIONALS fill what is left, biggest that fits:
+    ///     the musts themselves). Then the OPTIONALS fill what is left, biggest that fits:
     ///      musts: 1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
     ///      optionals: 4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
-    ///      6. damage buffs. One buff per strain, receiver-gated.
+    ///      6. damage buffs, 7. XP buffs, 8. evasion (self-cast counts when learned - owner,
+    ///      2026-10-07). One buff per strain, receiver-gated. The caller routes each pick
+    ///      (RouteFor): a learned self-cast becomes me.Cast, the rest go as bot tells.
     /// </summary>
-    public List<BuffEntry> PlanComfort(LocalPlayer me, int ncuBudget, bool paid)
+    public List<BuffEntry> PlanComfort(LocalPlayer me, int ncuBudget, bool paid, string myProfession)
     {
         var plan = new List<BuffEntry>();
         if (!Loaded || me == null || ncuBudget <= 0)
@@ -1203,6 +1205,16 @@ public sealed class BuffCatalog
         }
 
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
+        var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
+
+        // obtainable = the bot can land it on us (tell + casts on others), OR we can self-cast it
+        // (Generic / our own profession AND learned - the evasion case, owner 2026-10-07)
+        bool Obtainable(BuffEntry b)
+        {
+            var nanoId = b.NanoId ?? (b.LandIds.Count > 0 ? b.LandIds[0] : 0);
+            var selfCast = nanoId != 0 && b.SelfCastableBy(myProfession) && learned.Contains(nanoId);
+            return selfCast || (b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell));
+        }
 
         bool IsHot(BuffEntry b) => b.Effect.Contains("HoT", StringComparison.OrdinalIgnoreCase);
         var categories = new (bool Must, string Name, Func<BuffEntry, bool> Match)[]
@@ -1221,6 +1233,8 @@ public sealed class BuffCatalog
             (false, "damage buffs", b => (b.Effect.Contains("damage", StringComparison.OrdinalIgnoreCase)
                                           || b.Effect.Contains("dmg", StringComparison.OrdinalIgnoreCase))
                                          && !b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)),
+            (false, "XP buffs", b => b.Effect.Contains("Experience", StringComparison.OrdinalIgnoreCase)),
+            (false, "evasion", b => b.Effect.Contains("Evade", StringComparison.OrdinalIgnoreCase)),
         };
 
         List<BuffEntry> Candidates(string name, Func<BuffEntry, bool> match)
@@ -1234,8 +1248,7 @@ public sealed class BuffCatalog
                 }
 
                 string why;
-                if (!b.CanCastOnOthers) why = "cannot be cast on others (self-only)";
-                else if (string.IsNullOrWhiteSpace(b.Tell)) why = "no tell code";
+                if (!Obtainable(b)) why = "not obtainable (self-only and not learned, or no tell)";
                 else if (b.ReceiverLevel > myLevel) why = $"receiver level {b.ReceiverLevel} > our {myLevel}";
                 else if (b.NeedsSl && !paid) why = "needs Shadowlands";
                 else
@@ -1322,7 +1335,7 @@ public sealed class BuffCatalog
         }
 
         // THE OPTIONALS: the biggest tier that fits the remainder, in the owner's order.
-        foreach (var (must, name, match) in categories.Where(c => !c.Must))
+        foreach (var (_, name, match) in categories.Where(c => !c.Must))
         {
             var pick = Candidates(name, match).FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
             if (pick == null)
