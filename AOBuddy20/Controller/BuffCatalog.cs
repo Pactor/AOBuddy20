@@ -289,6 +289,35 @@ public sealed class BuffCatalog
                 continue;
             }
 
+            // THE MISSED WRAPPER (owner, 2026-10-07): a rep whose own events CAST another nano
+            // delivers THAT nano - Superior Omni-Med Enhancement (95709) team-casts 95673, and
+            // 95673 is what runs on the receiver. The delivery analysis below only looked for
+            // wrappers AMONG the LandIds, so a wrapper rep whose target was not listed lost its
+            // delivery signal entirely (CanCastOnOthers false - "self-only" - and the entry was
+            // never requested). Adopt the cast nanos into the LandIds and re-pick the landed rep
+            // by the same modifies ranking.
+            var repId = rep.NanoId;
+            var castTargets = rep.Casts
+                .Where(c => c.Func is FuncCastNano or FuncTeamCastNano or FuncAreaCastNano)
+                .Select(c => c.NanoId)
+                .Where(t => !b.LandIds.Contains(t))
+                .ToList();
+            if (castTargets.Count > 0)
+            {
+                b.LandIds.AddRange(castTargets);
+                rep = b.LandIds.Select(NanoLibrary.Find).Where(n => n != null).Cast<NanoProfile>()
+                    .OrderByDescending(n => n.Modifies.Values.Sum())
+                    .ThenByDescending(n => n.Modifies.Count).FirstOrDefault();
+                if (rep == null)
+                {
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    $"BUFFS: '{b.Name}' - wrapper {repId} delivers {string.Join(", ", castTargets)}; " +
+                    $"landed rep is now {rep.NanoId}.");
+            }
+
             b.Strain = rep.Stat(75);
             b.RepNanoId = rep.NanoId;
             var (level, sl) = ReceiverGate(rep);
@@ -322,7 +351,10 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = false;
                 b.CanCastOnOthers = rep.TargetsOthers;
-                b.ReceiverLevel = 1;
+                // ReceiverLevel stays the REP nano's own receiver gate (set above from
+                // ReceiverGate(rep)): a single-target buff's target-level restriction lives on
+                // the landed nano (Improved Essence of Behemoth: Level > 215 - wiping it made
+                // the comfort fill request buffs that can never land on a low-level receiver).
             }
 
             
@@ -1153,14 +1185,14 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
-    ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established, in
-    ///    THIS order - the first four are MUSTS (each takes the biggest castable tier that fits
-    ///    the remaining NCU, downgrading tiers so a must is never crowded out), the rest are
-    ///    optionals (biggest that fits, dropped when nothing does):
-    ///      1. Fixer long HoT ("Long HoT" line), 2. Doctor health + long HoT,
-    ///      3. Fixer runspeed ("...RS" line) - the three musts; then
-    ///      4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen, 6. damage buffs.
-    ///    One buff per strain, receiver-gated, least-Ncu-first at equal fit.
+    ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established. The
+    ///     MUSTS are planned TOGETHER, each taking its biggest tier with tiers downgrading -
+    ///     largest consumer first - until ALL of them fit the remaining NCU (a smaller Fixer HoT
+    ///     beats a missing Doctor health/HoT; owner's "take a smaller essence" rule, applied to
+    ///     the musts themselves). Only then the OPTIONALS fill what is left, biggest that fits:
+    ///      musts: 1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
+    ///      optionals: 4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
+    ///      6. damage buffs. One buff per strain, receiver-gated.
     /// </summary>
     public List<BuffEntry> PlanComfort(LocalPlayer me, int ncuBudget, bool paid)
     {
@@ -1173,61 +1205,136 @@ public sealed class BuffCatalog
         var myLevel = me.TryGetStat(Stat.Level, out var lvl) ? lvl : 0;
 
         bool IsHot(BuffEntry b) => b.Effect.Contains("HoT", StringComparison.OrdinalIgnoreCase);
-        var categories = new (bool Must, Func<BuffEntry, bool> Match)[]
+        var categories = new (bool Must, string Name, Func<BuffEntry, bool> Match)[]
         {
-            (true, b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
-                        && b.Effect.Contains("Long HoT", StringComparison.OrdinalIgnoreCase)),
-            (true, b => b.Profession.Equals("Doctor", StringComparison.OrdinalIgnoreCase)
-                        && (b.Effect.Contains("Max Health", StringComparison.OrdinalIgnoreCase) || IsHot(b))),
-            (true, b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
-                        && b.Effect.Contains(" RS", StringComparison.OrdinalIgnoreCase)),
-            (false, b => b.Profession.Equals("Enforcer", StringComparison.OrdinalIgnoreCase)
-                         && b.Name.Contains("Essence", StringComparison.OrdinalIgnoreCase)),
-            (false, b => b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)
-                         || b.Name.Contains("Screen", StringComparison.OrdinalIgnoreCase)),
-            (false, b => b.Effect.Contains("damage", StringComparison.OrdinalIgnoreCase)
-                         && !b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)),
+            (true, "Fixer long HoT", b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
+                                          && b.Effect.Contains("Long HoT", StringComparison.OrdinalIgnoreCase)),
+            (true, "Doctor health/HoT", b => b.Profession.Equals("Doctor", StringComparison.OrdinalIgnoreCase)
+                                             && (b.Effect.Contains("Max Health", StringComparison.OrdinalIgnoreCase)
+                                                 || IsHot(b))),
+            (true, "Fixer runspeed", b => b.Profession.Equals("Fixer", StringComparison.OrdinalIgnoreCase)
+                                          && b.Effect.Contains(" RS", StringComparison.OrdinalIgnoreCase)),
+            (false, "Enforcer Essence", b => b.Profession.Equals("Enforcer", StringComparison.OrdinalIgnoreCase)
+                                             && b.Name.Contains("Essence", StringComparison.OrdinalIgnoreCase)),
+            (false, "damage shields", b => b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)
+                                           || b.Name.Contains("Screen", StringComparison.OrdinalIgnoreCase)),
+            (false, "damage buffs", b => (b.Effect.Contains("damage", StringComparison.OrdinalIgnoreCase)
+                                          || b.Effect.Contains("dmg", StringComparison.OrdinalIgnoreCase))
+                                         && !b.Effect.Contains("Damage Shield", StringComparison.OrdinalIgnoreCase)),
         };
+
+        List<BuffEntry> Candidates(string name, Func<BuffEntry, bool> match)
+        {
+            var ok = new List<BuffEntry>();
+            foreach (var b in _buffs)
+            {
+                if (!match(b))
+                {
+                    continue;
+                }
+
+                string why;
+                if (!b.CanCastOnOthers) why = "cannot be cast on others (self-only)";
+                else if (string.IsNullOrWhiteSpace(b.Tell)) why = "no tell code";
+                else if (b.ReceiverLevel > myLevel) why = $"receiver level {b.ReceiverLevel} > our {myLevel}";
+                else if (b.NeedsSl && !paid) why = "needs Shadowlands";
+                else
+                {
+                    ok.Add(b);
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    $"COMFORT: '{name}' - '{b.Name}' ({b.Ncu} NCU) excluded: {why}.");
+            }
+
+            if (ok.Count == 0)
+            {
+                _logger.LogInformation($"COMFORT: '{name}' - no castable candidate (see the exclusions above).");
+            }
+
+            return ok.OrderByDescending(b => b.Ncu).ToList(); // the biggest tier first - downgrade until it fits
+        }
 
         var budget = ncuBudget;
         var usedStrains = new HashSet<int>();
-        foreach (var (must, match) in categories)
+
+        // THE MUSTS, PLANNED TOGETHER: start each at its biggest tier, then downgrade the largest
+        // consumer whenever the sum does not fit - the tier ladder exists exactly so all musts
+        // can be in at once.
+        var mustCategories = categories.Where(c => c.Must).ToList();
+        var mustCandidates = mustCategories.Select(c => Candidates(c.Name, c.Match)).ToList();
+        var mustPicks = mustCandidates.Select(c => c.FirstOrDefault()).ToList();
+        while (mustPicks.Sum(p => p?.Ncu ?? 0) > budget)
         {
-            var candidates = _buffs
-                .Where(b => match(b) && b.CanCastOnOthers && !string.IsNullOrWhiteSpace(b.Tell)
-                            && Castable(b, myLevel, paid) && b.Ncu > 0 && !usedStrains.Contains(b.Strain))
-                .OrderByDescending(b => b.Ncu) // the biggest tier first - downgrade until it fits
-                .ToList();
-            if (candidates.Count == 0)
+            var victim = -1;
+            var biggest = -1;
+            for (var i = 0; i < mustPicks.Count; i++)
+            {
+                if (mustPicks[i] == null)
+                {
+                    continue;
+                }
+
+                var cur = mustPicks[i]!.Ncu;
+                if (mustCandidates[i].Any(c => c.Ncu < cur) && cur > biggest)
+                {
+                    biggest = cur;
+                    victim = i;
+                }
+            }
+
+            if (victim < 0)
+            {
+                break; // every must is at its smallest tier and the sum still does not fit
+            }
+
+            mustPicks[victim] = mustCandidates[victim].First(c => c.Ncu < mustPicks[victim]!.Ncu);
+        }
+
+        for (var i = 0; i < mustPicks.Count; i++)
+        {
+            var pick = mustPicks[i];
+            if (pick == null)
+            {
+                _logger.LogInformation($"COMFORT: must '{mustCategories[i].Name}' - nothing learned/castable - skipped.");
+                continue;
+            }
+
+            if (mustPicks.Sum(p => p?.Ncu ?? 0) > budget)
+            {
+                _logger.LogWarning(
+                    $"COMFORT: must '{mustCategories[i].Name}' - even at the smallest tiers the musts exceed the " +
+                    $"budget ({ncuBudget}) - dropped.");
+                continue;
+            }
+
+            if (usedStrains.Contains(pick.Strain))
+            {
+                continue; // a same-strain pick earlier in the fill already covers it
+            }
+
+            plan.Add(pick);
+            usedStrains.Add(pick.Strain);
+            budget -= pick.Ncu;
+            _logger.LogInformation(
+                $"COMFORT: must '{mustCategories[i].Name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
+        }
+
+        // THE OPTIONALS: the biggest tier that fits the remainder, in the owner's order.
+        foreach (var (must, name, match) in categories.Where(c => !c.Must))
+        {
+            var pick = Candidates(name, match).FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
+            if (pick == null)
             {
                 continue;
             }
 
-            if (must)
-            {
-                var pick = candidates.FirstOrDefault(b => b.Ncu <= budget);
-                if (pick == null)
-                {
-                    continue; // even the smallest tier does not fit - the must is lost, logged by the caller
-                }
-
-                plan.Add(pick);
-                usedStrains.Add(pick.Strain);
-                budget -= pick.Ncu;
-            }
-            else
-            {
-                foreach (var b in candidates)
-                {
-                    if (b.Ncu <= budget)
-                    {
-                        plan.Add(b);
-                        usedStrains.Add(b.Strain);
-                        budget -= b.Ncu;
-                        break;
-                    }
-                }
-            }
+            plan.Add(pick);
+            usedStrains.Add(pick.Strain);
+            budget -= pick.Ncu;
+            _logger.LogInformation(
+                $"COMFORT: optional '{name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
         }
 
         return plan;

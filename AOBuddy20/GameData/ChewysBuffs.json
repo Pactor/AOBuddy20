@@ -131,14 +131,16 @@
      "effect": "+19 Experience",
      "ncu": 35,
      "team": true,
-     "id": 90444,
+     "id": 90448,
+     "landIds": 90444,
      "tell": "com"
     },
     {
      "name": "Baton of Leadership",
      "effect": "+14 Experience",
      "ncu": 22,
-     "id": 90445,
+     "id": 90449,
+     "landIds": 90445,
      "tell": "lea"
     },
     {
@@ -195,6 +197,7 @@
      "ncu": 45,
      "team": true,
      "id": 95709,
+     "landIds": 95673,
      "tell": "hp"
     },
     {
@@ -832,6 +835,9 @@
      "ncu": 5,
      "team": true,
      "id": 28890,
+     "landIds": [
+      162359
+     ],
      "tell": "horde"
     },
     {
@@ -1253,6 +1259,10 @@
      "ncu": 58,
      "team": true,
      "id": 121320,
+     "landIds": [
+      121215
+     ],
+     "note": "the team-cast child 121215 is what lands on the receiver (the CastNano child 121232 is the caster's)",
      "tell": "132"
     },
     {
