@@ -43,7 +43,7 @@ public sealed class SystemFeedback
     {
         if (arg.Body is FormatFeedbackMessage ff && !string.IsNullOrEmpty(ff.FormattedMessage))
         {
-            _logger.LogInformation($"SYS: {ff.FormattedMessage}");
+            _logger.LogInformation($"SYS: {ff.FormattedMessage} {ff.ChatCategory}/{ff.PayloadKind}");
         }
 
         return false;

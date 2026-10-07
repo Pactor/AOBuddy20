@@ -15,6 +15,7 @@ using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
 using AOBuddy20.Nav;
 using AOBuddy20.Utils;
+using BuffEntry = AOBuddy20.Controlling.BuffCatalog.BuffEntry;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
@@ -25,30 +26,34 @@ namespace AOBuddy20.Brains;
 /// <summary>
 ///     METAPHYSICIST EXTERNAL BUFFING BRAIN - the staged buff-first dance, driven from the
 ///     buffing side (PETBRAIN-DESIGN.md port order 4; the sequence is the owner's, per the
-///     L50 froob walkthrough of 2026-10-05/06). One dance:
-///       The stages are the owner's, verbatim (2026-10-06):
+///     L50 froob walkthrough of 2026-10-05/06). Owner, 2026-10-07: the dance CALCULATES EVERY
+///     STEP BEFOREHAND and prints the whole plan before anything happens. The planner walks a
+///     simulated ledger - clean slate, the ncu gain, each line's asks applied, each line's
+///     cancels freed - and decides, per pet line, the target formula, the template tier the
+///     budget reaches, the exact asks, and the frees; then the floor set and the comfort fill
+///     on what the plan leaves. THE PEAK IS THE GOAL when casting a pet (owner, 2026-10-07) -
+///     the obedience floor only KEEPS the summoned tiers alive. A line whose top reachable
+///     tier would not beat its standing pet is SKIPPED, never downgraded (the "casted
+///     Valentyia instead of Restite" bug: the old stage fell back to the best summon castable
+///     RIGHT NOW, which is by definition the weak tier).
+///     The executed sequence (the plan's steps, in order):
 ///       0. TRAVEL to the bots - the tells go nowhere from another playfield, and a dance
 ///          whose travel fails aborts BEFORE anything is torn down.
-///       1. TERMINATE ALL BUFFS - every stage plans against real free NCU, from a clean slate.
-///       2. GET THE NCU BUFF (the ncu tell) - "make sure you have NCU free first".
-///       3. ATTACK PET: get its buffs, TERMINATE the attack pet, then cast it. The swap runs
-///          only when the stack is verified in, and only this line's old pet dies - the rest
-///          of the roster keeps fighting the whole dance.
-///       4. CANCEL what the heal pet does not need (computed from the heal line's plan, with
-///          the attack stage's buffs still up and counted).
-///       5. HEAL PET: get its buffs, terminate it, recast it - same swap rule.
-///       6. CANCEL what the support pet does not need (frees its NCU first).
-///       7. SUPPORT PET: get its buffs (the MatMet mocham), terminate it, recast it.
+///       1. TERMINATE ALL BUFFS - the plan already assumed this clean slate.
+///       2. ASK 'ncu' - the fixer NCU nanos; the tier that lands is LEVEL-LOCKED (owner,
+///          2026-10-07: "use the ncu fixer nanos, the trigger is the level lock"), so the plan
+///          predicts the gain from the lock table and budgets against it.
+///       3-7. PER LINE (attack, heal, support): ASK its peak stack, then SUMMON at peak - the
+///          swap runs only when the stack is verified in, and only this line's old pet dies -
+///          with the plan's CANCEL steps freeing the previous line's non-serving asks in
+///          between.
 ///       8. PET BUFFS: cast the best learned pet nanos ON the pets - lines 216/217/225/810/
 ///          816/817/843, best StackingOrder per line among the learned and castable, no
-///          overequip math; 810 on the support pet, the damage/initiative lines on the attack
-///          pet, 816/817/843 on all pets; a pet already carrying a line at equal or better
-///          stacking is skipped (owner, 2026-10-06).
-///       9. FLOOR BUFFS and QoL: cancel all landed peak asks (the 3-minute wrangle exists to
-///          be cancelled), then the cheapest 1hr+ set lifting every summoned pet to 80% of
-///          ITS OWN tier's requirements - the tiers come from the cast snapshots, because the
-///          pet never tells (owner: IMPORTANT) - then the comfort fill from conf
-///          (PetQoLTells: long HoT, runspeed, essence, Omni-Med...).
+///          overequip math; a pet already carrying a line at equal or better stacking is
+///          skipped (owner, 2026-10-06).
+///       9. CANCEL all peak asks (the 3-minute wrangle exists to be cancelled), then ASK the
+///          floor set - planned from the TARGETED tiers, not from whatever landed - and the
+///          comfort fill from conf.
 ///       10. DONE.
 ///     After the dance: the kept set renews when any of it nears its end - "rebuff at ~30min
 ///     left" (owner); the holds are 4h, the timer is read off me.Buffs. Obedience is
@@ -78,15 +83,40 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         (PetLine.Mezz, PetType.Support, NanoLine.SupportPets, "mezz"),
     };
 
-    private enum Phase
+    // The plan's step kinds - the dance executes a pre-computed list of these, one session
+    // (or one synchronous action) at a time.
+    private enum StepKind
     {
         Travel,
         TerminateBuffs,
-        Ncu,
-        Peak,
-        PetBuffs,
-        Obedience,
-        Qol
+        Ask,
+        Cancel,
+        Summon,
+        PetBuffs
+    }
+
+    // One pre-computed dance step: WHAT happens, plus everything the logs and the
+    // after-session checks need (the expected asks, the why, the planned tier).
+    private sealed class DanceStep
+    {
+        public StepKind Kind;
+
+        /// <summary>The log/planner reason - "attack-first for X - template 9", "peak asks - the obedience floor comes next".</summary>
+        public string Why = "";
+
+        /// <summary>ASK: the tells. ASK and SUMMON: the ids that must be RUNNING - a summon
+        /// step checks its own list and drops itself when the stack it feeds on is not in.</summary>
+        public List<string> Tells = new();
+        public List<int> ExpectIds = new();
+
+        /// <summary>CANCEL: the ids to cancel (each only when it actually runs).</summary>
+        public List<int> CancelIds = new();
+
+        /// <summary>SUMMON: the line, the formula, and the tier these stats are planned to reach.</summary>
+        public PetType Role;
+        public int TargetNanoId;
+        public string TargetName = "";
+        public int TargetTemplate;
     }
 
     private enum DanceStage
@@ -96,9 +126,6 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         WaitingPet,
         PetBuffing
     }
-
-    // The Time&Space stat - the one skill every line shares; swap-cancels keep its buffs.
-    private const int TsStat = 131;
 
     // Decide roughly once a second, not every frame.
     private const double DecideEverySec = 1.0;
@@ -158,16 +185,14 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
 
     private readonly List<PetBuffCast> _petBuffQueue = new();
 
-    // The dance: a work queue of phases, executed one session (or skip) at a time.
-    private readonly List<(Phase Phase, PetType Role)> _queue = new();
+    // The dance: the pre-computed plan, executed one step (one session, cancel batch, summon
+    // or pet-buff pump) at a time. Built - and PRINTED - before the first tell goes out.
+    private readonly List<DanceStep> _queue = new();
     private int _queueIndex = -1;
     private bool _inDance;
     private DanceStage _danceStage = DanceStage.Idle;
-    private Phase _phase;
     private PetType _pendingRole;
     private double _waitDeadline;
-    private readonly List<int> _peakAsked = new(); // every peak-stage id - the obedience stage cancels them
-    private readonly List<int> _lastPeakAsked = new(); // the previous peak stage's ids - the swap-cancel
     private readonly HashSet<int> _keptIds = new(); // the post-dance set - the renewal watch
 
     // A foreign session ('buffs pet' owner command) while we are idle: hold around it.
@@ -353,9 +378,9 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             }
         }
 
-        // The travel phase re-runs every tick until we are near the bots (the movement ticks on
+        // The travel step re-runs every tick until we are near the bots (the movement ticks on
         // its own; the brain only sets goals and polls).
-        if (_inDance && _phase == Phase.Travel && _danceStage == DanceStage.Idle)
+        if (_inDance && CurrentStep()?.Kind == StepKind.Travel && _danceStage == DanceStage.Idle)
         {
             RunTravelStage(me, pet);
         }
@@ -387,15 +412,60 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     // ---- The dance --------------------------------------------------------------------------
 
     /// <summary>
-    ///     The dance trigger is a CONTINUOUS buff-state assessment, not an event: any line whose
-    ///     best learned summon's top template is out of reach on the current stats (a missing
-    ///     line, OR an up pet that is weaker than it could be), or an up pet below its obedience
-    ///     floor - the desired buffs ran out, or he logged on without them (owner, 2026-10-06).
-    ///     Every dance REBUILDS the roster: the pets are terminated first (a summon while one is
-    ///     up is blocked by the pet-limit gate - they don't overwrite), so the peak stages cast
-    ///     fresh at peak stats. Up-pet floors for the trigger come from the cast snapshot when
-    ///     the dance summoned them, else from matching the pet's wire LEVEL against the line's
-    ///     branch tables (template ≈ pet level) - a login with pets already out has no snapshot.
+    ///     The SILENT pre-gate (the plan and its printout are expensive - the planners log -
+    ///     so a cheap verdict decides whether to build one at all): any line whose top
+    ///     candidate's gate is unmet on the current stats (a missing line OR an up pet weaker
+    ///     than it could be), or any up pet below its obedience floor.
+    /// </summary>
+    private bool NeedsWork(LocalPlayer me)
+    {
+        foreach (var (line, role, _, _) in Lines)
+        {
+            var cands = LineCandidates(me, line);
+            if (cands.Count == 0)
+            {
+                continue;
+            }
+
+            var top = cands[0];
+            foreach (var kv in top.Mins)
+            {
+                if (!me.TryGetStat((Stat)kv.Key, out var v) || v < kv.Value)
+                {
+                    return true;
+                }
+            }
+        }
+
+        foreach (var (line, role, _, _) in Lines)
+        {
+            var standing = StandingTemplate(me, role, line);
+            var floor = FloorOfMins(TierMins(me, line, standing));
+            if (floor == null)
+            {
+                continue;
+            }
+
+            foreach (var kv in floor)
+            {
+                if (!me.TryGetStat((Stat)kv.Key, out var v) || v < kv.Value)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     The dance trigger: build the WHOLE plan first (the plan IS the buff-state assessment
+    ///     - a plan with no work steps means nothing needs doing), and only then print and
+    ///     execute it. TRAVEL and TERMINATE-BUFFS come first (owner, 2026-10-06: a dance whose
+    ///     travel fails aborts before anything is torn down; the clean slate is what the plan
+    ///     budgeted against). The PETS are not terminated up front: each line's old pet dies
+    ///     only at its own summon step, with that line's peak stack verified in (owner,
+    ///     2026-10-06) - the rest of the roster keeps fighting the whole dance.
     /// </summary>
     private void TryStartDance(LocalPlayer me, PetBrain pet)
     {
@@ -415,108 +485,253 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             return; // asked recently - give the last outcome time to show
         }
 
-        var (needed, why) = AssessBuffState(me);
-        if (!needed)
+        if (!NeedsWork(me))
         {
+            return; // nothing to reach for and no floor short - silent, no plan, no logs
+        }
+
+        DancePlan plan;
+        try
+        {
+            plan = BuildDancePlan(me);
+        }
+        catch (Exception e)
+        {
+            // The planner is PURE - a failure (a malformed pack entry, say) must never take the
+            // tick down with it: log, buy the cooldown, and let the next pass try again.
+            _lastAskAt = _clock;
+            _logger.LogError($"EXTBUFF: the dance planner failed - no dance this pass ({e.GetType().Name}: {e.Message}).");
             return;
+        }
+
+        _lastAskAt = _clock; // a built plan - even an empty one - buys the cooldown (the
+                             // planners log; a no-work verdict must not re-plan every second)
+        if (plan.Work.Count == 0)
+        {
+            return; // nothing needs doing - no dance, and no plan print (there is no plan)
         }
 
         _inDance = true;
         pet.SetSummonHold(true); // the auto cadence stays shut; the dance summons through requests
         _queue.Clear();
-
-        // TERMINATE-BUFFS clears OUR OWN buffs so the peak stages plan against real free NCU,
-        // from a clean slate. Travel comes FIRST (owner, 2026-10-06) - a dance whose travel
-        // fails aborts before anything is torn down. The PETS are not terminated up front any
-        // more: each line's old pet dies only at its own swap, at the summon moment with that
-        // line's peak stack verified in (owner, 2026-10-06) - the rest of the roster keeps
-        // fighting the whole dance.
-        var peakLines = new List<PetType>();
-        foreach (var (line, role, _, _) in Lines)
+        _queue.Add(new DanceStep { Kind = StepKind.Travel, Why = "to the buff bots" });
+        _queue.Add(new DanceStep { Kind = StepKind.TerminateBuffs, Why = "a clean slate (the plan budgeted against it)" });
+        _queue.AddRange(plan.Work);
+        _queueIndex = -1;
+        _keptIds.Clear();
+        foreach (var id in plan.KeptIds)
         {
-            if (BestLearnedNano(me, line) != null)
-            {
-                peakLines.Add(role); // lines with nothing learned are skipped at run time too
-            }
+            _keptIds.Add(id);
         }
 
-        _queue.Add((Phase.Travel, default));
-        _queue.Add((Phase.TerminateBuffs, default));
+        // THE WHOLE PLAN, printed before it happens (owner, 2026-10-07).
+        foreach (var line in plan.Print)
+        {
+            _logger.LogInformation(line);
+        }
 
-        _queue.Add((Phase.Ncu, default));
-        _queue.AddRange(peakLines.Select(role => (Phase.Peak, role)));
-        _queue.Add((Phase.PetBuffs, default));
-        _queue.Add((Phase.Obedience, default));
-        _queue.Add((Phase.Qol, default));
-        _queueIndex = -1;
-        _peakAsked.Clear();
-        _lastPeakAsked.Clear();
-        _lastAskAt = _clock;
         _logger.LogInformation(
-            $"EXTBUFF: dance starting - {why}. Bot: {_catalog.BotName ?? _config.BuffBotName ?? "(none)"}, spot: " +
+            $"EXTBUFF: dance starting - {string.Join("; ", plan.Whys)}. Bot: {_catalog.BotName ?? _config.BuffBotName ?? "(none)"}, spot: " +
             (_catalog.BotLocation.HasValue ? Zoning.Name(_catalog.BotLocation.Value.Playfield) : "(unmapped)") +
             ".");
         Advance(me, pet);
     }
 
-    /// <summary>
-    ///     The buff-state assessment behind the trigger, as list of reasons: any line (missing
-    ///     OR up) whose best learned summon's top template is out of reach, and any up pet below
-    ///     its obedience floor. Floors prefer the cast snapshot (the dance's own summons) and
-    ///     fall back to pet-level matching (login-time pets).
-    /// </summary>
-    private (bool Needed, string Why) AssessBuffState(LocalPlayer me)
+    /// <summary>One built dance plan: the executable steps, the printout lines, the kept set
+    /// for the renewal watch, and the trigger reasons.</summary>
+    private sealed class DancePlan
     {
-        var reasons = new List<string>();
-        foreach (var (line, role, _, label) in Lines)
-        {
-            var nanoId = BestLearnedNano(me, line);
-            if (nanoId == null)
-            {
-                continue; // nothing learned for the line - nothing to reach for
-            }
+        public readonly List<DanceStep> Work = new();
+        public readonly List<string> Print = new();
+        public readonly List<int> KeptIds = new();
+        public readonly List<string> Whys = new();
 
-            var branches = NanoLibrary.Find(nanoId.Value)?.Summons;
-            if (branches == null || branches.Count == 0)
-            {
-                continue; // no branch table in the pack - nothing the dance could add
-            }
-
-            if (!TopReachable(me, branches))
-            {
-                var up = me.Pets.Any(p => p.Role == role);
-                reasons.Add($"{label} pet {(up ? "below its best template" : "missing")}");
-            }
-        }
-
-        var pet = _bank.Pet!;
-        foreach (var kv in FloorTotals(me, pet))
-        {
-            if (!me.TryGetStat((Stat)kv.Key, out var v) || v < kv.Value)
-            {
-                reasons.Add($"obedience floor short on stat {kv.Key}");
-            }
-        }
-
-        return (reasons.Count > 0, string.Join("; ", reasons));
+        /// <summary>The printout's step counter - work steps AND skips number monotonically.</summary>
+        public int PrintNo;
     }
 
     /// <summary>
-    ///     The union of the up pets' obedience floors: the cast snapshot when we summoned them,
-    ///     else the pet's wire LEVEL matched against the line's branch tables (template ≈ level -
-    ///     how a login with pets already out gets its floors).
+    ///     THE PLANNER (owner, 2026-10-07: "calculate each step beforehand and print out the
+    ///     whole plan before it happens"). It walks a simulated LEDGER - the NCU and stat state
+    ///     the plan's own steps produce - and decides per pet line: the target formula (best
+    ///     learned by branch-table top), the highest template branch the ledger covers, the
+    ///     asks for it, and the cancels of earlier lines' asks that serve none of this line's
+    ///     gates. THE PEAK IS THE GOAL; a line whose best reachable tier would not BEAT its
+    ///     standing pet is skipped, never downgraded. Then all peak asks are freed, the
+    ///     obedience floor is planned from the TARGETED tiers, the comfort fill runs on the
+    ///     rest, and the pet-buff stage dry-runs. PURE: nothing here touches the character -
+    ///     the caller decides whether the plan is worth executing.
     /// </summary>
-    private Dictionary<int, int> FloorTotals(LocalPlayer me, PetBrain pet)
+    private DancePlan BuildDancePlan(LocalPlayer me)
     {
-        var totals = new Dictionary<int, int>();
-        foreach (var (line, role, _, _) in Lines)
+        var plan = new DancePlan();
+
+        // The ledger starts on the clean slate the dance's TerminateBuffs step creates; the
+        // fixer's ncu ask is the first thing applied to it.
+        var ncuTell = _catalog.NcuTell();
+        var ncuEntry = ncuTell != null ? _catalog.Find(ncuTell) : null;
+        var ncu = PredictNcuMax(me);
+        var ledger = new Ledger(
+            _catalog.CleanSlateBase(me, new[] { 127, 128, 130, 131 }),
+            ncu.Max,
+            ncu.Tier != null
+                ? $"level lock {ncu.Lock}: '{ncu.Tier}' (+{ncu.Gain} max NCU) over the measured max"
+                : "as measured - no level-locked ncu gain predicted");
+        ledger.PrintHeader(plan, ncuEntry?.Ncu ?? 0);
+        if (ncuEntry != null)
         {
-            if (!me.Pets.Any(p => p.Role == role))
+            plan.Work.Add(new DanceStep { Kind = StepKind.Ask, Why = "NCU headroom (the fixer ncu nanos)", Tells = { ncuTell! } });
+            ledger.Apply(ncuEntry, peakAsk: false);
+        }
+        else
+        {
+            plan.Print.Add($"  {++plan.PrintNo}: SKIP ncu - no ncu tell in the menu - the budget stays as measured.");
+        }
+
+        var plannedTier = new Dictionary<PetType, int>();
+        foreach (var (line, role, _, label) in Lines)
+        {
+            // A line's candidates are (formula, branch) PAIRS (owner, 2026-10-07: "casting a
+            // heal PET is not a heal nano formula" - the pack carries two shapes). The heal
+            // and support lines are ONE FORMULA PER TIER with the skill gate on the FORMULA's
+            // own cast requirements ("Calling of Restite": SpaceTime>518, BioMet>518; its
+            // branches are seven identical template-99 appearance pickers). The attack line
+            // self-scales INSIDE one formula ("Summon Frenzy Embodiment": branches 101-137,
+            // each branch gated - that is the tier pick). So the gate of a candidate is always
+            // the formula's own reqs UNION the branch's reqs on the four pet-tier skills, and
+            // the walk runs over every learned formula, top template down.
+            var cands = LineCandidates(me, line);
+            if (cands.Count == 0)
+            {
+                plan.Print.Add($"  {++plan.PrintNo}: SKIP {label} - nothing learned of this line.");
+                continue;
+            }
+
+            // The stats this line's candidates gate on: MatCrea+TS for the attack pet,
+            // BioMet+TS for the heal pet, MatMet+TS for the support pet.
+            var needed = new HashSet<int>();
+            foreach (var c in cands)
+            {
+                foreach (var s in c.Mins.Keys)
+                {
+                    needed.Add(s);
+                }
+            }
+
+            // Free the earlier lines' asks that serve none of THIS line's gates (the old peak
+            // stage's cancel, planned ahead) - their NCU joins the budget before the ask.
+            var drop = ledger.PeakAsks().Where(e => !e.Gains.Keys.Any(needed.Contains)).ToList();
+            if (drop.Count > 0)
+            {
+                var why = $"the {label} pet needs none of the {string.Join("/", drop.SelectMany(e => e.Gains.Keys).Distinct().Select(StatName))} asks - NCU freed";
+                plan.Work.Add(new DanceStep { Kind = StepKind.Cancel, Why = why, CancelIds = drop.Select(e => e.NanoId!.Value).ToList() });
+                plan.Print.Add($"  {++plan.PrintNo}: CANCEL {string.Join(" ", drop.Select(e => e.Tell))} - {why} ({drop.Sum(e => e.Ncu)} NCU back, {ledger.Free + drop.Sum(e => e.Ncu)} free).");
+                foreach (var e in drop)
+                {
+                    ledger.Revoke(e);
+                }
+            }
+
+            var standing = StandingTemplate(me, role, line);
+
+            // Walk the candidates top template down (cheapest gate first at a tie): the first
+            // one the ledger can carry - gates met, or the gaps covered within the free NCU -
+            // is the line's target. THE PEAK IS THE GOAL; each rejected tier's gaps are logged
+            // by the planner, so the printout shows exactly why it fell to the one below.
+            SummonCandidate? winner = null;
+            var winnerAsks = new List<BuffEntry>();
+            foreach (var c in cands)
+            {
+                if (c.Mins.All(kv => ledger.Stats.GetValueOrDefault(kv.Key) >= kv.Value))
+                {
+                    winner = c; // the gates are met on the ledger as it stands - just summon
+                    break;
+                }
+
+                var asks = _catalog.GoalPlanAgainst(me, ledger.Free, c.Mins, longTermOnly: false, ledger.Stats, ledger.Lines);
+                if (asks.Count > 0)
+                {
+                    winner = c;
+                    winnerAsks = asks.ToList();
+                    break;
+                }
+                // not coverable within the budget - the planner logged the gaps; the tier below
+            }
+
+            if (winner == null)
+            {
+                var top = cands[0];
+                plan.Print.Add($"  {++plan.PrintNo}: SKIP {label} - top template {top.Template} of '{top.Name}' needs " +
+                    $"{Shortfalls(top.Mins, ledger.Stats)} within {ledger.Free} NCU - keeping the standing pet (template {standing}).");
+                plan.Whys.Add($"{label} peak out of NCU reach");
+                continue;
+            }
+
+            if (winner.Template <= standing)
+            {
+                // THE PEAK IS THE GOAL - and the standing pet already sits at or above the best
+                // tier the budget reaches: no asks, no re-summon (the downgrade is what casted
+                // Valentyia instead of Restite).
+                plan.Print.Add($"  {++plan.PrintNo}: SKIP {label} - the best reachable template ({winner.Template}) " +
+                    $"does not beat the standing pet (template {standing}) - no asks, no re-summon.");
+                continue;
+            }
+
+            if (winnerAsks.Count > 0)
+            {
+                var ask = new DanceStep
+                {
+                    Kind = StepKind.Ask,
+                    Why = $"{label}-first for '{winner.Name}' - template {winner.Template}",
+                    Tells = winnerAsks.Select(a => a.Tell).ToList(),
+                    ExpectIds = winnerAsks.Where(a => a.NanoId.HasValue).Select(a => a.NanoId!.Value).ToList(),
+                };
+                plan.Work.Add(ask);
+                plan.Print.Add($"  {++plan.PrintNo}: ASK {string.Join(" ", ask.Tells)} - {ask.Why} " +
+                    $"({winnerAsks.Sum(a => a.Ncu)} NCU; grants {GainsText(winnerAsks)}; {ledger.Free} free after).");
+                foreach (var e in winnerAsks)
+                {
+                    ledger.Apply(e, peakAsk: true);
+                }
+            }
+
+            PlanSummon(plan, role, label, winner.FormulaId, winner.Name, winner.Template,
+                winnerAsks.Where(a => a.NanoId.HasValue).Select(a => a.NanoId!.Value).ToList());
+            plan.Whys.Add($"{label} pet {(standing > 0 ? $"below its best template ({standing} -> {winner.Template})" : "missing")}");
+            plannedTier[role] = winner.Template;
+        }
+
+        // ALL peak asks come off (the 3-minute wrangle exists to be cancelled) before the floor.
+        var peaks = ledger.PeakAsks().ToList();
+        if (peaks.Count > 0)
+        {
+            plan.Work.Add(new DanceStep
+            {
+                Kind = StepKind.Cancel,
+                Why = "peak asks - the obedience floor comes next",
+                CancelIds = peaks.Select(e => e.NanoId!.Value).ToList(),
+            });
+            plan.Print.Add($"  {++plan.PrintNo}: CANCEL {string.Join(" ", peaks.Select(e => e.Tell))} - peak asks, the obedience floor comes next ({peaks.Sum(e => e.Ncu)} NCU back, {ledger.Free + peaks.Sum(e => e.Ncu)} free).");
+            foreach (var e in peaks)
+            {
+                ledger.Revoke(e);
+            }
+        }
+
+        // The floor from the TARGETED tiers (plus the standing pets the plan did not re-summon)
+        // - the tiers the plan itself decided, not whatever happened to land.
+        var tierBits = new List<string>();
+        var totals = new Dictionary<int, int>();
+        foreach (var (line, role, _, label) in Lines)
+        {
+            var template = plannedTier.TryGetValue(role, out var t) ? t : StandingTemplate(me, role, line);
+            if (template <= 0)
             {
                 continue;
             }
 
-            var floor = pet.ObedienceFloor(role) ?? FloorFromPetLevel(me, role, line);
+            tierBits.Add($"{label} {template}");
+            var floor = FloorOfMins(TierMins(me, line, template));
             if (floor == null)
             {
                 continue;
@@ -528,29 +743,359 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             }
         }
 
-        return totals;
+        if (totals.Count == 0)
+        {
+            plan.Print.Add("  - SKIP obedience floor - no gated tier up or planned.");
+        }
+        else
+        {
+            var floorPlan = _catalog.GoalPlanAgainst(me, ledger.Free, totals, longTermOnly: true, ledger.Stats, ledger.Lines);
+            if (floorPlan.Count == 0)
+            {
+                plan.Print.Add("  - SKIP obedience floor - not coverable (the planner logged the gaps); the floors stay open.");
+                plan.Whys.Add("obedience floor short");
+            }
+            else
+            {
+                var ask = new DanceStep
+                {
+                    Kind = StepKind.Ask,
+                    Why = $"the obedience floor (80% of tiers {string.Join(", ", tierBits)})",
+                    Tells = floorPlan.Select(a => a.Tell).ToList(),
+                    ExpectIds = floorPlan.Where(a => a.NanoId.HasValue).Select(a => a.NanoId!.Value).ToList(),
+                };
+                plan.Work.Add(ask);
+                plan.Print.Add($"  {++plan.PrintNo}: ASK {string.Join(" ", ask.Tells)} - {ask.Why} ({floorPlan.Sum(a => a.Ncu)} NCU).");
+                foreach (var e in floorPlan)
+                {
+                    ledger.Apply(e, peakAsk: false);
+                    if (e.NanoId.HasValue)
+                    {
+                        plan.KeptIds.Add(e.NanoId.Value);
+                    }
+                }
+            }
+        }
+
+        // The SELF-DECIDED comfort fill, on what the plan leaves (owner, 2026-10-06: the skill
+        // buffs by conf mode - weapon mode matches the WIELDED weapon's own skills, nano mode
+        // the attack-nano skill).
+        var attackNano = string.Equals((_config.ComfortMode ?? "").Trim(), "nano", StringComparison.OrdinalIgnoreCase);
+        var weaponKeys = attackNano ? Array.Empty<string>() : EquippedWeaponSkillKeys().ToArray();
+        var comfort = _catalog.PlanForComfort(me, attackNano, weaponKeys, ledger.Free, ledger.Lines);
+        if (comfort.Count > 0)
+        {
+            plan.Work.Add(new DanceStep
+            {
+                Kind = StepKind.Ask,
+                Why = $"the comfort fill ({(attackNano ? "attack-nano skills" : "weapon skills")})",
+                Tells = comfort,
+                ExpectIds = comfort.Select(t => _catalog.Find(t)?.NanoId).Where(id => id.HasValue).Select(id => id!.Value).ToList(),
+            });
+            plan.Print.Add($"  {++plan.PrintNo}: ASK {string.Join(" ", comfort)} - the comfort fill ({(attackNano ? "attack-nano skills" : "weapon skills")}).");
+            foreach (var tell in comfort)
+            {
+                var id = _catalog.Find(tell)?.NanoId;
+                if (id.HasValue)
+                {
+                    plan.KeptIds.Add(id.Value);
+                }
+            }
+        }
+        else
+        {
+            plan.Print.Add("  - SKIP comfort fill - nothing to add.");
+        }
+
+        // The pet-buff stage, dry-run (built for real when its step runs - the roster may still
+        // change under the plan's summons).
+        var (petBuffs, diag) = BuildPetBuffQueue(me);
+        if (petBuffs.Count > 0)
+        {
+            plan.Work.Add(new DanceStep { Kind = StepKind.PetBuffs, Why = diag });
+            plan.Print.Add($"  {++plan.PrintNo}: PET BUFFS - {diag}.");
+        }
+        else
+        {
+            plan.Print.Add($"  - SKIP pet buffs ({diag}).");
+        }
+
+        var kept = plan.KeptIds.Select(id => _catalog.FindById(id)?.Tell ?? $"id{id}").ToList();
+        plan.Print.Add($"EXTBUFF: plan end - kept for renewal ({kept.Count}): {string.Join(" ", kept)}.");
+        return plan;
+    }
+
+    /// <summary>Add a line's summon step to the plan (and its printout line). The ids it
+    /// requires are the peak stack it feeds on - the empty list for the gate-less summons.</summary>
+    private static void PlanSummon(DancePlan plan, PetType role, string label, int nanoId, string name, int template,
+        List<int>? requiresIds = null)
+    {
+        plan.Work.Add(new DanceStep
+        {
+            Kind = StepKind.Summon,
+            Why = $"{label} pet at peak",
+            Role = role,
+            TargetNanoId = nanoId,
+            TargetName = name,
+            TargetTemplate = template,
+            ExpectIds = requiresIds ?? new List<int>(),
+        });
+        plan.Print.Add($"  {++plan.PrintNo}: SUMMON {label} - terminate the old pet, request '{name}' (template {template} planned).");
     }
 
     /// <summary>
-    ///     The obedience floor of a pet we have no cast snapshot for (a login with pets already
-    ///     out): the pet's wire LEVEL identifies the template tier - the learned line formula
-    ///     with a branch at exactly that level (highest QL wins a tie) - and 80% of that
-    ///     branch's Greater-than skill gates is the floor.
+    ///     The planner's simulated ledger: what the plan's own steps have produced so far. The
+    ///     four pet-tier skills move with the parsed gains, the budget with the NCU costs; the
+    ///     PEAK asks are tracked apart - only they are cancelled by the later steps (the ncu
+    ///     gain stays, it serves every line).
     /// </summary>
-    private Dictionary<int, int>? FloorFromPetLevel(LocalPlayer me, PetType role, PetLine line)
+    private sealed class Ledger
     {
-        var pet = me.Pets.FirstOrDefault(p => p.Role == role);
-        if (pet == null || !pet.TryGetStat(Stat.Level, out var level))
+        public readonly List<BuffEntry> Running = new();
+        public readonly HashSet<int> Lines = new();
+        public readonly Dictionary<int, int> Stats;
+        public readonly int MaxNcu;
+        public readonly string NcuBasis;
+        private readonly HashSet<BuffEntry> _peak = new();
+
+        public Ledger(Dictionary<int, int> cleanStats, int maxNcu, string ncuBasis)
+        {
+            Stats = cleanStats;
+            MaxNcu = maxNcu;
+            NcuBasis = ncuBasis;
+            Free = maxNcu;
+        }
+
+        public int Free { get; private set; }
+
+        /// <summary>The plan's first print line - the budget the whole plan runs under.</summary>
+        public void PrintHeader(DancePlan plan, int ncuCost)
+        {
+            var basis = NcuBasis;
+            if (ncuCost > 0)
+            {
+                basis += $"; {Free - ncuCost} free once the ncu ask ({ncuCost} NCU) sits";
+            }
+
+            plan.Print.Add($"EXTBUFF: dance plan - clean slate, predicted max {MaxNcu} NCU ({basis}).");
+        }
+
+        public IEnumerable<BuffEntry> PeakAsks()
+        {
+            return Running.Where(_peak.Contains);
+        }
+
+        public void Apply(BuffEntry e, bool peakAsk)
+        {
+            Running.Add(e);
+            if (peakAsk)
+            {
+                _peak.Add(e);
+            }
+
+            if (e.NanoLine is > 0)
+            {
+                Lines.Add(e.NanoLine.Value);
+            }
+
+            Free -= e.Ncu;
+            foreach (var g in e.Gains)
+            {
+                Stats[g.Key] = Stats.GetValueOrDefault(g.Key) + g.Value;
+            }
+        }
+
+        public void Revoke(BuffEntry e)
+        {
+            Running.Remove(e);
+            _peak.Remove(e);
+            if (e.NanoLine is > 0 && !Running.Any(o => o.NanoLine == e.NanoLine))
+            {
+                Lines.Remove(e.NanoLine.Value);
+            }
+
+            Free += e.Ncu;
+            foreach (var g in e.Gains)
+            {
+                Stats[g.Key] = Stats.GetValueOrDefault(g.Key) - g.Value;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     The NCU headroom the fixer's ncu nanos will give - the +MaxNCU family scanned out of
+    ///     the pack (the Use modifier on stat MaxNCU), each tier LEVEL-LOCKED by its recipient
+    ///     gate (owner, 2026-10-07: "use the ncu fixer nanos, the trigger is the level lock").
+    ///     The predicted tier is the strongest gain whose lock sits below our level; a running
+    ///     family member's gain is already inside the live MaxNCU and is subtracted back out.
+    /// </summary>
+    private (int Max, string? Tier, int Gain, int Lock) PredictNcuMax(LocalPlayer me)
+    {
+        var family = new List<(int Id, int Gain, int Lock)>();
+        foreach (var nano in NanoLibrary.Nanos)
+        {
+            if (UseModifier(nano.NanoId, Stat.MaxNCU) is not { } gain || gain <= 0)
+            {
+                continue;
+            }
+
+            // The recipient level lock: the target-side Greater-than Level gate (stat 54).
+            var lockLevel = -1;
+            foreach (var action in nano.Actions)
+            {
+                foreach (var r in action.Requirements)
+                {
+                    if (r.Target == 18 && r.Stat == (int)Stat.Level && r.Operator == 2)
+                    {
+                        lockLevel = Math.Max(lockLevel, r.Value);
+                    }
+                }
+            }
+
+            if (lockLevel >= 0)
+            {
+                family.Add((nano.NanoId, gain, lockLevel));
+            }
+        }
+
+        var familyIds = family.Select(f => f.Id).ToHashSet();
+        var running = 0;
+        foreach (var b in me.Buffs)
+        {
+            if (familyIds.Contains(b.Id) && UseModifier(b.Id, Stat.MaxNCU) is { } up)
+            {
+                running += up;
+            }
+        }
+
+        var level = me.TryGetStat(Stat.Level, out var lv) ? lv : 0;
+        var measured = me.TryGetStat(Stat.MaxNCU, out var max) ? max - running : 0;
+        var best = family.Where(f => level > f.Lock).OrderByDescending(f => f.Gain).ThenByDescending(f => f.Lock).FirstOrDefault();
+        return best.Id == 0
+            ? (measured, null, 0, 0)
+            : (measured + best.Gain, NanoLibrary.NameOf(best.Id), best.Gain, best.Lock);
+    }
+
+    /// <summary>The nano's Use-modifier on a stat, or null when it has none. The raw
+    /// <see cref="ItemBase.UseModifiers" /> is a DIRECT indexer - most nanos carry no Use list
+    /// at all, and touching it threw KeyNotFoundException across the whole pack scan.</summary>
+    private static int? UseModifier(int nanoId, Stat stat)
+    {
+        if (!ItemData.Find(nanoId, out NanoItem ni) || ni == null ||
+            !ni.Modifiers.TryGetValue(SpellListType.Use, out var use) ||
+            !use.TryGetValue(stat, out var value))
         {
             return null;
         }
 
+        return value;
+    }
+
+    /// <summary>One summon candidate: a (formula, branch) pair with its MERGED gate - the
+    /// formula's own Greater-than pet-tier-skill reqs UNION the branch's - as absolute TOTALS.</summary>
+    private sealed class SummonCandidate
+    {
+        public int Template;
+        public Dictionary<int, int> Mins = new();
+        public int FormulaId;
+        public string Name = "";
+        public int Ql;
+    }
+
+    /// <summary>
+    ///     A line's candidates: EVERY learned formula of the line, crossed with its branch
+    ///     templates. The heal and support lines are one formula per tier (gate on the formula,
+    ///     branches fixed-template appearance pickers); the attack line self-scales inside one
+    ///     formula (gate on each branch). The merged gate covers both shapes. Ordered top
+    ///     template first, then cheapest total gate, then highest QL.
+    /// </summary>
+    private List<SummonCandidate> LineCandidates(LocalPlayer me, PetLine line)
+    {
+        var cands = new List<SummonCandidate>();
+        if (!_summonIds.TryGetValue(line, out var ids))
+        {
+            return cands;
+        }
+
+        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
+        {
+            if (!ids.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
+            {
+                continue;
+            }
+
+            var nano = NanoLibrary.Find(nanoId);
+            if (nano == null || nano.Summons.Count == 0)
+            {
+                continue;
+            }
+
+            var formulaMins = SkillMins(nano.Actions.SelectMany(a => a.Requirements));
+            foreach (var group in nano.Summons.GroupBy(b => b.TemplateLevel))
+            {
+                var mins = new Dictionary<int, int>(formulaMins);
+                foreach (var branch in group)
+                {
+                    foreach (var kv in BuffCatalog.BranchMins(branch))
+                    {
+                        mins[kv.Key] = Math.Max(mins.GetValueOrDefault(kv.Key), kv.Value);
+                    }
+                }
+
+                if (mins.Count == 0)
+                {
+                    continue; // gates on nothing we can lift - not a tier the planner can aim at
+                }
+
+                cands.Add(new SummonCandidate
+                {
+                    Template = group.Key,
+                    Mins = mins,
+                    FormulaId = nanoId,
+                    Name = ni.Name,
+                    Ql = ni.Ql,
+                });
+            }
+        }
+
+        return cands
+            .OrderByDescending(c => c.Template)
+            .ThenBy(c => c.Mins.Values.Sum())
+            .ThenByDescending(c => c.Ql)
+            .ToList();
+    }
+
+    /// <summary>The Greater-than pet-tier-skill gates of a requirement list, as absolute
+    /// TOTALS (strict gate ⇒ value + 1 - the client's "required to be at least 519").</summary>
+    private static Dictionary<int, int> SkillMins(IEnumerable<NanoRequirement> reqs)
+    {
+        var mins = new Dictionary<int, int>();
+        foreach (var r in reqs)
+        {
+            if (r.Operator == 2 && r.Stat is 127 or 128 or 130 or 131)
+            {
+                mins[r.Stat] = Math.Max(mins.GetValueOrDefault(r.Stat), r.Value + 1);
+            }
+        }
+
+        return mins;
+    }
+
+    /// <summary>
+    ///     The gate of a tier: the learned formula + branch sitting at exactly this template
+    ///     level (highest QL wins a tie) - the pet's wire LEVEL identifies its tier the same
+    ///     way (template ≈ level; the pet never tells which formula made it, owner: IMPORTANT).
+    ///     Formula reqs UNION branch reqs, so a heal tier's gate comes off the formula, an
+    ///     attack tier's off its branch.
+    /// </summary>
+    private Dictionary<int, int>? TierMins(LocalPlayer me, PetLine line, int level)
+    {
         if (!_summonIds.TryGetValue(line, out var ids))
         {
             return null;
         }
 
-        SummonBranch? match = null;
+        Dictionary<int, int>? best = null;
         var matchQl = -1;
         foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
         {
@@ -565,34 +1110,70 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
                 continue;
             }
 
+            var formulaMins = SkillMins(nano.Actions.SelectMany(a => a.Requirements));
             foreach (var branch in nano.Summons)
             {
-                if (branch.TemplateLevel == level && ni.Ql > matchQl)
+                if (branch.TemplateLevel != level || ni.Ql <= matchQl)
                 {
-                    matchQl = ni.Ql;
-                    match = branch;
+                    continue;
                 }
+
+                matchQl = ni.Ql;
+                var mins = new Dictionary<int, int>(formulaMins);
+                foreach (var kv in BuffCatalog.BranchMins(branch))
+                {
+                    mins[kv.Key] = Math.Max(mins.GetValueOrDefault(kv.Key), kv.Value);
+                }
+
+                best = mins;
             }
         }
 
-        if (match == null)
+        return best is { Count: > 0 } ? best : null;
+    }
+
+    /// <summary>The tier of the line's standing pet, via its wire level against the branch
+    /// tables - 0 when the line is empty or the tier does not match any branch.</summary>
+    private int StandingTemplate(LocalPlayer me, PetType role, PetLine line)
+    {
+        var pet = me.Pets.FirstOrDefault(p => p.Role == role);
+        if (pet == null || !pet.TryGetStat(Stat.Level, out var level))
+        {
+            return 0;
+        }
+
+        return TierMins(me, line, level) != null ? level : 0;
+    }
+
+    /// <summary>The obedience floor of a tier gate: 80% of each total (PetBrain.ControlFloor)
+    /// - what keeps a pet of this tier obedient.</summary>
+    private static Dictionary<int, int>? FloorOfMins(IReadOnlyDictionary<int, int>? mins)
+    {
+        if (mins == null || mins.Count == 0)
         {
             return null;
         }
 
         var totals = new Dictionary<int, int>();
-        foreach (var r in match.Requirements)
+        foreach (var kv in mins)
         {
-            if (r.Operator == 2 && r.Stat is 127 or 128 or 130 or 131)
-            {
-                var floor = (int)Math.Ceiling((r.Value + 1) * 0.80); // PetBrain.ControlFloor
-                totals[r.Stat] = Math.Max(totals.GetValueOrDefault(r.Stat), floor);
-            }
+            var floor = (int)Math.Ceiling(kv.Value * 0.80);
+            totals[kv.Key] = Math.Max(totals.GetValueOrDefault(kv.Key), floor);
         }
 
         return totals.Count > 0 ? totals : null;
     }
 
+    /// <summary>The step the dance currently sits on, or null past the end.</summary>
+    private DanceStep? CurrentStep()
+    {
+        return _queueIndex >= 0 && _queueIndex < _queue.Count ? _queue[_queueIndex] : null;
+    }
+
+    /// <summary>
+    ///     Execute the next planned step. The plan was printed at dance start - this only
+    ///     carries it out, logging each step's number as it goes.
+    /// </summary>
     private void Advance(LocalPlayer me, PetBrain pet)
     {
         _queueIndex++;
@@ -602,254 +1183,93 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             return;
         }
 
-        var (phase, role) = _queue[_queueIndex];
-        _logger.LogInformation($"EXTBUFF: Entering phase {_queue[_queueIndex].Phase}");
-        _phase = phase;
-        switch (phase)
+        var step = _queue[_queueIndex];
+        switch (step.Kind)
         {
-            case Phase.TerminateBuffs:
-                // Then our own: EVERYTHING on me comes off (owner, 2026-10-06) - the peak
-                // stages plan against real free NCU, and nothing stale survives the rebuild.
-                // The kept set (obedience floor + comfort fill) is rebuilt by the later
-                // stages, so the renewal watch starts from what those plan.
+            case StepKind.Travel:
+                _travelDeadline = -1;
+                _travelGoalSet = false;
+                RunTravelStage(me, pet);
+                break;
+
+            case StepKind.TerminateBuffs:
+                // EVERYTHING on me comes off (owner, 2026-10-06) - the clean slate the plan
+                // budgeted against. The kept set was decided by the PLAN and stays.
                 foreach (var buff in me.Buffs.ToList())
                 {
                     me.CancelNano(buff.Id);
                     _logger.LogInformation($"EXTBUFF: cancelling {NanoLibrary.NameOf(buff.Id)} (terminate-buffs - a clean slate).");
                 }
 
-                _keptIds.Clear();
                 Advance(me, _bank.Pet!);
                 break;
 
-            case Phase.Travel:
-                _travelDeadline = -1;
-                _travelGoalSet = false;
-                RunTravelStage(me, pet);
+            case StepKind.Ask:
+                _logger.LogInformation($"EXTBUFF: step {_queueIndex + 1}: ASK - {step.Why}.");
+                OpenOrSkip(me, step.Tells, step.Why);
                 break;
 
-            case Phase.Ncu:
-            {
-                var ncu = _catalog.NcuTell();
-                _logger.LogInformation("EXTBUFF: stage 1 - NCU headroom.");
-                OpenOrSkip(me, ncu != null ? new List<string> { ncu } : new List<string>(), "NCU headroom");
-                break;
-            }
-
-            case Phase.Peak:
-                RunPeakStage(me, role);
-                break;
-
-            case Phase.PetBuffs:
-                RunPetBuffStage(me);
-                break;
-
-            case Phase.Obedience:
-                RunObedienceStage(me);
-                break;
-
-            case Phase.Qol:
-            {
-                // The SELF-DECIDED comfort fill (owner, 2026-10-06: PetQoLTells is obsolete -
-                // the pets are not buffed by the buffbots): best long-term entry per category,
-                // the skill buffs by conf mode - weapon mode matches the WIELDED weapon's own
-                // skills, nano mode the attack-nano skill (MatMet).
-                var attackNano = string.Equals(
-                    (_config.ComfortMode ?? "").Trim(), "nano", StringComparison.OrdinalIgnoreCase);
-                var weaponKeys = attackNano ? Array.Empty<string>() : EquippedWeaponSkillKeys().ToArray();
-                var tells = _catalog.PlanForComfort(me, attackNano, weaponKeys);
-                foreach (var tell in tells)
+            case StepKind.Cancel:
+                _logger.LogInformation($"EXTBUFF: step {_queueIndex + 1}: CANCEL - {step.Why}.");
+                foreach (var id in step.CancelIds)
                 {
-                    var id = _catalog.Find(tell)?.NanoId;
-                    if (id.HasValue)
+                    if (!me.Buffs.Find(id, out _))
                     {
-                        _keptIds.Add(id.Value);
+                        continue; // never landed (a windowed-out session) - nothing to cancel, no noise
                     }
+
+                    me.CancelNano(id);
+                    _logger.LogInformation($"EXTBUFF: cancelling {NanoLibrary.NameOf(id)} ({step.Why}).");
                 }
 
-                OpenOrSkip(me, tells,
-                    $"the comfort fill ({(attackNano ? "attack-nano skills" : "weapon skills")})");
-                break;
-            }
-        }
-    }
-
-    /// <summary>
-    ///     One line's peak stage: FIRST cancel the previous stage's asks that grant none of
-    ///     this line's gate stats (their NCU is freed - owner, 2026-10-06: "did you recalculate
-    ///     free ncu when cancelling another buff?" - the plan runs AFTER the cancels, against
-    ///     the freed budget), then ask for the highest template branch that budget can reach.
-    ///     A kept ask (it grants a gate stat) stays up without a re-tell; a never-landed ask
-    ///     cancels nothing.
-    /// </summary>
-    private void RunPeakStage(LocalPlayer me, PetType role)
-    {
-        var (line, _, _, label) = LineOf(role);
-        var previous = _lastPeakAsked.ToList();
-        _lastPeakAsked.Clear();
-
-        var nanoId = BestLearnedNano(me, line);
-        if (nanoId == null)
-        {
-            Advance(me, _bank.Pet!);
-            return;
-        }
-
-        var branches = NanoLibrary.Find(nanoId.Value)?.Summons;
-        if (branches == null || branches.Count == 0)
-        {
-            Advance(me, _bank.Pet!);
-            return;
-        }
-
-        // The stats this line's branches gate on: MatCrea+TS for the attack pet, BioMet+TS for
-        // the heal pet, MatMet+TS for the support pet - as the branch tables carry them.
-        var needed = new HashSet<int>();
-        foreach (var branch in branches)
-        {
-            foreach (var r in branch.Requirements)
-            {
-                if (r.Operator == 2 && r.Stat is 127 or 128 or 130 or 131)
-                {
-                    needed.Add(r.Stat);
-                }
-            }
-        }
-
-        if (needed.Count == 0)
-        {
-            // The branches gate on nothing we can buff (some heal formulas carry no nano-skill
-            // gates at all): no cancel judgment is possible - keep every running ask. The
-            // obedience stage still cleans them up afterwards.
-            foreach (var id in previous)
-            {
-                if (me.Buffs.Find(id, out _))
-                {
-                    _lastPeakAsked.Add(id);
-                }
-            }
-        }
-        else
-        {
-            foreach (var id in previous)
-            {
-                if (!me.Buffs.Find(id, out _))
-                {
-                    continue; // never landed (a windowed-out session) - nothing to cancel
-                }
-
-                var entry = _catalog.FindById(id);
-                if (entry != null && entry.Gains.Keys.Any(needed.Contains))
-                {
-                    _lastPeakAsked.Add(id); // serves this line - stays up; the next stage re-judges it
-                    continue;
-                }
-
-                me.CancelNano(id);
-                _peakAsked.Remove(id);
-                _logger.LogInformation($"EXTBUFF: cancelling {NanoLibrary.NameOf(id)} (the {label} pet needs none of it - NCU freed).");
-            }
-        }
-
-        // The plan runs AFTER the cancels: FreeNcu now includes what they freed.
-        var plan = _catalog.PlanForPeakEntries(me, BuffCatalog.FreeNcu(me), branches);
-
-        var tells = new List<string>();
-        foreach (var entry in plan)
-        {
-            if (!entry.NanoId.HasValue || me.Buffs.Find(entry.NanoId.Value, out _))
-            {
-                continue; // already up (kept from the previous stage) - no re-tell
-            }
-
-            _peakAsked.Add(entry.NanoId.Value);
-            _lastPeakAsked.Add(entry.NanoId.Value);
-            tells.Add(entry.Tell);
-        }
-
-        if (tells.Count == 0)
-        {
-            // "Reachable" either by the branch gates (the planner verified them) or - for the
-            // gate-less formulas (some heal pets carry no nano-skill gates at all) - by the
-            // best learned summon's own use reqs being met on the CURRENT stats: the swap is
-            // safe exactly then, because CastBest will land that summon. Checked NOW, before
-            // the swap - the obedience stage cancels the peak asks afterwards, and on the
-            // dropped stats a higher tier (Restite) falls back to the next castable (the
-            // owner's "it casted Valentyia instead of Restite").
-            var castableNow = BestSummonCastableNow(me, line);
-            if (!_catalog.LastPeakReachable && !castableNow.HasValue)
-            {
-                _logger.LogInformation(
-                    $"EXTBUFF: {label}-first: nothing coverable and the summon is not castable - the stage passes.");
                 Advance(me, _bank.Pet!);
-                return;
-            }
+                break;
 
-            // The swap runs right here, without a session - terminate the line's old pet, cast
-            // the new one at the peak stats.
-            _pendingRole = role;
-            _bank.Pet!.TerminateRole(me, role);
-            _danceStage = DanceStage.WaitingPet;
-            _waitDeadline = _clock + WaitPetSec;
-            _sinceResummon = 0;
-            _bank.Pet!.RequestSummon(role);
-            return;
+            case StepKind.Summon:
+                // The swap EXACTLY here (owner, 2026-10-06): terminate this line's OLD pet, then
+                // summon its replacement - which casts fresh at the peak stats the plan stacked.
+                // The same-line summon gate ("they don't overwrite") is what forces the
+                // terminate. The next step's budget assumed this pet's NCU spent.
+                // GUARDED: the stack this summon feeds on must be in - a session that failed to
+                // open, or landed short, must not end in a pet cast at base stats (the
+                // buff-first dance exists to prevent exactly that, owner 2026-10-06). The line
+                // waits for the next dance.
+                var shortStack = step.ExpectIds.Where(id => !me.Buffs.Find(id, out _)).ToList();
+                if (shortStack.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "EXTBUFF: step " + (_queueIndex + 1) + $": SUMMON {LineOf(step.Role).Label} dropped - the stack it feeds on is not in (" +
+                        string.Join(", ", shortStack.Select(NanoLibrary.NameOf)) + ").");
+                    Advance(me, _bank.Pet!);
+                    break;
+                }
+
+                _logger.LogInformation(
+                    $"EXTBUFF: step {_queueIndex + 1}: SUMMON {LineOf(step.Role).Label} - terminate + request '{step.TargetName}' (template {step.TargetTemplate} planned).");
+                _pendingRole = step.Role;
+                pet.TerminateRole(me, step.Role);
+                _danceStage = DanceStage.WaitingPet;
+                _waitDeadline = _clock + WaitPetSec;
+                _sinceResummon = 0;
+                pet.RequestSummon(step.Role);
+                break;
+
+            case StepKind.PetBuffs:
+                // Built for real now - the roster just changed under the plan's summons.
+                _logger.LogInformation($"EXTBUFF: step {_queueIndex + 1}: PET BUFFS - {step.Why}.");
+                _petBuffQueue.Clear();
+                _petBuffQueue.AddRange(BuildPetBuffQueue(me).Queue);
+                if (_petBuffQueue.Count > 0)
+                {
+                    _danceStage = DanceStage.PetBuffing;
+                }
+                else
+                {
+                    Advance(me, _bank.Pet!);
+                }
+
+                break;
         }
-
-        var why = $"{label}-first for {NanoLibrary.NameOf(nanoId.Value)}";
-        OpenOrSkip(me, tells, why);
-    }
-
-    /// <summary>
-    ///     The obedience stage: ALL peak buffs come off (including the wrangle - "longterm
-    ///     buffs here only"), then the cheapest 1hr+ set lifting every summoned pet to 80% of
-    ///     its own tier's requirements. The floor totals come from the pet brain's cast
-    ///     snapshots per line with a pet actually up.
-    /// </summary>
-    private void RunObedienceStage(LocalPlayer me)
-    {
-        foreach (var id in _peakAsked)
-        {
-            if (!me.Buffs.Find(id, out _))
-            {
-                continue; // never landed (a windowed-out session) - nothing to cancel, no noise
-            }
-
-            me.CancelNano(id);
-            _logger.LogInformation($"EXTBUFF: cancelling {NanoLibrary.NameOf(id)} (peak buff - the obedience floor comes next).");
-        }
-
-        _peakAsked.Clear();
-        _lastPeakAsked.Clear();
-
-        var pet = _bank.Pet!;
-        var totals = FloorTotals(me, pet); // snapshots where we summoned, pet-level floors where we didn't
-        if (totals.Count == 0)
-        {
-            _logger.LogWarning(
-                "EXTBUFF: obedience stage has no floors (no pets up, and none carry snapshots or level-matched tiers) - skipped.");
-            Advance(me, pet);
-            return;
-        }
-
-        var free = BuffCatalog.FreeNcu(me);
-        var plan = _catalog.PlanForObedienceEntries(me, free, totals);
-        if (plan.Count == 0)
-        {
-            _logger.LogWarning(
-                $"EXTBUFF: no 1hr+ cover for the obedience floors within {free} NCU " +
-                $"(totals: {string.Join(", ", totals.Select(kv => $"{kv.Key}<{kv.Value}"))}) - skipped, floors stay open.");
-        }
-
-        foreach (var entry in plan)
-        {
-            if (entry.NanoId.HasValue)
-            {
-                _keptIds.Add(entry.NanoId.Value);
-            }
-        }
-
-        OpenOrSkip(me, plan.Select(c => c.Tell).ToList(), "the obedience floor (80% of the summoned tiers)");
     }
 
     /// <summary>
@@ -857,12 +1277,14 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     ///     (216/217/225/810/816/817/843): the best LEARNED nano by StackingOrder that we can
     ///     cast - no overequip math here - cast on the line's target pets (810 the support pet,
     ///     the damage/initiative lines the attack pet, 816/817/843 all pets). A pet already
-    ///     carrying the line at equal or better stacking is skipped. The casts are queued and
-    ///     pumped one at a time (DanceStage.PetBuffing).
+    ///     carrying the line at equal or better stacking is skipped. PURE: the planner dry-runs
+    ///     it for the printed plan; the PetBuffs step builds it for real (the roster may still
+    ///     have changed under the plan's summons) and pumps it one cast at a time
+    ///     (DanceStage.PetBuffing).
     /// </summary>
-    private void RunPetBuffStage(LocalPlayer me)
+    private (List<PetBuffCast> Queue, string Diag) BuildPetBuffQueue(LocalPlayer me)
     {
-        _petBuffQueue.Clear();
+        var queue = new List<PetBuffCast>();
         var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
         var diag = new List<string>();
         foreach (var line in PetBuffLines)
@@ -933,7 +1355,7 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
                     continue;
                 }
 
-                _petBuffQueue.Add(new PetBuffCast
+                queue.Add(new PetBuffCast
                 {
                     Pet = p.Identity,
                     NanoId = best.NanoId,
@@ -952,15 +1374,7 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             }
         }
 
-        if (_petBuffQueue.Count == 0)
-        {
-            _logger.LogInformation("EXTBUFF: pet buffs - nothing to cast: " + string.Join("; ", diag) + ".");
-            Advance(me, _bank.Pet!);
-            return;
-        }
-
-        _logger.LogInformation("EXTBUFF: pet buffs - " + string.Join("; ", diag) + ".");
-        _danceStage = DanceStage.PetBuffing;
+        return (queue, string.Join("; ", diag));
     }
 
     /// <summary>Which pets a pet-buff line goes on: 810 the support pet only, the
@@ -1125,52 +1539,29 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         Advance(me, _bank.Pet!);
     }
 
-    /// <summary>The step after a dance session closes.</summary>
+    /// <summary>
+    ///     The step after a dance session closes. Only ASK steps open sessions; the plan
+    ///     promised what each ask would land, so a shortfall is a PLAN DEVIATION - logged here,
+    ///     and acted on by the summon step itself (it checks the same ids and drops itself - a
+    ///     session that closed on its window cast nothing, and summoning then brings the pet
+    ///     out at base stats, exactly what the buff-first dance exists to prevent, owner
+    ///     2026-10-06). The dropped summon's line waits for the next dance.
+    /// </summary>
     private void AfterSession(LocalPlayer me, PetBrain pet)
     {
-        switch (_phase)
+        var step = CurrentStep();
+        if (step is { Kind: StepKind.Ask })
         {
-            case Phase.Ncu:
-            case Phase.Obedience:
-                Advance(me, pet); // the next stage (or the finish) does the planning against what landed
-                break;
-
-            case Phase.Peak:
-                // The summon goes out ONLY when this stage's peak stack actually LANDED: a
-                // session that closed on its window ("no invite came in the window") cast
-                // nothing, and summoning then brings the pet out at base stats - exactly what
-                // the buff-first dance exists to prevent (owner, 2026-10-06: the attack pet was
-                // cast right after the terminate, with no buffs anywhere). The line stays
-                // empty; the next dance re-asks it.
-                var missing = _lastPeakAsked.Where(id => !me.Buffs.Find(id, out _)).ToList();
-                if (missing.Count > 0)
-                {
-                    _logger.LogWarning(
-                        "EXTBUFF: the peak stack did not land (" +
-                        string.Join(", ", missing.Select(NanoLibrary.NameOf)) +
-                        $") - no {_queue[_queueIndex].Role} summon; the line waits for the next dance.");
-                    Advance(me, pet);
-                    break;
-                }
-
-                // The peak stack is in: the swap happens EXACTLY here (owner, 2026-10-06) -
-                // terminate the OLD pet of this line, then summon its replacement, which casts
-                // fresh at peak stats. The same-line summon gate ("they don't overwrite") is
-                // what forces the terminate; doing it per line, only now, keeps the rest of
-                // the roster up and fighting the whole dance. Then wait for the new pet - the
-                // next stage's cancel and NCU math need it out and its NCU spent.
-                _pendingRole = _queue[_queueIndex].Role;
-                pet.TerminateRole(me, _pendingRole);
-                _danceStage = DanceStage.WaitingPet;
-                _waitDeadline = _clock + WaitPetSec;
-                _sinceResummon = 0;
-                pet.RequestSummon(_pendingRole);
-                break;
-
-            case Phase.Qol:
-                Finish(me, pet);
-                break;
+            var missing = step.ExpectIds.Where(id => !me.Buffs.Find(id, out _)).ToList();
+            if (missing.Count > 0)
+            {
+                _logger.LogWarning(
+                    "EXTBUFF: the ask stack did not land (" + string.Join(", ", missing.Select(NanoLibrary.NameOf)) +
+                    $") - plan deviation at step {_queueIndex + 1} ({step.Why}).");
+            }
         }
+
+        Advance(me, pet);
     }
 
     private void Finish(LocalPlayer me, PetBrain pet)
@@ -1402,116 +1793,63 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         }
     }
 
-    /// <summary>
-    ///     The dance's target formula per line: the learned summon with the highest branch-table
-    ///     top (the pack's true strength order - QL does NOT track power within these lines),
-    ///     QL only as the tie-break.
-    /// </summary>
-    private int? BestLearnedNano(LocalPlayer me, PetLine line)
+    /// <summary>Whether the TARGET formula itself is castable on the CURRENT stats - kept for
+    /// diagnostics: the planner's gates come from the pack's requirements, this asks the same
+    /// req checker the client uses. This names ONE formula, never "whatever is castable": the
+    /// plan never downgrades.</summary>
+    private static bool SummonCastable(LocalPlayer me, int nanoId)
     {
-        if (!_summonIds.TryGetValue(line, out var ids) || ids.Count == 0)
+        if (!ItemData.Find(nanoId, out NanoItem ni) || ni == null)
         {
-            return null;
+            return false;
         }
 
-        int? best = null;
-        var bestTop = -1;
-        var bestQl = -1;
-        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
+        try
         {
-            if (!ids.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
-            {
-                continue;
-            }
-
-            var top = NanoLibrary.Find(nanoId)?.TopTemplateLevel ?? 0;
-            if (top > bestTop || (top == bestTop && ni.Ql > bestQl))
-            {
-                bestTop = top;
-                bestQl = ni.Ql;
-                best = nanoId;
-            }
+            return ni.MeetsUseReqs(me, false, true);
         }
-
-        return best;
+        catch
+        {
+            return false;
+        }
     }
 
-    /// <summary>
-    ///     The best learned summon of the line that is castable RIGHT NOW - the pet brain's
-    ///     CastBest selection, read-only (same ranking: branch-table top, then QL; same gate:
-    ///     the formula's use reqs on the current stats). Null when none is castable. This is
-    ///     the swap-safety check for the GATE-LESS formulas: their branches cannot tell the
-    ///     planner anything, but the use reqs on the live stats can.
-    /// </summary>
-    private int? BestSummonCastableNow(LocalPlayer me, PetLine line)
+    /// <summary>The planner's stat names (127 MatMet, 128 BioMet, 130 MatCrea, 131 SpaceTime).</summary>
+    private static string StatName(int stat)
     {
-        if (!_summonIds.TryGetValue(line, out var ids) || ids.Count == 0)
+        return stat switch
         {
-            return null;
-        }
-
-        int? best = null;
-        var bestTop = -1;
-        var bestQl = -1;
-        foreach (var nanoId in me.SpellList ?? Array.Empty<int>())
-        {
-            if (!ids.Contains(nanoId) || !ItemData.Find(nanoId, out NanoItem ni) || ni == null)
-            {
-                continue;
-            }
-
-            bool castable;
-            try
-            {
-                castable = ni.MeetsUseReqs(me, false, true);
-            }
-            catch
-            {
-                castable = false;
-            }
-
-            if (!castable)
-            {
-                continue;
-            }
-
-            var top = NanoLibrary.Find(nanoId)?.TopTemplateLevel ?? 0;
-            if (best == null || top > bestTop || (top == bestTop && ni.Ql > bestQl))
-            {
-                bestTop = top;
-                bestQl = ni.Ql;
-                best = nanoId;
-            }
-        }
-
-        return best;
+            127 => "MatMet",
+            128 => "BioMet",
+            130 => "MatCrea",
+            131 => "SpaceTime",
+            _ => $"stat {stat}",
+        };
     }
 
-    /// <summary>Whether the TOP template branch of a formula is reachable on the current stats
-    /// (Greater-than gates on the four pet-tier skills only).</summary>
-    private static bool TopReachable(LocalPlayer me, IReadOnlyList<SummonBranch> branches)
+    /// <summary>The net gains of a plan step's entries, per stat - "BioMet +140, SpaceTime +140".</summary>
+    private static string GainsText(IReadOnlyList<BuffEntry> entries)
     {
-        foreach (var branch in branches.OrderByDescending(b => b.TemplateLevel))
+        var per = new Dictionary<int, int>();
+        foreach (var e in entries)
         {
-            var gates = false;
-            foreach (var r in branch.Requirements)
+            foreach (var g in e.Gains)
             {
-                if (r.Operator != 2 || r.Stat is not (127 or 128 or 130 or 131))
-                {
-                    continue;
-                }
-
-                gates = true;
-                if (me.TryGetStat((Stat)r.Stat, out var v) && v <= r.Value)
-                {
-                    return false; // the top branch is gated and we are short
-                }
+                per[g.Key] = per.GetValueOrDefault(g.Key) + g.Value;
             }
-
-            return gates; // the top skill-gated branch - reachable iff nothing above blocked earlier
         }
 
-        return true;
+        return per.Count == 0 ? "no stat gains" : string.Join(", ", per.OrderBy(kv => kv.Key).Select(kv => $"{StatName(kv.Key)} +{kv.Value}"));
+    }
+
+    /// <summary>A branch's shortfalls against the ledger - "BioMet +118, SpaceTime met".</summary>
+    private static string Shortfalls(IReadOnlyDictionary<int, int> mins, IReadOnlyDictionary<int, int> stats)
+    {
+        return string.Join(", ", mins.OrderBy(kv => kv.Key).Select(kv =>
+        {
+            var gap = kv.Value - stats.GetValueOrDefault(kv.Key);
+            return gap > 0 ? $"{StatName(kv.Key)} +{gap}" : $"{StatName(kv.Key)} met";
+        }));
     }
 
     private (PetLine Line, PetType Role, NanoLine Strain, string Label) LineOf(PetType role)

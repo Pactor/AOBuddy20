@@ -353,12 +353,49 @@ public sealed class BuffCatalog
 
     /// <summary>
     ///     <see cref="PlanForPeak" /> with the full entries - the dance needs the NANO IDS of what
-    ///     it asked for, because the later stages cancel those buffs off again.
+    ///     it asked for, because the later stages cancel those buffs off again. The branch goals
+    ///     are measured on the CLEAN SLATE (see <see cref="CleanSlateBase" />): the asks must
+    ///     carry the branch on their own, whatever happens to be running.
     /// </summary>
     public IReadOnlyList<BuffEntry> PlanForPeakEntries(LocalPlayer me, int freeNcu, IReadOnlyList<SummonBranch> branches)
     {
-        var none = Array.Empty<BuffEntry>();
-        LastPeakReachable = false;
+        var plan = PeakPlanAgainst(me, freeNcu, branches, CleanSlateBase(me, NanoSkills), occupiedLines: null);
+        LastPeakReachable = plan.Reachable;
+        return plan.Asks;
+    }
+
+    /// <summary>
+    ///     What the LAST <see cref="PlanForPeakEntries" /> empty result meant: true = the gates
+    ///     are met on the clean slate (empty is success - the swap can run); false = no branch
+    ///     was coverable with the freed budget (the line stays as it is - no asks, no swap).
+    /// </summary>
+    public bool LastPeakReachable { get; private set; }
+
+    /// <summary>One peak-planning verdict: which branch the budget reaches, and the asks for it.</summary>
+    public sealed class PeakPlan
+    {
+        /// <summary>The winning branch - null when nothing was coverable.</summary>
+        public SummonBranch? Branch { get; init; }
+
+        /// <summary>The asks for the branch - EMPTY when its gates are already met (just summon).</summary>
+        public IReadOnlyList<BuffEntry> Asks { get; init; } = Array.Empty<BuffEntry>();
+
+        /// <summary>A branch was met or covered. False = nothing reachable - the line is left as it is.</summary>
+        public bool Reachable { get; init; }
+    }
+
+    /// <summary>
+    ///     The peak plan against a SIMULATED ledger - the dance's pre-computed plan asks this per
+    ///     line, with <paramref name="baseStats" /> as the ledger's stats (clean slate + what the
+    ///     earlier steps still keep up) and <paramref name="occupiedLines" /> fencing the
+    ///     nanolines the plan already runs (a re-ask would SUPERSEDE, not stack - owner,
+    ///     2026-10-06 - so its +N must never be counted as new gain). The branches run top
+    ///     template down; the first one met or coverable within <paramref name="freeNcu" /> wins.
+    /// </summary>
+    public PeakPlan PeakPlanAgainst(LocalPlayer me, int freeNcu, IReadOnlyList<SummonBranch> branches,
+        IReadOnlyDictionary<int, int> baseStats, IReadOnlySet<int>? occupiedLines)
+    {
+        var none = new PeakPlan { Reachable = false };
         if (!Loaded || me == null || branches == null || branches.Count == 0)
         {
             return none;
@@ -366,66 +403,64 @@ public sealed class BuffCatalog
 
         foreach (var branch in branches.OrderByDescending(b => b.TemplateLevel))
         {
-            var mins = new Dictionary<int, int>();
-            foreach (var r in branch.Requirements)
-            {
-                if (r.Operator == OpGreaterThan && NanoSkills.Contains(r.Stat))
-                {
-                    mins[r.Stat] = Math.Max(mins.GetValueOrDefault(r.Stat), r.Value + 1);
-                }
-            }
-
+            var mins = BranchMins(branch);
             if (mins.Count == 0)
             {
-                continue; // the bottom branch gates on nothing we can buff - casting it needs no asks
+                continue; // this branch gates on nothing we can buff - casting it needs no asks
             }
 
-            var gaps = SkillGaps(me, mins);
+            var gaps = mins
+                .Where(kv => baseStats.GetValueOrDefault(kv.Key) < kv.Value)
+                .ToDictionary(kv => kv.Key, kv => kv.Value - baseStats.GetValueOrDefault(kv.Key));
             if (gaps.Count == 0)
             {
-                // The top branch is already reachable - nothing to ask for. "Empty" here means
-                // SUCCESS: the swap can run on the running buffs.
-                LastPeakReachable = true;
-                return none;
+                // The branch is met on the ledger - nothing to ask for. Empty asks mean SUCCESS:
+                // the summon runs as it is.
+                return new PeakPlan { Branch = branch, Reachable = true };
             }
 
-            // The lines already running fence their entries out BEFORE the calculation (owner,
-            // 2026-10-06): the kept TS carriers of the earlier peak stages are in the current
-            // stats already - another buff on their line would only supersede them.
-            var occupied = RunningLines(me);
-            var cover = Cover(freeNcu, gaps,
-                Pool(me, new HashSet<int>(gaps.Keys), longTermOnly: false, occupied));
+            var pool = Pool(me, new HashSet<int>(gaps.Keys), longTermOnly: false);
+            if (occupiedLines != null)
+            {
+                pool = pool.Where(b => !occupiedLines.Contains(b.NanoLine ?? 0)).ToList();
+            }
+
+            var cover = Cover(freeNcu, gaps, pool);
             if (cover == null)
             {
                 continue; // this template is out of reach - try the one below it
             }
 
-            LastPeakReachable = true;
             _logger.LogInformation(
-                $"BUFFS: peak plan for template {branch.TemplateLevel} ({cover.Sum(c => c.Ncu)} NCU, " +
-                $"lines occupied: {(occupied.Count == 0 ? "none" : string.Join(",", occupied.OrderBy(x => x)))}): " +
+                $"BUFFS: peak plan for template {branch.TemplateLevel} ({cover.Sum(c => c.Ncu)} NCU): " +
                 $"{string.Join(" ", cover.Select(c => $"{c.Tell}(L{c.NanoLine})"))}.");
-            return cover;
+            return new PeakPlan { Branch = branch, Asks = cover, Reachable = true };
         }
 
         return none;
     }
 
-    /// <summary>
-    ///     What the LAST <see cref="PlanForPeakEntries" /> empty result meant: true = the gates
-    ///     are met on the running buffs (empty is success - the swap can run); false = no branch
-    ///     was coverable with the freed budget (the line stays as it is - no asks, no swap).
-    /// </summary>
-    public bool LastPeakReachable { get; private set; }
+    /// <summary>The branch's Greater-than gates on the four pet-tier skills, as the absolute
+    /// TOTAL wanted (strict gate ⇒ requirement + 1).</summary>
+    public static Dictionary<int, int> BranchMins(SummonBranch branch)
+    {
+        var mins = new Dictionary<int, int>();
+        foreach (var r in branch.Requirements)
+        {
+            if (r.Operator == OpGreaterThan && NanoSkills.Contains(r.Stat))
+            {
+                mins[r.Stat] = Math.Max(mins.GetValueOrDefault(r.Stat), r.Value + 1);
+            }
+        }
+
+        return mins;
+    }
 
     /// <summary>
-    ///     OBEDIENCE STAGE: the cheapest LONG-TERM tells (effects of an hour or more - the
-    ///     3-minute wrangle is explicitly not wanted here) that lift the current stats to every
-    ///     given total, spending as little NCU as possible: "use the buffs which cost least NCU
-    ///     to satisfy the pet's obedience requirements. You want as much free NCU after that as
-    ///     possible" (owner, 2026-10-05). <paramref name="minimumTotals" /> carries the absolute
-    ///     per-skill totals - 80% of the summoned tier's requirements, caller-computed from the
-    ///     cast snapshots. Empty when nothing is needed or nothing fits.
+    ///     OBEDIENCE STAGE: the floors go through <see cref="PlanForGoal" /> - the one clean-slate
+    ///     planner, LONG-TERM entries only (the 3-minute wrangle is explicitly not wanted here).
+    ///     Empty when the floors are already met on the clean slate or nothing covers them
+    ///     (<see cref="LastObedienceCovered" /> tells which).
     /// </summary>
     public List<string> PlanForObedience(LocalPlayer me, int freeNcu, IReadOnlyDictionary<int, int> minimumTotals)
     {
@@ -436,30 +471,159 @@ public sealed class BuffCatalog
     public IReadOnlyList<BuffEntry> PlanForObedienceEntries(LocalPlayer me, int freeNcu,
         IReadOnlyDictionary<int, int> minimumTotals)
     {
+        var plan = PlanForGoal(me, freeNcu, minimumTotals, longTermOnly: true);
+        LastObedienceCovered = plan.Count > 0;
+        if (plan.Count > 0)
+        {
+            _logger.LogInformation(
+                $"BUFFS: obedience plan ({plan.Sum(c => c.Ncu)} NCU): " +
+                $"{string.Join(" ", plan.Select(c => $"{c.Tell}(L{c.NanoLine})"))}.");
+        }
+
+        return plan;
+    }
+
+    /// <summary>Whether the LAST <see cref="PlanForObedienceEntries" /> found a cover - false
+    /// leaves the floors open this dance (the planner logged which gaps did not close).</summary>
+    public bool LastObedienceCovered { get; private set; }
+
+    // ---- The one planner --------------------------------------------------------------------
+
+    /// <summary>
+    ///     THE ONE PLANNER (owner, 2026-10-06: "don't do differential calculations - always come
+    ///     from a clean slate... define the goal and it spits out the buffs needed"). MULTI-GOAL:
+    ///     <paramref name="goals" /> carries every stat at once (TS AND MC, say) as the absolute
+    ///     TOTAL wanted, measured from the CLEAN SLATE - our stats as they read with every ask
+    ///     stripped (<see cref="CleanSlateBase" />). A goal of <see cref="int.MaxValue" /> means
+    ///     "as much as possible for this stat": after the hard goals are covered, the leftover
+    ///     NCU buys the strongest gains on those stats. One buff per nanoline (same line
+    ///     supersedes on the wire); no occupied-line fences - the tells replace whatever runs.
+    ///     LONG-TERM only when <paramref name="longTermOnly" /> (the obedience stage); peaks
+    ///     take short tools too.
+    /// </summary>
+    public IReadOnlyList<BuffEntry> PlanForGoal(LocalPlayer me, int freeNcu,
+        IReadOnlyDictionary<int, int> goals, bool longTermOnly)
+    {
+        return GoalPlanAgainst(me, freeNcu, goals, longTermOnly, CleanSlateBase(me, goals.Keys), occupiedLines: null);
+    }
+
+    /// <summary>
+    ///     The one planner against a SIMULATED ledger - the dance's pre-computed plan asks this
+    ///     with <paramref name="baseStats" /> as the ledger's stats and the nanolines the plan
+    ///     already runs fenced out of the pool (see <see cref="PeakPlanAgainst" />). The live
+    ///     <see cref="PlanForGoal" /> is this with the live clean slate and no fences.
+    /// </summary>
+    public IReadOnlyList<BuffEntry> GoalPlanAgainst(LocalPlayer me, int freeNcu,
+        IReadOnlyDictionary<int, int> goals, bool longTermOnly,
+        IReadOnlyDictionary<int, int> baseStats, IReadOnlySet<int>? occupiedLines)
+    {
         var none = Array.Empty<BuffEntry>();
-        if (!Loaded || me == null || minimumTotals == null || minimumTotals.Count == 0)
+        if (!Loaded || me == null || goals.Count == 0)
         {
             return none;
         }
 
-        var gaps = SkillGaps(me, minimumTotals);
-        if (gaps.Count == 0)
+        var gaps = new Dictionary<int, int>();
+        var maximize = new List<int>();
+        foreach (var kv in goals)
         {
+            if (kv.Value == int.MaxValue)
+            {
+                maximize.Add(kv.Key); // "as much as possible for this stat"
+                continue;
+            }
+
+            var gap = kv.Value - baseStats.GetValueOrDefault(kv.Key);
+            if (gap > 0)
+            {
+                gaps[kv.Key] = gap;
+            }
+        }
+
+        if (gaps.Count == 0 && maximize.Count == 0)
+        {
+            _logger.LogInformation("BUFFS: the goal is already met on the clean slate.");
             return none;
         }
 
-        var occupied = RunningLines(me); // same law: a running line cannot take a second buff
-        var cover = Cover(freeNcu, gaps, Pool(me, new HashSet<int>(gaps.Keys), longTermOnly: true, occupied));
-        if (cover == null)
+        if (gaps.Count > 0)
         {
+            _logger.LogInformation(
+                "BUFFS: clean-slate gaps - " +
+                string.Join(", ", gaps.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}:+{kv.Value}")) + ".");
+        }
+
+        var pool = Pool(me, new HashSet<int>(goals.Keys), longTermOnly);
+        if (occupiedLines != null)
+        {
+            pool = pool.Where(b => !occupiedLines.Contains(b.NanoLine ?? 0)).ToList();
+        }
+
+        var picked = gaps.Count > 0 ? Cover(freeNcu, gaps, pool) : new List<BuffEntry>();
+        if (gaps.Count > 0 && picked == null)
+        {
+            _logger.LogWarning("BUFFS: the clean-slate gaps are not coverable within the NCU budget.");
             return none;
         }
 
-        _logger.LogInformation(
-            $"BUFFS: obedience plan ({cover.Sum(c => c.Ncu)} NCU, " +
-            $"lines occupied: {(occupied.Count == 0 ? "none" : string.Join(",", occupied.OrderBy(x => x)))}): " +
-            $"{string.Join(" ", cover.Select(c => $"{c.Tell}(L{c.NanoLine})"))}.");
-        return cover;
+        picked ??= new List<BuffEntry>();
+
+        // "As much as possible": spend what the hard goals left on the MaxValue stats, greedy
+        // on the strongest gains, one buff per nanoline.
+        if (maximize.Count > 0)
+        {
+            var spent = picked.Sum(p => p.Ncu);
+            var usedLines = new HashSet<int>(picked.Select(p => p.NanoLine ?? 0));
+            var rest = pool
+                .Where(p => !picked.Contains(p) && !usedLines.Contains(p.NanoLine ?? 0))
+                .Select(p => (E: p, G: p.Gains.Where(g => maximize.Contains(g.Key)).Sum(g => (long)g.Value)))
+                .Where(x => x.G > 0)
+                .OrderByDescending(x => x.G);
+            foreach (var (e, _) in rest)
+            {
+                if (spent + e.Ncu > freeNcu || usedLines.Contains(e.NanoLine ?? 0))
+                {
+                    continue;
+                }
+
+                picked.Add(e);
+                usedLines.Add(e.NanoLine ?? 0);
+                spent += e.Ncu;
+            }
+        }
+
+        return picked;
+    }
+
+    /// <summary>The stats as they read with EVERY ask stripped - current minus the parsed gains
+    /// of whatever is running (the menu knows what each ask gives). The clean slate the one
+    /// planner measures goals against.</summary>
+    public Dictionary<int, int> CleanSlateBase(LocalPlayer me, IEnumerable<int> stats)
+    {
+        var baseStats = stats.ToDictionary(s => s, s => me.TryGetStat((Stat)s, out var v) ? v : 0);
+        foreach (var b in me.Buffs)
+        {
+            if (b?.NanoItem == null)
+            {
+                continue;
+            }
+
+            var entry = FindById(b.Id);
+            if (entry == null)
+            {
+                continue;
+            }
+
+            foreach (var g in entry.Gains)
+            {
+                if (baseStats.ContainsKey(g.Key))
+                {
+                    baseStats[g.Key] -= g.Value;
+                }
+            }
+        }
+
+        return baseStats;
     }
 
     // ---- The comfort plan -------------------------------------------------------------------
@@ -477,7 +641,8 @@ public sealed class BuffCatalog
     ///     with whatever budget is left (owner: "like coruscating screen").
     /// </summary>
     public List<string> PlanForComfort(LocalPlayer me, bool attackNanoSkills,
-        IReadOnlyCollection<string> weaponKeys)
+        IReadOnlyCollection<string> weaponKeys, int? budgetOverride = null,
+        IReadOnlySet<int>? takenLinesOverride = null)
     {
         var tells = new List<string>();
         if (!Loaded || me == null)
@@ -486,8 +651,10 @@ public sealed class BuffCatalog
         }
 
         var level = me.TryGetStat(Stat.Level, out var l) ? l : 0;
-        var budget = FreeNcu(me);
-        var taken = new HashSet<int>(RunningLines(me)); // running lines supersede - never re-planned
+        // The dance's pre-computed plan runs this against its SIMULATED ledger (what the earlier
+        // steps left of the budget and their nanolines); standalone, live state decides.
+        var budget = budgetOverride ?? FreeNcu(me);
+        var taken = takenLinesOverride != null ? new HashSet<int>(takenLinesOverride) : RunningLines(me);
         _logger.LogInformation($"BUFFS: comfort - budget {budget} NCU, lines taken: {(taken.Count == 0 ? "none" : string.Join(",", taken.OrderBy(x => x)))}.");
 
         // The strongest entry of EACH matching nanoline (owner: "always check the nano
@@ -625,14 +792,13 @@ public sealed class BuffCatalog
     /// <summary>
     ///     The menu entries that may enter a plan for the wanted skills: nano-skill gains that
     ///     overlap them, the character meets the formula's level gate (the pack's Level &gt; N on
-    ///     the ToUse action - never ask for a code that answers "your level is too low"), - when
-    ///     <paramref name="longTermOnly" /> - the effect runs an hour or more (the 3-minute
-    ///     wrangles drop out here), and the entry's line is NOT already running
-    ///     (<paramref name="occupied" /> - grouped out before any calculation). Ordered
+    ///     the ToUse action - never ask for a code that answers "your level is too low"), and -
+    ///     when <paramref name="longTermOnly" /> - the effect runs an hour or more (the 3-minute
+    ///     wrangles drop out here). NO occupied-line fencing: the plans run from the clean
+    ///     slate, and a tell on a running line simply supersedes it on the wire. Ordered
     ///     cheapest-Ncu first.
     /// </summary>
-    private List<BuffEntry> Pool(LocalPlayer me, HashSet<int> wantedSkills, bool longTermOnly,
-        HashSet<int> occupied)
+    private List<BuffEntry> Pool(LocalPlayer me, HashSet<int> wantedSkills, bool longTermOnly)
     {
         var level = me.TryGetStat(Stat.Level, out var l) ? l : 0;
         var pool = new List<BuffEntry>();
@@ -688,11 +854,6 @@ public sealed class BuffCatalog
                 {
                     b.NanoLine = packStrain;
                 }
-            }
-
-            if (b.NanoLine.HasValue && occupied.Contains(b.NanoLine.Value))
-            {
-                continue; // the line is already running - a second buff on it supersedes, never stacks
             }
 
             pool.Add(b);
