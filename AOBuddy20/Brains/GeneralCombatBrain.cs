@@ -44,8 +44,8 @@ namespace AOBuddy20.Brains;
 public class GeneralCombatBrain : CombatBrain
 {
     protected readonly PacketRouter _packetRouter;
-    private readonly OwnerAssist _ownerAssist;
-    private readonly BrainBank _brains;
+    protected readonly OwnerAssist _ownerAssist;
+    protected readonly BrainBank _brains;
 
     private bool _hadOwnerTarget; // we were swinging the owner's target, for the stand-down StopAttack edge
     private bool _stoodDown; // the one StopAttack has been sent for this stand-down (dedupe)

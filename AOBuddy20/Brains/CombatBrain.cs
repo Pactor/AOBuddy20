@@ -88,11 +88,12 @@ public abstract class CombatBrain
                 _attackedTarget = default;
             }
 
-            EndEngagement();
+            EndEngagement(me);
             return false;
         }
 
         Engage(me, target);
+        OnEngage(me, target);
         SpecialsTick(me, target, dt);
 
         if (!_holding)
@@ -123,8 +124,10 @@ public abstract class CombatBrain
     ///     tick while it casts on us). So re-assert the selection on the mob EVERY tick - SetTarget only,
     ///     which does NOT reset the swing timer (AOBuddy10's "restore target, never re-Attack"). Without
     ///     this a buddy stops swinging after a self-heal: the weapon is left selecting us.
+    ///     Virtual: a background profession (the Metaphysicist) overrides it to a no-op - its
+    ///     pets do the fighting, the body never swings.
     /// </summary>
-    protected void Engage(LocalPlayer me, SimpleChar target)
+    protected virtual void Engage(LocalPlayer me, SimpleChar target)
     {
         Targeting.SetTarget(target.Identity);
 
@@ -136,6 +139,20 @@ public abstract class CombatBrain
         me.Attack(target.Identity);
         _attackedTarget = target.Identity;
         _logger.LogInformation($"COMBAT: attack -> '{target.Name}'.");
+    }
+
+    /// <summary>
+    ///     ENGINE HOOK: the engagement is open on <paramref name="target" /> - called EVERY tick
+    ///     while it lasts (a policy may need the refreshed target: pets re-drive on a change).
+    ///     Base no-op.
+    /// </summary>
+    protected virtual void OnEngage(LocalPlayer me, SimpleChar target)
+    {
+    }
+
+    /// <summary>ENGINE HOOK: the engagement closed (target gone / set aside). Base no-op.</summary>
+    protected virtual void OnDisengage(LocalPlayer? me)
+    {
     }
 
     /// <summary>
@@ -174,19 +191,20 @@ public abstract class CombatBrain
         return _setAside.TryGetValue(mob, out var until) && _clock < until;
     }
 
-    private void EndEngagement()
+    private void EndEngagement(LocalPlayer? me)
     {
         if (_holding)
         {
             _holding = false;
             _controlArbiter.ReleaseControl();
             _logger.LogInformation("COMBAT: engagement closed.");
+            OnDisengage(me);
         }
     }
 
     private void HardEnd()
     {
         _attackedTarget = default;
-        EndEngagement();
+        EndEngagement(null);
     }
 }

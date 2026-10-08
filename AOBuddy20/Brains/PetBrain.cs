@@ -253,6 +253,23 @@ public abstract class PetBrain
         return me.Pets.FirstOrDefault(p => p.Role == PetType.Attack);
     }
 
+    /// <summary>
+    ///     The COMBAT brain's hand-off: the mob our pets are to fight this tick, or null to stand
+    ///     the attack pets down to Follow. The combat brain resolves the target (owner's fight,
+    ///     attackers of us/our pets) - the pet family owns the actual commanding (DriveAttack's
+    ///     attack-once + retry). No attack pet: nothing to drive, silently.
+    /// </summary>
+    public void DriveCombatPet(LocalPlayer me, SimpleChar? target)
+    {
+        var pet = AttackPet(me);
+        if (pet == null)
+        {
+            return;
+        }
+
+        DriveAttack(me, pet, target);
+    }
+
     protected static NpcChar? HealPet(LocalPlayer me)
     {
         return me.Pets.FirstOrDefault(p => p.Role == PetType.Heal);
