@@ -36,8 +36,8 @@ namespace AOBuddy20.Network;
 ///       - the bag read-through (AOBuddy10 BagReadTick): a few seconds after the login inventory
 ///         lands, each worn bag is opened once (one per 1.5 s) so its contents are known - that
 ///         is what turns /inventory's "known" flags true and lets lootbag list name the bags.
-///         Re-runs after every zone (the playfield change stands in for AOBuddy10's
-///         ContainerGeneration, which this SDK does not carry).
+///         Re-runs after every zone (Inventory.ContainerGeneration) - and re-opens the bags whose
+///         handles the zone staled, or nothing in them can be used or moved.
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class BotApiService
@@ -64,7 +64,7 @@ public sealed class BotApiService
     private volatile string _inventoryJson = "{}";
 
     // The bag read-through's own state.
-    private int _pf = -1;
+    private int _bagReadGen = -1;
     private bool _bagReadDone;
     private double _bagReadAt = -1;
     private double _nextOpenAt;
@@ -366,11 +366,12 @@ public sealed class BotApiService
 
     private void BagReadTick(LocalPlayer? me)
     {
-        var pf = (int)Playfield.ModelId;
-        if (pf != _pf)
+        if (_bagReadGen != Inventory.ContainerGeneration)
         {
-            // A zone change invalidates the container cache (this SDK has no ContainerGeneration).
-            _pf = pf;
+            // A zone invalidates the bags' HANDLES (Inventory.ResetContainers marks them Stale on every
+            // zone, same-model rezones included): the stale ones are read through again, or no item in
+            // them can be used or moved until something reopens them.
+            _bagReadGen = Inventory.ContainerGeneration;
             _bagReadDone = false;
             _bagReadAt = -1;
         }
@@ -404,9 +405,9 @@ public sealed class BotApiService
             }
 
             var ct = Inventory.Containers?.FirstOrDefault(c => c.Identity == b.UniqueIdentity);
-            if (ct is { IsOpen: true })
+            if (ct is { IsOpen: true, Stale: false })
             {
-                continue; // contents delivered (or known-empty): the open's Handle marks them read
+                continue; // contents delivered (or known-empty) and the handle is this zone's: nothing to open
             }
 
             GameCommands.OpenContainer(me, b.Slot);

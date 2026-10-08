@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: SellController.cs
 //
-// Last modified: 2026-10-02
+// Last modified: 2026-10-08
 // Created:       2026-10-02 (ported from AOBuddy10 MissionRun.cs ShopStep.Sell, new selection rules)
 //
 // Long live OmniCell and AOBuddy
@@ -40,7 +40,10 @@ namespace AOBuddy20.Controlling;
 ///     target. The server pays (Cash) and closes the window, so every batch re-opens the terminal,
 ///     2.5 s per batch. Items can't be sold from inside a bag (owner): they are moved out with
 ///     ClientMoveItemToInventory, up to five per pass while free slots last, and only those staged
-///     items are ever offered.
+///     items are ever offered. A move is built from the bag's HANDLE slot - and a zone stales every
+///     handle (Container.Stale, AOBuddy10 2026-09-28), so a bag read before the last zone is
+///     re-opened before anything moves out of it, or the server silently ignores the move (the
+///     2026-10-08 run: 3 zones out to the shop, then 20 ignored move passes, nothing sold).
 ///
 ///     Refusals (AOBuddy10's rules): a whole batch refused once is the TERMINAL - blacklist it and
 ///     try the next nearest; items left over from a partly sold batch are refused by the vendor and
@@ -99,10 +102,15 @@ public sealed class SellController
     private readonly List<Identity> _candidates = new();
     private readonly HashSet<Identity> _badVendors = new(); // took none of a whole batch, twice-backed
     private readonly HashSet<Identity> _refusedSlots = new(); // items a vendor declined: never offered again
-    private readonly HashSet<Identity> _staged = new(); // items moved out of a bag: the ONLY ones sellable
+
+    // Items moved out of a bag: the ONLY ones sellable. Keyed by OBJECT, not UniqueIdentity - reward and
+    // shop items all carry UniqueIdentity None, and a UID-keyed set matched every None-UID loose item in
+    // the packs (2026-10-08: batch 1 sold the bot's own recharger stack and stims). The move echo carries
+    // the same Item object from the bag into Inventory.Items, so the reference survives the move.
+    private readonly HashSet<Item> _staged = new();
     private List<Identity>? _lastBatchSlots; // the slots of the batch in flight (refusal bookkeeping)
     private Identity _lastVendor = Identity.None;
-    private readonly Dictionary<Identity, Identity> _stagedFrom = new(); // staged item -> the bag it came from
+    private readonly Dictionary<Item, Identity> _stagedFrom = new(); // staged item -> the bag it came from
 
     public bool Active => _phase != Phase.Idle;
 
@@ -410,7 +418,7 @@ public sealed class SellController
 
         // What is on offer: ONLY items staged out of the bags, sitting in the main inventory now.
         var sell = Inventory.Items
-            .Where(i => i != null && i.Slot.Type == IdentityType.Inventory && _staged.Contains(i.UniqueIdentity) &&
+            .Where(i => i != null && i.Slot.Type == IdentityType.Inventory && _staged.Contains(i) &&
                         !_refusedSlots.Contains(i.Slot))
             .ToList();
         if (sell.Count == 0)
@@ -420,10 +428,21 @@ public sealed class SellController
             var room = Inventory.NumFreeSlots - 1;
             if (inBags.Count > 0 && room > 0 && _moves < MaxMoves)
             {
+                // A bag read before the last zone (Container.Stale) must be re-opened first: the server
+                // silently ignores a move on a slot built from the old zone's handle (AOBuddy10, 2026-09-28;
+                // here, 2026-10-08: the 3-zone trip to the shop staled every bag, and 20 move passes in a
+                // row were ignored - the loot never left the bags).
+                if (inBags.Any(InStaleBag))
+                {
+                    OpenUnknownBags(me);
+                    _lastActionAt = _phaseTime; // a beat for the container updates to land
+                    return;
+                }
+
                 foreach (var it in inBags.Take(Math.Min(SellBatch, room)))
                 {
                     Item.MoveItemToInventory(it.Slot, 0x6F);
-                    _staged.Add(it.UniqueIdentity);
+                    _staged.Add(it);
                     _logger.LogInformation($"SELL: '{it.Name}' out of a bag ({it.Slot}).");
                 }
 
@@ -504,11 +523,13 @@ public sealed class SellController
 
     // ---- bags and vendors ------------------------------------------------------
 
-    // Open only the bags whose contents the SDK doesn't have yet. The marker is the container's
-    // Handle (IsOpen): the login read-through or any earlier open answers with one, and an OPENED
-    // bag that is empty is known-empty - only the Handle-0 shell login plants needs the open.
-    // Container.Items is the session cache: once delivered it stays for the whole session and
-    // survives the login inventory rebuild; a relog starts empty.
+    // Open only the bags whose contents the SDK doesn't have yet, or whose handle a zone has staled.
+    // The marker is the container's Handle (IsOpen): the login read-through or any earlier open answers
+    // with one, and an OPENED bag that is empty is known-empty - only the Handle-0 shell login plants
+    // needs the open. Container.Items is the session cache: once delivered it stays for the whole session
+    // and survives the login inventory rebuild; a relog starts empty. A zone keeps the contents but
+    // stales the Handle (Container.Stale) - a stale bag is opened again, or the server ignores every
+    // Use and move on its slots (AOBuddy10, 2026-09-28).
     private void OpenUnknownBags(LocalPlayer me)
     {
         foreach (var b in Inventory.Items.Where(i =>
@@ -516,13 +537,20 @@ public sealed class SellController
                      i.UniqueIdentity.Type == IdentityType.Container))
         {
             var ct = Inventory.Containers.FirstOrDefault(c => c.Identity == b.UniqueIdentity);
-            if (ct is { IsOpen: true })
+            if (ct is { IsOpen: true, Stale: false })
             {
-                continue; // contents already delivered (or known-empty)
+                continue; // contents already delivered (or known-empty), handle still this zone's
             }
 
             GameCommands.OpenContainer(me, b.Slot);
         }
+    }
+
+    // A move can only be built from a bag the CURRENT zone has answered an open for: Stale marks the
+    // ones whose handle a zone left behind, and the server ignores their slots.
+    private static bool InStaleBag(Item it)
+    {
+        return Inventory.Containers.Any(c => c.Stale && c.Items.Contains(it));
     }
 
     // The contents of every bag: everything except NODROP items (they stay - the owner said so) and
@@ -538,7 +566,7 @@ public sealed class SellController
                 if (SellableItem(it))
                 {
                     sell.Add(it);
-                    _stagedFrom[it.UniqueIdentity] = c.Identity;
+                    _stagedFrom[it] = c.Identity;
                 }
             }
         }
@@ -561,6 +589,21 @@ public sealed class SellController
         if (ItemValues.IsNoDrop(i.Id, i.HighId))
         {
             return false; // NODROP: never sellable, stays in the bag (owner, 2026-10-02)
+        }
+
+        // SUPPLIES AND KEYS (the owner's AOBuddy10 rules, 2026-09-24): stims and rechargers are the
+        // bot's own consumables and never sold, however they sit; and, to be safe, anything with 'key'
+        // or 'mission' in the name (a mission key's name isn't in the item data).
+        if (string.Equals(i.Name, _config.ResupplyStimName, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(i.Name, _config.ResupplyRechargerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (i.Name.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            i.Name.IndexOf("mission", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return false;
         }
 
         if (KeepFromSale != null && KeepFromSale(i))
@@ -649,25 +692,21 @@ public sealed class SellController
     private void Finish(LocalPlayer me, int cashNow, string why)
     {
         // MAIN INVENTORY UNTOUNCHED, part two: everything staged but not sold (refused, out of
-        // budget) goes back into the bag it came from, while the bags have room for it.
+        // budget) goes back into the bag it came from, while the bags have room for it. Keyed by
+        // object, like _staged (UniqueIdentity is None for reward and shop items).
         var returned = 0;
         foreach (var it in Inventory.Items
-                     .Where(i => i != null && i.Slot.Type == IdentityType.Inventory && _stagedFrom.ContainsKey(i.UniqueIdentity))
+                     .Where(i => i != null && i.Slot.Type == IdentityType.Inventory && _stagedFrom.ContainsKey(i))
                      .ToList())
         {
-            if (!_stagedFrom.TryGetValue(it.UniqueIdentity, out var bagId))
-            {
-                continue;
-            }
-
-            var bag = Inventory.Containers.FirstOrDefault(c => c.Identity == bagId);
+            var bag = Inventory.Containers.FirstOrDefault(c => c.Identity == _stagedFrom[it]);
             if (bag == null || bag.NumFreeSlots <= 0)
             {
                 continue; // its bag is full or gone: the item stays in the main inventory
             }
 
-            it.MoveToContainer(bagId);
-            _stagedFrom.Remove(it.UniqueIdentity);
+            it.MoveToContainer(_stagedFrom[it]);
+            _stagedFrom.Remove(it);
             returned++;
         }
 
