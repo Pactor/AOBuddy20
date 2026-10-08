@@ -188,6 +188,12 @@ public sealed class NorthboundPool
                 }
             }
 
+            r.Hug = br.ReadBytes(cells);
+            if (r.Hug.Length < cells)
+            {
+                r.Hug = new byte[cells]; // truncated file: no hug info, cost stays flat
+            }
+
             var portals = br.ReadInt32();
             for (var p = 0; p < portals; p++)
             {
@@ -282,6 +288,11 @@ public sealed class NorthboundPool
                 bw.Write(bits);
             }
 
+            for (var c = 0; c < cells; c++)
+            {
+                bw.Write(c < r.Hug.Length ? r.Hug[c] : (byte)0);
+            }
+
             bw.Write(r.Portals.Count);
             foreach (var p in r.Portals)
             {
@@ -321,6 +332,11 @@ public sealed class NorthboundRoom
     /// different floor than it claims to be.</summary>
     public List<float>[] MeshLevels = new List<float>[0];
     public bool[] Blocked = new bool[0];
+
+    /// <summary>Per-cell hug cost, 0-255: how close the cell sits to a wall/column/void
+    /// (255 = on it). The blit turns it into the A*'s per-cell penalty, so routes naturally
+    /// run the centres of rooms and hallways. Precalculated - zero runtime cost.</summary>
+    public byte[] Hug = new byte[0];
     public List<NorthboundPortal> Portals = new();
 
     public int CellIndex(float x, float z) =>
@@ -610,9 +626,74 @@ public static class NorthboundBuilder
             }
         }
 
+        // THE HUG COST: multi-source brushfire from every wall cell (blocked, or void - no level
+        // at all), distance in metres with diagonal steps; a cell's hug rises linearly from 0 at
+        // HugRadius to full at the wall. The A* adds it per step, so routes run the centres of
+        // rooms and hallways instead of scraping the walls. Portals were cleared above, so door
+        // centres stay cheap.
+        var hug = new byte[r.W * r.H];
+        {
+            const float radius = 1.2f;                       // metres of "near the wall"
+            var dist = new float[r.W * r.H];
+            Array.Fill(dist, float.MaxValue);
+            var queue = new Queue<int>();
+            for (var c = 0; c < r.W * r.H; c++)
+            {
+                var wall = blocked[c] || levels[c] == null || levels[c].Count == 0;
+                if (wall)
+                {
+                    dist[c] = 0;
+                    queue.Enqueue(c);
+                }
+            }
+
+            while (queue.Count > 0)
+            {
+                var c = queue.Dequeue();
+                var ci = c % r.W;
+                var cj = c / r.W;
+                for (var dj = -1; dj <= 1; dj++)
+                {
+                    for (var di = -1; di <= 1; di++)
+                    {
+                        if (di == 0 && dj == 0)
+                        {
+                            continue;
+                        }
+
+                        var ni = ci + di;
+                        var nj = cj + dj;
+                        if (ni < 0 || nj < 0 || ni >= r.W || nj >= r.H)
+                        {
+                            continue;
+                        }
+
+                        var n = nj * r.W + ni;
+                        var step = di != 0 && dj != 0 ? cell * 1.4142f : cell;
+                        if (dist[c] + step < dist[n] - 1e-3f)
+                        {
+                            dist[n] = dist[c] + step;
+                            queue.Enqueue(n);
+                        }
+                    }
+                }
+            }
+
+            for (var c = 0; c < hug.Length; c++)
+            {
+                if (dist[c] >= radius)
+                {
+                    continue;
+                }
+
+                hug[c] = (byte)Math.Round(255f * (radius - dist[c]) / radius);
+            }
+        }
+
         r.Levels = levels;
         r.MeshLevels = mesh;
         r.Blocked = blocked;
+        r.Hug = hug;
         return r;
 
         int XCell(float x) => (int)Math.Floor((x - r.Ox) / cell);

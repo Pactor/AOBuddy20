@@ -744,6 +744,17 @@ public sealed class FloorGrid : IWalkGrid
 
                     _floors[k] = fl;
                     blitted++;
+                    if (lat.Hug is { Length: > 0 } && i < lat.W && j < lat.H)
+                    {
+                        // graded wall-hug: the closer the cell sits to a wall/column, the more a
+                        // step through it costs - routes tend to the centres of rooms/hallways
+                        var penalty = WallHugPenalty * lat.Hug[j * lat.W + i] / 255f;
+                        for (int f = 0; f < fl.Length; f++)
+                        {
+                            _wallHug[(long)k * 8 + f] = penalty;
+                        }
+                    }
+
                     if (lat.Blocked[j * lat.W + i])
                     {
                         cellBlocked.Add((k, fl.Length));
