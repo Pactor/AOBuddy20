@@ -101,7 +101,14 @@ public sealed class ZoneRoute
 public sealed class ZoneRouteOptions
 {
     public double ZoneLineCost = 20;
-    public double TeleportCost = 30;
+
+    // A teleport hop is a ZONE: reconnect, FullCharacter, grid-cache reload - 10 s and more each, and a
+    // failed one strands the trip. At 30 it was cheaper than the metres it can save, so the planner
+    // BOUGHT extra hops to shave a walk (owner, 2026-10-08: the sell/resupply trip to Fair Trade (1187)
+    // walked 19 m to a Newland City whompa, hopped to Newland Desert and 19 m more - because the city's
+    // OWN 1187 entrance 96 m away priced dearer; every city has one). 150 m of walk-equivalent per hop:
+    // an entrance within ~150 m now always beats an extra zone.
+    public double TeleportCost = 150;
     public double ScottyCost = 400;
     public double UnknownWalk = 250; // walking from a point we don't know
     public bool UseScotty = false;
