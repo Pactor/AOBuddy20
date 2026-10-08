@@ -28,7 +28,12 @@ namespace AOBuddy20.Nav;
 /// </summary>
 public sealed class FloorGrid : IWalkGrid
 {
-    public const float Cell = 0.5f;
+    public const float DefaultCell = 0.5f;
+
+    /// <summary>The cell size: 0.5 m for overland and static dungeons, 0.2 m for missions off a
+    /// northbound pool grid (fine enough for table legs and chair gaps, cheap because the
+    /// lattices are precalculated per pool room type offline - see NorthboundPool).</summary>
+    public float Cell = DefaultCell;
 
     private const float Merge = 0.6f; // surfaces this close are one floor (a deck's top and underside)
     private const float StaticStep = 0.4f; // rise between neighbouring cells (0.5 m): ~40 degrees
@@ -166,7 +171,7 @@ public sealed class FloorGrid : IWalkGrid
     // prints it after Build.
     public static int DebugBuriedCells;
 
-    public static FloorGrid Build(string pluginDir, int pf, AOBuddyNav nav, Action<string> log)
+    public static FloorGrid Build(string pluginDir, int pf, AOBuddyNav nav, Action<string> log, NorthboundPool north = null)
     {
         if (nav == null || nav.Ground != null)
         {
@@ -180,41 +185,61 @@ public sealed class FloorGrid : IWalkGrid
         // instanced, tiny, built per mission.
         if (nav.Layout != null)
         {
-            var mgrid = BoundsFromRooms(nav.Dungeon, pf, out var mx0, out var mz0, out var mw, out var mh);
+            // The northbound pool grid, when it carries every placed room's type: 20 cm lattices
+            // precalculated offline per pool room, rotated/translated here as an index remap -
+            // no triangle sampling, milliseconds. Rotation comes from the live placement, never
+            // from the file, so OmniCell-style compositions work without a recache.
+            var northReady = north != null && nav.Dungeon.Rooms.All(r => r.PoolIndex < 0 || north.Rooms.ContainsKey(r.PoolIndex));
+            var mgrid = BoundsFromRooms(nav.Dungeon, pf, northReady ? 0.2f : DefaultCell, out var mx0, out var mz0, out var mw, out var mh);
             if (mgrid == null)
             {
                 log?.Invoke($"FLOORGRID: mission pf {pf} has no rooms to walk");
                 return null;
             }
 
+            mgrid._pluginDir = pluginDir;
             var msw = System.Diagnostics.Stopwatch.StartNew();
-            mgrid.StampDoorways(nav.MissionDoorways);
-            if (nav.Walls != null && nav.Walls.Length >= 9)
+            if (northReady)
             {
-                // REAL 3D (owner, 2026-10-03: "the whole geometry, not flattened stuff - rooms
-                // double/triple height with multiple ramps"): the composed triangles are the truth,
-                // BOTH files. collision.bin carries the walkable surfaces - stairs, ramps, bridges,
-                // mezzanines - and a ramp sub-cell gets its true height, not its 2 m tile's.
-                // walls.bin (steep-only, checked: 57,116 triangles and not one flat) is bucketed and
-                // only ever forbids the EDGE a wall physically crosses - no cell is poisoned
-                // wholesale, so no sealed pockets and no keep-open patches. Furniture is render
-                // data and was never exported: no version of this knows a crate is there.
-                // THE MESH SAMPLES BEFORE THE TILES (Subway ramp room, 2026-10-04): the tile fold
-                // keeps the FIRST height, and with the tiles first the ramp's low footing folded
-                // into the tile's flat floor - both doors of the ramp room then tested as walled
-                // (the ramp's rising body crossed a floor-level band) and the phantom floor tunnel
-                // ran under the whole stairway. Mesh first: the ramp keeps its own heights, the
-                // tiles fold into them, and where the mesh has nothing the tiles still lay the
-                // room floor (the mesh does NOT carry it - a no-tile build collapses to NO PATH).
-                mgrid.UseComposedGeometry(nav.Walls, nav.Surfaces, nav.Dungeon);
+                mgrid.Cell = 0.2f;
+                // The slot seams between rooms carry no pool geometry (it ended at the atlas
+                // neighbours) - the doorway stamp fills them at the doors' own mesh-sampled
+                // level, and the doors are walkable by default (a locked door is runtime state).
+                mgrid.StampDoorways(nav.MissionDoorways);
+                mgrid.UseNorthbound(north, nav);
             }
-            else if (!DebugSkipRoomTiles)
+            else
             {
-                mgrid.StampRoomFloors(nav.Dungeon);
+                mgrid.StampDoorways(nav.MissionDoorways);
+                if (nav.Walls != null && nav.Walls.Length >= 9)
+                {
+                    // REAL 3D (owner, 2026-10-03: "the whole geometry, not flattened stuff - rooms
+                    // double/triple height with multiple ramps"): the composed triangles are the truth,
+                    // BOTH files. collision.bin carries the walkable surfaces - stairs, ramps, bridges,
+                    // mezzanines - and a ramp sub-cell gets its true height, not its 2 m tile's.
+                    // walls.bin (steep-only, checked: 57,116 triangles and not one flat) is bucketed and
+                    // only ever forbids the EDGE a wall physically crosses - no cell is poisoned
+                    // wholesale, so no sealed pockets and no keep-open patches. Furniture is render
+                    // data and was never exported: no version of this knows a crate is there.
+                    // THE MESH SAMPLES BEFORE THE TILES (Subway ramp room, 2026-10-04): the tile fold
+                    // keeps the FIRST height, and with the tiles first the ramp's low footing folded
+                    // into the tile's flat floor - both doors of the ramp room then tested as walled
+                    // (the ramp's rising body crossed a floor-level band) and the phantom floor tunnel
+                    // ran under the whole stairway. Mesh first: the ramp keeps its own heights, the
+                    // tiles fold into them, and where the mesh has nothing the tiles still lay the
+                    // room floor (the mesh does NOT carry it - a no-tile build collapses to NO PATH).
+                    mgrid.UseComposedGeometry(nav.Walls, nav.Surfaces, nav.Dungeon);
+                }
+                else if (!DebugSkipRoomTiles)
+                {
+                    mgrid.StampRoomFloors(nav.Dungeon);
+                }
             }
 
-            log?.Invoke($"FLOORGRID: mission grid for pf {pf} ({nav.Name}): {mw}x{mh} cells of {Cell} m, " +
+            log?.Invoke($"FLOORGRID: mission grid for pf {pf} ({nav.Name}): {mw}x{mh} cells of {mgrid.Cell:0.0#} m" +
+                        (northReady ? " northbound" : "") + ", " +
                         $"{mgrid._floors.Count} with floor, {mgrid._noEdge.Count} edges walled, " +
+                        $"{mgrid._blocked.Count} blocked, " +
                         $"{mgrid._doorways.Count} doorway cells bridged, {msw.ElapsedMilliseconds} ms");
             return mgrid;
         }
@@ -242,8 +267,8 @@ public sealed class FloorGrid : IWalkGrid
             return null;
         }
 
-        int x0 = (int)Math.Floor(minX / Cell) - 2, z0 = (int)Math.Floor(minZ / Cell) - 2;
-        int w = (int)Math.Ceiling(maxX / Cell) + 2 - x0, h = (int)Math.Ceiling(maxZ / Cell) + 2 - z0;
+        int x0 = (int)Math.Floor(minX / DefaultCell) - 2, z0 = (int)Math.Floor(minZ / DefaultCell) - 2;
+        int w = (int)Math.Ceiling(maxX / DefaultCell) + 2 - x0, h = (int)Math.Ceiling(maxZ / DefaultCell) + 2 - z0;
         if ((long)w * h > 16_000_000)
         {
             log?.Invoke($"FLOORGRID: pf {pf} is too big for a floor grid ({w}x{h})");
@@ -268,14 +293,14 @@ public sealed class FloorGrid : IWalkGrid
         }
 
         grid.StampHeadroom();
-        log?.Invoke($"FLOORGRID: floor grid for pf {pf}: {w}x{h} cells of {Cell} m, {grid._floors.Count} with floor, {grid._blocked.Count} floor cells blocked, walls {(walls ? "yes" : "NONE")} ({grid._doorways.Count} doorway cells kept open), {sw.ElapsedMilliseconds} ms");
+        log?.Invoke($"FLOORGRID: floor grid for pf {pf}: {w}x{h} cells of {grid.Cell:0.0#} m, {grid._floors.Count} with floor, {grid._blocked.Count} floor cells blocked, walls {(walls ? "yes" : "NONE")} ({grid._doorways.Count} doorway cells kept open), {sw.ElapsedMilliseconds} ms");
         return grid;
     }
 
     // A mission grid's bounds, from the placed rooms alone (there is no collision.bin to measure):
     // each room's tile area spans at most (rect size x cell) in both axes about its Pos, whichever way
     // it is turned, so the generous box around that covers every floor cell. Null when there is nothing.
-    private static FloorGrid BoundsFromRooms(NavDungeon d, int pf, out int x0, out int z0, out int w, out int h)
+    private static FloorGrid BoundsFromRooms(NavDungeon d, int pf, float cell, out int x0, out int z0, out int w, out int h)
     {
         x0 = z0 = w = h = 0;
         if (d?.Rooms == null || d.Rooms.Count == 0)
@@ -303,10 +328,10 @@ public sealed class FloorGrid : IWalkGrid
             return null;
         }
 
-        x0 = (int)Math.Floor(minX / Cell) - 2;
-        z0 = (int)Math.Floor(minZ / Cell) - 2;
-        w = (int)Math.Ceiling(maxX / Cell) + 2 - x0;
-        h = (int)Math.Ceiling(maxZ / Cell) + 2 - z0;
+        x0 = (int)Math.Floor(minX / cell) - 2;
+        z0 = (int)Math.Floor(minZ / cell) - 2;
+        w = (int)Math.Ceiling(maxX / cell) + 2 - x0;
+        h = (int)Math.Ceiling(maxZ / cell) + 2 - z0;
         if ((long)w * h > 16_000_000)
         {
             return null;
@@ -557,6 +582,200 @@ public sealed class FloorGrid : IWalkGrid
     private readonly Dictionary<long, float> _wallHug = new Dictionary<long, float>(); // missions: cells within a step of a wall cost extra
     private readonly Dictionary<long, List<float[]>> _wallTris = new Dictionary<long, List<float[]>>();
 
+    // THE NORTHBOUND HYDRATE (the precalculated pool grids): each placed room's lattice is
+    // rotated/translated into world cells as a pure index remap - every lattice cell centre goes
+    // through the same transform the geometry does (PlaceBin's), so the blit is exact by
+    // construction. Blocked cells mark all their levels; the headroom rule applies; doorway
+    // cells stay open (doors are walkable by default - a LOCKED door, from DoorFullUpdate, must
+    // gate its portal at runtime). No triangle sampling, no tiles, no burial: the mesh was
+    // pre-sampled offline at 20 cm.
+    public static int DebugNorthCells;
+
+    public void UseNorthbound(NorthboundPool north, AOBuddyNav nav)
+    {
+        _maxStep = MissionStep;
+        var blitted = 0;
+        var pf = nav.Layout.TemplatePlayfield;
+        NavDungeon pool;
+        try
+        {
+            pool = NavDungeon.Read(Path.Combine(AOBuddyNav.FolderFor(_pluginDir, pf), "rooms.json"));
+        }
+        catch
+        {
+            return;
+        }
+
+        if (pool?.Rooms == null)
+        {
+            return;
+        }
+
+        var cellBlocked = new List<(int k, int count)>();
+
+        // ONE mesh shift for the whole pool: the atlas mesh is a single coherent frame (all its
+        // rooms sit in it together), so every room's mesh moves by the same vector - the average
+        // of its rooms' (door Y − portal mesh level). A per-room shift would tear the mesh
+        // structures apart at the seams.
+        var shiftSamples = new List<double>();
+        foreach (var mr in nav.Dungeon.Rooms)
+        {
+            if (mr.PoolIndex < 0 || !north.Rooms.TryGetValue(mr.PoolIndex, out var lat0))
+            {
+                continue;
+            }
+
+            var myDoors = nav.MissionDoorways.Where(d => d.Room == mr.Index).ToList();
+            var anchors = lat0.Portals.Where(p => !float.IsNaN(p.MeshLevel)).ToList();
+            if (myDoors.Count > 0 && anchors.Count > 0)
+            {
+                shiftSamples.Add(myDoors.Average(d => d.Y) - anchors.Average(p => (double)p.MeshLevel));
+            }
+        }
+
+        var poolMeshShift = shiftSamples.Count > 0 ? shiftSamples.Average() : 0.0;
+
+        foreach (var mr in nav.Dungeon.Rooms)
+        {
+            if (mr.PoolIndex < 0 || mr.Pos == null || mr.PoolIndex >= pool.Rooms.Count)
+            {
+                continue;
+            }
+
+            var pr = pool.Rooms[mr.PoolIndex];
+            if (pr?.Pos == null || !north.Rooms.TryGetValue(mr.PoolIndex, out var lat))
+            {
+                continue;
+            }
+
+            var g = mr.GeomPos ?? mr.Pos;
+
+            // Tile levels absolute; mesh levels carry the POOL-WIDE door-anchored shift.
+            var meshShift = poolMeshShift;
+
+            int turns = ((((-pr.Rot) % 4 + 4) % 4) - (((-mr.Rot) % 4 + 4) % 4) + 4) % 4;
+            void Turn(ref double x, ref double z)
+            {
+                for (int t = 0; t < turns; t++)
+                {
+                    (x, z) = (z, -x);
+                }
+            }
+
+            // the room's chunks carry atlas spill far beyond the room itself; a lattice cell
+            // belongs to this room where the pool's own tile data says floor - portal cells
+            // excepted (they reach into the doorway seam)
+            var portalCells = new HashSet<int>();
+            foreach (var p in lat.Portals)
+            {
+                foreach (var (pcx, pcy, _) in p.Cells)
+                {
+                    portalCells.Add(pcy * lat.W + pcx);
+                }
+            }
+
+            for (int j = 0; j < lat.H; j++)
+            {
+                for (int i = 0; i < lat.W; i++)
+                {
+                    var levels = lat.Levels[j * lat.W + i];
+                    if (levels == null || levels.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    double cx = lat.Ox + (i + 0.5f) * north.Cell, cz = lat.Oz + (j + 0.5f) * north.Cell;
+                    var isPortal = portalCells.Contains(j * lat.W + i);
+                    if (!isPortal && double.IsNaN(pool.FloorHeight(pr, cx, cz)))
+                    {
+                        continue; // atlas spill: not this room's floor
+                    }
+
+                    double dx = cx - pr.Pos[0], dz = cz - pr.Pos[2];
+                    Turn(ref dx, ref dz);
+                    var k = Key((float)(g[0] + dx), (float)(g[2] + dz));
+                    if (k < 0)
+                    {
+                        continue;
+                    }
+
+                    // MERGE into what earlier rooms left - spill must not clobber a neighbour.
+                    // Tile levels stay absolute; mesh levels carry the door-anchored shift.
+                    var incoming = new List<float>(levels.Count + (lat.MeshLevels[j * lat.W + i]?.Count ?? 0));
+                    foreach (var v in levels)
+                    {
+                        incoming.Add(v);
+                    }
+
+                    var ml = lat.MeshLevels[j * lat.W + i];
+                    if (ml != null)
+                    {
+                        foreach (var v in ml)
+                        {
+                            incoming.Add((float)(v + meshShift));
+                        }
+                    }
+
+                    incoming.Sort();
+                    if (!_floors.TryGetValue(k, out var fl))
+                    {
+                        fl = incoming.ToArray();
+                    }
+                    else
+                    {
+                        var mergedList = new List<float>(fl);
+                        mergedList.AddRange(incoming);
+                        mergedList.Sort();
+                        for (var x = mergedList.Count - 1; x > 0; x--)
+                        {
+                            if (mergedList[x] - mergedList[x - 1] < 0.25f)
+                            {
+                                mergedList.RemoveAt(x);
+                            }
+                        }
+
+                        if (mergedList.Count > MaxFloors)
+                        {
+                            mergedList.RemoveRange(0, mergedList.Count - MaxFloors);
+                        }
+
+                        fl = mergedList.ToArray();
+                    }
+
+                    _floors[k] = fl;
+                    blitted++;
+                    if (lat.Blocked[j * lat.W + i])
+                    {
+                        cellBlocked.Add((k, fl.Length));
+                    }
+                }
+            }
+        }
+
+        StampHeadroom();
+        DebugNorthCells = blitted;
+        foreach (var (k, count) in cellBlocked)
+        {
+            for (int f = 0; f < count && f < MaxFloors; f++)
+            {
+                _blocked.Add((long)k * 8 + f);
+            }
+        }
+
+        foreach (var k in _doorways)
+        {
+            if (!_floors.TryGetValue(k, out var fl))
+            {
+                continue;
+            }
+
+            for (int f = 0; f < fl.Length; f++)
+            {
+                _blocked.Remove((long)k * 8 + f);
+            }
+        }
+    }
+
     public void UseComposedGeometry(float[] walls, float[] surfaces, NavDungeon rooms)
     {
         // collision.bin first: it carries the walkable truth (54,400 flat + 1,549 ramp triangles in
@@ -617,7 +836,18 @@ public sealed class FloorGrid : IWalkGrid
                 if (LineHitsWall(cx - 0.25f, cz, cx + 0.25f, cz, _ => f) ||
                     LineHitsWall(cx, cz - 0.25f, cx, cz + 0.25f, _ => f))
                 {
-                    buried.Add((k, f));
+                    // Bury only where the mesh offers its own walkway at this height - the stairway's
+                    // treads, whose low end sits within MissionStep of the tile (that is the climb's
+                    // start). A floor with nothing mesh-built within a step of it is the room's floor
+                    // under a ceiling, a lintel or an upper storey's rim: the edge tests already
+                    // forbid the crossings, and burying the floor instead cuts the room in two (Grey
+                    // Caves 2026-10-08: Startroom_Medium8_2's whole midriff buried under its own upper
+                    // deck, all 8 of its doorways sealed off one another, 61 of 274 door->door routes
+                    // dead).
+                    if (_meshStamp.Any(t => t.k == k && Math.Abs(t.h - f) <= MissionStep))
+                    {
+                        buried.Add((k, f));
+                    }
                 }
             }
         }

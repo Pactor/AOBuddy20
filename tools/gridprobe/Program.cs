@@ -22,6 +22,136 @@ if (args.Length > 0 && args[0] == "selftest")
     return LineSelfTest.Run();
 }
 
+if (args.Length > 2 && args[1] == "northbound")
+{
+    // gridprobe <pluginDir> northbound <poolPf> - precalculate the per-room navigation
+    // lattices (20 cm, unrotated pool frame) from the pool's own bins + rooms.json, into
+    // GameData/Nav/<pf>/poolgrid.northbound. The bot's mission grids hydrate from it.
+    int nPf = int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+    var nNav = AOBuddyNav.Load(args[0], nPf) ?? throw new Exception($"no pool data for pf {nPf}");
+    var nPool = nNav.Dungeon ?? throw new Exception($"pf {nPf} has no dungeon rooms");
+    var folder = AOBuddyNav.FolderFor(args[0], nPf);
+    List<List<float[]>> ReadBin(string file)
+    {
+        var byRoom = new List<List<float[]>>();
+        foreach (var c in NavCollision.Read(System.IO.Path.Combine(folder, file)).Chunks)
+        {
+            var idx = c.Instance & 0xFFFF;
+            while (byRoom.Count <= idx) byRoom.Add(null);
+            (byRoom[idx] ??= new List<float[]>()).Add(c.Verts);
+        }
+        return byRoom;
+    }
+
+    var collision = ReadBin("collision.bin");
+    var walls = ReadBin("walls.bin");
+    var pool = new NorthboundPool { PoolPf = nPf, Cell = 0.2f, SourceHash = $"{collision.Count}x{walls.Count}" };
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var built = 0;
+    foreach (var pr in nPool.Rooms)
+    {
+        var cols = pr.Index < collision.Count ? collision[pr.Index] : null;
+        var wls = pr.Index < walls.Count ? walls[pr.Index] : null;
+        if (cols == null && wls == null) continue;
+        var room = NorthboundBuilder.Build(pr.Index, pr, cols ?? new List<float[]>(), wls ?? new List<float[]>(),
+            AOBuddyNav.DoorwaysFromField(pr), nPool);
+        if (room == null) { Console.WriteLine($"  room {pr.Index} {pr.Name}: no geometry - skipped"); continue; }
+        pool.Rooms[pr.Index] = room;
+        built++;
+    }
+
+    var outPath = System.IO.Path.Combine(folder, "poolgrid.northbound");
+    pool.Save(outPath);
+    Console.WriteLine($"northbound pf {nPf}: {built} room(s), cell {pool.Cell:0.0#} m, {sw.ElapsedMilliseconds} ms -> {outPath}");
+    foreach (var r in pool.Rooms.Values)
+    {
+        var fl = 0;
+        var bl = 0;
+        for (var c = 0; c < r.Levels.Length; c++)
+        {
+            if (r.Levels[c] is { Count: > 0 }) fl++;
+            if (r.Blocked[c]) bl++;
+        }
+
+        var hist = new Dictionary<float, int>();
+        foreach (var l in r.Levels)
+        {
+            if (l == null) continue;
+            foreach (var v in l)
+            {
+                var key = (float)Math.Round(v, 1);
+                hist[key] = hist.TryGetValue(key, out var n) ? n + 1 : 1;
+            }
+        }
+
+        var top = string.Join(" ", hist.OrderByDescending(kv => kv.Value).Take(4).Select(kv => $"{kv.Key:0.0}x{kv.Value}"));
+        Console.WriteLine($"  room {r.RoomIndex,3} {nPool.Rooms.First(x => x.Index == r.RoomIndex).Name,-32} {r.W,3}x{r.H,-3} floored {fl,6} blocked {bl,5} portals {r.Portals.Count}  levels: {top}");
+        if (r.RoomIndex == 99 || r.RoomIndex == 43)
+        {
+            var prC = nPool.Rooms.First(x => x.Index == r.RoomIndex);
+            int ci = (int)Math.Floor((prC.Pos[0] - r.Ox) / 0.2f), cj = (int)Math.Floor((prC.Pos[2] - r.Oz) / 0.2f);
+            var c = cj * r.W + ci;
+            var lv = c < r.Levels.Length ? r.Levels[c] : null;
+            Console.WriteLine($"    centre cell ({ci},{cj}) of {r.W}x{r.H}: {(lv == null ? "NO LEVELS" : string.Join(" ", lv))} blocked {(c < r.Blocked.Length && r.Blocked[c] ? "yes" : "no")} (pool centre {prC.Pos[0]:0.0},{prC.Pos[2]:0.0}, lattice {r.Ox:0.0},{r.Oz:0.0})");
+            // every triangle whose XZ bbox touches the centre, with its ny - what does the mesh
+            // actually carry at the room's middle?
+            var src = collision;
+            foreach (var cv in src)
+            {
+                foreach (var carr in cv ?? new List<float[]>())
+                {
+                    for (int o = 0; o + 8 < carr.Length; o += 9)
+                    {
+                        float mnx = Math.Min(carr[o], Math.Min(carr[o + 3], carr[o + 6])), mxx = Math.Max(carr[o], Math.Max(carr[o + 3], carr[o + 6]));
+                        float mnz = Math.Min(carr[o + 2], Math.Min(carr[o + 5], carr[o + 8])), mxz = Math.Max(carr[o + 2], Math.Max(carr[o + 5], carr[o + 8]));
+                        if (prC.Pos[0] < mnx || prC.Pos[0] > mxx || prC.Pos[2] < mnz || prC.Pos[2] > mxz) continue;
+                        float ux = carr[o + 3] - carr[o], uy = carr[o + 4] - carr[o + 1], uz = carr[o + 5] - carr[o + 2];
+                        float wx = carr[o + 6] - carr[o], wy = carr[o + 7] - carr[o + 1], wz = carr[o + 8] - carr[o + 2];
+                        var ny = uz * wx - ux * wz;
+                        var len = (float)Math.Sqrt(ux * ux + uy * uy + uz * uz) * (float)Math.Sqrt(wx * wx + wy * wy + wz * wz);
+                        Console.WriteLine($"    tri at centre: ny/len {(ny / len):0.00} y [{Math.Min(carr[o + 1], Math.Min(carr[o + 4], carr[o + 7])):0.0}..{Math.Max(carr[o + 1], Math.Max(carr[o + 4], carr[o + 7])):0.0}] x [{mnx:0.0}..{mxx:0.0}] z [{mnz:0.0}..{mxz:0.0}]");
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+if (args.Length > 4 && args[1] == "trail")
+{
+    // gridprobe <pluginDir> trail <poolPf> <layout.txt> <trailfile> - replay a captured walk
+    // (id x y z per line, server-accepted positions) against the northbound grid: every point
+    // the grid refuses is a cell-level bug with server truth attached.
+    var inv = System.Globalization.CultureInfo.InvariantCulture;
+    int tPf = int.Parse(args[2], inv);
+    var tLayout = MissionSweep.BuildLayout(args[0], tPf, args[3]);
+    NorthboundPool tNorth = null;
+    var tNorthPath = System.IO.Path.Combine(AOBuddyNav.FolderFor(args[0], tPf), "poolgrid.northbound");
+    if (System.IO.File.Exists(tNorthPath)) tNorth = NorthboundPool.Load(tNorthPath);
+    var tGrid = FloorGrid.Build(args[0], 14624428, AOBuddyNav.ComposeMission(args[0], tLayout), s => Console.WriteLine("  [grid] " + s), tNorth);
+    if (tGrid == null) { Console.WriteLine("grid build failed"); return 1; }
+
+    int tOk = 0, tBad = 0;
+    foreach (var line in System.IO.File.ReadAllLines(args[4]))
+    {
+        var p = line.Split(' ');
+        if (p.Length < 4) continue;
+        float F(string s) => float.Parse(s, inv);
+        var x = F(p[1]); var wy = F(p[2]); var z = F(p[3]);
+        if (tGrid.WalkableAt(x, z, wy, 1.0f)) { tOk++; continue; }
+        tBad++;
+        var fl = tGrid.FloorsAt(x, z);
+        var near = fl.Length == 0 ? "no floor in cell" : "levels [" + string.Join(" ", fl.Select(v => v.ToString("0.0#"))) + "]";
+        if (tBad <= 25)
+            Console.WriteLine($"  REFUSED ({x:0.0},{wy:0.0},{z:0.0}): {near}");
+    }
+
+    Console.WriteLine($"trail: {tOk} accepted, {tBad} refused by the grid");
+    return 0;
+}
+
 if (args.Length > 1 && args[1] == "mission")
 {
     return MissionSweep.Run(args[0], args[2], args[3]);
@@ -302,41 +432,51 @@ internal static class LineSelfTest
 // every room's doorway-to-doorway routes must path. Over-blocking walls shows up as fails.
 internal static class MissionSweep
 {
-    public static int Run(string pluginDir, string poolPfArg, string layoutPath)
+    // The layout dump → composed MissionLayout: parse (exact slots when the dump carries them,
+    // else the centre inversion), solve Height, add the room table. Shared with the trail replay.
+    public static AOBuddyNav.MissionLayout BuildLayout(string pluginDir, int poolPf, string layoutPath)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        int poolPf = int.Parse(poolPfArg, inv);
         var pool = AOBuddyNav.Load(pluginDir, poolPf) ?? throw new Exception($"no pool data for pf {poolPf}");
         var byName = new Dictionary<string, NavDungeon.Room>();
         foreach (var r in pool.Dungeon.Rooms) byName[r.Name] = r;
 
-        // parse the dump: room N <PoolName> fF centre (cx,cz) y Y rot R  (de-DE comma decimals)
-        var rooms = new List<(string name, double cx, double cz, int rot)>();
+        // parse the dump: room N <PoolName> fF centre (cx,cz) y Y rot R [slot (X,Z)]  (de-DE commas)
+        var rooms = new List<(string name, double cx, double cz, int rot, int? slotX, int? slotZ, int floor)>();
+        int? layoutW = null, layoutH = null, layoutWh = null;
         foreach (var line in System.IO.File.ReadAllLines(layoutPath))
         {
+            var lt = System.Text.RegularExpressions.Regex.Match(line, @"^layout .+ w (\d+) h (\d+) wh (\d+)");
+            if (lt.Success) { layoutW = int.Parse(lt.Groups[1].Value); layoutH = int.Parse(lt.Groups[2].Value); layoutWh = int.Parse(lt.Groups[3].Value); continue; }
             var mt = System.Text.RegularExpressions.Regex.Match(line,
-                @"room (\d+) (\S+) f(-?\d+) centre \(([\d,]+)\) y ([\d,]+) rot (\d)");
+                @"room (\d+) (\S+) f(-?\d+) centre \(([\d,]+)\) y ([\d,]+) rot (\d)(?: slot \((-?\d+),(-?\d+)\))?");
             if (!mt.Success) continue;
             double D(string s) => double.Parse(s.Replace(',', '.'), inv);
             var parts = mt.Groups[4].Value.Split(',');
             // "(11,0,64,0)" is Pos[0]=11.0, Pos[2]=64.0 in the dump's comma decimals
             double cx = parts.Length >= 4 ? D(parts[0] + "." + parts[1]) : D(parts[0]);
             double cz = parts.Length >= 4 ? D(parts[^2] + "." + parts[^1]) : D(parts[^1]);
-            rooms.Add((mt.Groups[2].Value, cx, cz, int.Parse(mt.Groups[6].Value)));
+            rooms.Add((mt.Groups[2].Value, cx, cz, int.Parse(mt.Groups[6].Value),
+                mt.Groups[7].Success ? int.Parse(mt.Groups[7].Value) : (int?)null,
+                mt.Groups[8].Success ? int.Parse(mt.Groups[8].Value) : (int?)null,
+                int.Parse(mt.Groups[3].Value)));
         }
 
-        if (rooms.Count == 0) { Console.WriteLine("no rooms parsed from " + layoutPath); return 1; }
+        if (rooms.Count == 0) throw new Exception("no rooms parsed from " + layoutPath);
+        var exactSlots = rooms.All(r => r.slotX.HasValue && r.slotZ.HasValue);
+        if (exactSlots) Console.WriteLine("exact slots from the dump - no centre inversion");
 
         // invert ComposeMission's placement: ox = cx - tx - tw + 1, oz = cz - tz - th - 1
         // (Cell 2 m, slot 10 m); Z = H - (oz + 2*th) / 10 - find the H that makes every slot land
-        // on whole numbers.
+        // on whole numbers. Dumps that carry the room table's own slot (X,Z) skip this entirely -
+        // the inversion's rounding bent rooms up to half a slot in z.
         var tw = new int[rooms.Count];
         var th = new int[rooms.Count];
         var ox = new double[rooms.Count];
         var oz = new double[rooms.Count];
         for (var i = 0; i < rooms.Count; i++)
         {
-            if (!byName.TryGetValue(rooms[i].name, out var pr)) { Console.WriteLine($"pool has no room '{rooms[i].name}'"); return 1; }
+            if (!byName.TryGetValue(rooms[i].name, out var pr)) throw new Exception($"pool has no room '{rooms[i].name}'");
             int w = pr.Rect[2] - pr.Rect[0] + 1, h = pr.Rect[3] - pr.Rect[1] + 1;
             tw[i] = rooms[i].rot % 2 == 0 ? w : h;
             th[i] = rooms[i].rot % 2 == 0 ? h : w;
@@ -347,34 +487,104 @@ internal static class MissionSweep
             oz[i] = rooms[i].cz - tz - th[i] - 1;
         }
 
-        int bestH = -1;
-        double bestErr = double.MaxValue;
-        for (var H = 1; H <= 256; H++)
+        int bestH;
+        if (exactSlots && layoutH.HasValue && layoutWh.HasValue)
         {
-            double err = 0;
-            for (var i = 0; i < rooms.Count; i++)
+            bestH = layoutH.Value;
+        }
+        else
+        {
+            bestH = -1;
+            double bestErr = double.MaxValue;
+            for (var H = 1; H <= 256; H++)
             {
-                err += Math.Abs(ox[i] / 10 - Math.Round(ox[i] / 10));
-                err += Math.Abs(H - (oz[i] + 2 * th[i]) / 10 - Math.Round(H - (oz[i] + 2 * th[i]) / 10));
+                double err = 0;
+                for (var i = 0; i < rooms.Count; i++)
+                {
+                    err += Math.Abs(ox[i] / 10 - Math.Round(ox[i] / 10));
+                    err += Math.Abs(H - (oz[i] + 2 * th[i]) / 10 - Math.Round(H - (oz[i] + 2 * th[i]) / 10));
+                }
+                if (err < bestErr) { bestErr = err; bestH = H; }
             }
-            if (err < bestErr) { bestErr = err; bestH = H; }
+
+            if (bestErr > rooms.Count * 0.15) throw new Exception($"slot reconstruction failed (err {bestErr:0.00})");
         }
 
-        if (bestErr > rooms.Count * 0.15) { Console.WriteLine($"slot reconstruction failed (err {bestErr:0.00})"); return 1; }
         var m = new AOBuddyNav.MissionLayout
         {
-            Instance = 14624428, TemplatePlayfield = poolPf, Width = 64, Height = bestH, WorldHeight = 12,
+            Instance = 14624428, TemplatePlayfield = poolPf, Width = layoutW ?? 64, Height = bestH, WorldHeight = layoutWh ?? 12,
         };
         for (var i = 0; i < rooms.Count; i++)
         {
-            m.Rooms.Add(new[] { byName[rooms[i].name].Index, 0,
-                (int)Math.Round(ox[i] / 10), (int)Math.Round(bestH - (oz[i] + 2 * th[i]) / 10), rooms[i].rot });
+            m.Rooms.Add(new[] { byName[rooms[i].name].Index, rooms[i].floor,
+                exactSlots ? rooms[i].slotX.Value : (int)Math.Round(ox[i] / 10),
+                exactSlots ? rooms[i].slotZ.Value : (int)Math.Round(bestH - (oz[i] + 2 * th[i]) / 10), rooms[i].rot });
         }
 
+        return m;
+    }
+
+    public static int Run(string pluginDir, string poolPfArg, string layoutPath)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        int poolPf = int.Parse(poolPfArg, inv);
+        var m = BuildLayout(pluginDir, poolPf, layoutPath);
+
         var nav = AOBuddyNav.ComposeMission(pluginDir, m);
-        var grid = FloorGrid.Build(pluginDir, m.Instance, nav, s => Console.WriteLine("  [grid] " + s));
+
+        // The dump's server-door line, when it carries doors: the live CorrectWithServerDoors pass
+        // (apply: true) that MissionController runs - re-solve each room's translation from its
+        // server doors, re-place walls/surfaces/doorways, THEN build the grid. Answers "what the
+        // bot would walk with the correction on" offline.
+        var sdLine = System.Text.RegularExpressions.Regex.Match(
+            string.Join("\n", System.IO.File.ReadAllLines(layoutPath)), @"^server doors: (.+)$",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        if (sdLine.Success && !sdLine.Groups[1].Value.StartsWith("none"))
+        {
+            var sdoors = new List<(short room, short adjoining, Vector3 pos)>();
+            foreach (var part in sdLine.Groups[1].Value.Split('|'))
+            {
+                var dm = System.Text.RegularExpressions.Regex.Match(part.Trim(), @"Room=(-?\d+) Adj=(-?\d+) \(([\d,]+)\)");
+                if (!dm.Success) continue;
+                double D(string s) => double.Parse(s.Replace(',', '.'), inv);
+                var pp = dm.Groups[3].Value.Split(',');
+                // (X,Y,Z) since 2026-10-08; older dumps carry (X,Z) only - the level abstains (NaN)
+                var y = pp.Length >= 6 ? D(pp[2] + "." + pp[3]) : float.NaN;
+                sdoors.Add(((short)int.Parse(dm.Groups[1].Value), (short)int.Parse(dm.Groups[2].Value),
+                            new Vector3((float)D(pp[0] + "." + pp[1]), (float)y, (float)D(pp[^2] + "." + pp[^1]))));
+            }
+
+            if (sdoors.Count > 0)
+            {
+                Console.WriteLine($"server-door correction on {sdoors.Count} door(s):");
+                foreach (var line in AOBuddyNav.CorrectWithServerDoors(pluginDir, nav, sdoors, out _, apply: true))
+                {
+                    Console.WriteLine("  " + line);
+                }
+            }
+        }
+
+        NorthboundPool north = null;
+        var northPath = System.IO.Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "poolgrid.northbound");
+        if (System.IO.File.Exists(northPath))
+        {
+            north = NorthboundPool.Load(northPath);
+            Console.WriteLine($"northbound pool grid: {north.Rooms.Count} room(s) at {north.Cell:0.0#} m");
+        }
+
+        var grid = FloorGrid.Build(pluginDir, m.Instance, nav, s => Console.WriteLine("  [grid] " + s), north);
         if (nav == null || grid == null) { Console.WriteLine("compose/build failed"); return 1; }
+        foreach (var dw in nav.MissionDoorways)
+        {
+            Console.WriteLine($"  doorway ({dw.X,6:0.0},{dw.Y,5:0.0},{dw.Z,6:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0})");
+        }
+
         Console.WriteLine("doorway meeting: " + AOBuddyNav.DoorCheck);
+        Console.WriteLine($"north blit: {FloorGrid.DebugNorthCells} cell(s)");
+        foreach (var rm in nav.Dungeon.Rooms)
+        {
+            Console.WriteLine($"  centre {rm.PoolName,-32} {grid.DebugCell(rm.Pos[0], rm.Pos[2])}");
+        }
         Console.WriteLine($"suppressor: {FloorGrid.DebugBuriedCells} tile floor(s) buried");
 
         // 1. every doorway: standoff-in -> standoff-out must be a clear geometry line
@@ -867,6 +1077,27 @@ internal static class MissionX
             if (pts != null)
                 foreach (var p in pts)
                     Console.WriteLine($"  ({p.X,7:0.0},{p.Y,6:0.0},{p.Z,7:0.0})");
+            return 0;
+        }
+
+        if (args[4] == "cells")
+        {
+            // missionx <pluginDir> <poolPf> <layout.txt> cells <x0> <z0> <x1> <z1> [y] - DebugCell
+            // every 0.5 m along the segment: what the grid sees where the route is cut
+            float F(string s) => float.Parse(s, inv);
+            float x0 = F(args[5]), z0 = F(args[6]), x1 = F(args[7]), z1 = F(args[8]);
+            float y = args.Length > 9 ? F(args[9]) : 5f;
+            var len = (float)Math.Sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
+            var n = Math.Max(1, (int)(len / 0.5f));
+            Console.WriteLine($"cells along ({x0:0.0},{z0:0.0})->({x1:0.0},{z1:0.0}), floor idx for y {y:0.0}:");
+            for (var s = 0; s <= n; s++)
+            {
+                var t = (float)s / n;
+                var x = x0 + (x1 - x0) * t;
+                var z = z0 + (z1 - z0) * t;
+                Console.WriteLine($"  ({x,6:0.0},{z,6:0.0}) idx {grid.FloorIndexAt(x, z, y, 0.8f),3}  {grid.DebugCell(x, z)}");
+            }
+
             return 0;
         }
 

@@ -559,16 +559,6 @@ public sealed class AOBuddyNav
         }
 
         var d = new NavDungeon { Playfield = m.Instance, Name = "mission from " + pool.Name, Tilemap = pool.Tilemap, Cell = pool.Cell, HeightScale = pool.HeightScale, Atlas = pool.Atlas, Rooms = new List<NavDungeon.Room>() };
-        // A room's parked Pos[1] is where the pool atlas happens to park it, not its build height:
-        // pool 341 parks WildCave_Long8_1 at y 3 while every room it joins sits at y 5, and the
-        // server built it at 5 too (its door packet: (270,5,175) for a room composed at 3). Placed
-        // at 3 its doorways bridge at 3 - level islands 2 m under the neighbours, sealed off in the
-        // grid (Grey Caves 2026-10-08: the bot could not leave or enter that room at all). So each
-        // floor takes its parking height from the FIRST room placed on it - floor 0's first room is
-        // the entrance, whose level is where the server drops you - and every later room on that
-        // floor is rebased onto it. The (floor - lowestFloor) stacking is unchanged: Grey Caves
-        // 2026-09-23 walked floors 0/-1/-2 at y 133/69/0 with parkings 5/5/0.
-        var floorPark = new Dictionary<int, float>();
         foreach (var pr in m.Rooms)
         {
             int idx = pr[0], floor = pr[1], X = pr[2], Z = pr[3], rot = pr[4];
@@ -578,10 +568,6 @@ public sealed class AOBuddyNav
             }
 
             var src = pool.Rooms[idx];
-            if (!floorPark.TryGetValue(floor, out var park))
-            {
-                floorPark[floor] = park = src.Pos[1];
-            }
             int w = src.Rect[2] - src.Rect[0] + 1, h = src.Rect[3] - src.Rect[1] + 1;
             int tw = rot % 2 == 0 ? w : h, th = rot % 2 == 0 ? h : w; // footprint after rotation
             double ox = X * slot, oz = (m.Height - Z) * slot - th * pool.Cell;
@@ -606,10 +592,16 @@ public sealed class AOBuddyNav
             var (gx, gz) = Turned(w % 2 == 0 ? 1 : 0, h % 2 == 0 ? 1 : 0);
             var (tx, tz) = Turned(1, 1);
             double cx = ox + tw * pool.Cell / 2.0 - 1, cz = oz + th * pool.Cell / 2.0 + 1;
-            var y = park + (floor - lowestFloor) * m.WorldHeight;
+            // The parked Pos[1] is the pool's own frame base - the room's geometry sits relative
+            // to it, and PlaceDoors lifts every doorway to its own tile height. The build level
+            // comes from the floor stacking; the server-door chain (CorrectWithServerDoors) then
+            // moves each room onto the shared doors once they arrive. (2026-10-08: rebasing bases
+            // onto a floor's first room instead lifted rooms with interior relief - the Startroom
+            // tube - 2 m OFF their doors, sealing them behind a step no walk can climb.)
+            var y = src.Pos[1] + (floor - lowestFloor) * m.WorldHeight;
             d.Rooms.Add(new NavDungeon.Room
             {
-                Index = d.Rooms.Count, Name = src.Name + " f" + floor, PoolName = src.Name, PoolIndex = idx, Floor = floor, Flags = src.Flags, Rot = rot, Rect = src.Rect,
+                Index = d.Rooms.Count, Name = src.Name + " f" + floor, PoolName = src.Name, PoolIndex = idx, Floor = floor, Slot = new[] { X, Z }, Flags = src.Flags, Rot = rot, Rect = src.Rect,
                 Pos = new[] { (float)(cx + tx), y, (float)(cz + tz) },
                 GeomPos = new[] { (float)(cx + gx), y, (float)(cz + gz) },
                 HeightBase = src.HeightBase, Doors = src.Doors, Polys = src.Polys, Tile = src.Tile, Height = src.Height, Flags3 = src.Flags3,
@@ -619,7 +611,7 @@ public sealed class AOBuddyNav
         var nav = new AOBuddyNav(m.Instance, "mission", d.Name, null, d, null) { Layout = m, Walls = PlaceBin(pluginDir, m.TemplatePlayfield, pool, d, "walls.bin"),
             Surfaces = PlaceBin(pluginDir, m.TemplatePlayfield, pool, d, "collision.bin"),
         };
-        var doors = PlaceDoors(pool, d);
+        var doors = PlaceDoors(pluginDir, m.TemplatePlayfield, pool, d);
         nav.MissionDoorways = doors.SelectMany(list => list).ToList();
         DoorCheck = CheckDoorways(d, doors);
         nav.Exit = FindExit(d, doors);
@@ -750,7 +742,7 @@ public sealed class AOBuddyNav
     }
 
     /// <summary>Every placed room's doorways to neighbours, in world coordinates (rooms.json 'doors', see DoorwaysFromField).</summary>
-    private static List<Doorway>[] PlaceDoors(NavDungeon pool, NavDungeon mission)
+    public static List<Doorway>[] PlaceDoors(string pluginDir, int poolPf, NavDungeon pool, NavDungeon mission)
     {
         var doors = new List<Doorway>[mission.Rooms.Count];
         for (var ri = 0; ri < doors.Length; ri++)
@@ -780,11 +772,81 @@ public sealed class AOBuddyNav
                 double cx = dw.X - pr.Pos[0], cz = dw.Z - pr.Pos[2], nx = dw.Nx, nz = dw.Nz;
                 Turn(ref cx, ref cz);
                 Turn(ref nx, ref nz);
-                doors[ri].Add(new Doorway { X = g[0] + cx, Y = g[1], Z = g[2] + cz, Nx = nx, Nz = nz, Floor = mr.Floor });
+                // The doorway's Y is the pool's own collision geometry at that spot - the rigid
+                // floor the door stands on in the pool frame. No door-height modelling: the room
+                // is a rigid body, the server-door chain translates it whole (tiles, walls.bin,
+                // collision.bin together) by the diff-vector of the corresponding doors.
+                doors[ri].Add(new Doorway
+                {
+                    X = g[0] + cx, Y = PoolDoorFloorY(pluginDir, poolPf, pr, dw) ?? g[1], Z = g[2] + cz,
+                    Nx = nx, Nz = nz, Floor = mr.Floor, Room = ri
+                });
             }
         }
 
         return doors;
+    }
+
+    // The pool's collision.bin vertices, grouped by room index - the doorway Y reads off them,
+    // so the cache is per playfield folder.
+    private static readonly Dictionary<string, Dictionary<int, List<float[]>>> PoolCollisionCache = new();
+
+    private static Dictionary<int, List<float[]>> PoolCollision(string pluginDir, int poolPf)
+    {
+        var key = Path.Combine(pluginDir, poolPf.ToString());
+        if (PoolCollisionCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        var byRoom = new Dictionary<int, List<float[]>>();
+        var wp = Path.Combine(FolderFor(pluginDir, poolPf), "collision.bin");
+        if (File.Exists(wp))
+        {
+            foreach (var c in NavCollision.Read(wp).Chunks)
+            {
+                int idx = c.Instance & 0xFFFF;
+                if (!byRoom.TryGetValue(idx, out var l))
+                {
+                    byRoom[idx] = l = new List<float[]>();
+                }
+
+                l.Add(c.Verts);
+            }
+        }
+
+        return PoolCollisionCache[key] = byRoom;
+    }
+
+    /// <summary>
+    ///     The pool's own collision floor under a doorway - the rigid Y the door point carries in
+    ///     the pool frame. The nearest mesh vertex within 2 m of the doorway centre; null when the
+    ///     room has no collision data nearby (the room base stands in for the level).
+    /// </summary>
+    private static double? PoolDoorFloorY(string pluginDir, int poolPf, NavDungeon.Room pr, Doorway dw)
+    {
+        if (!PoolCollision(pluginDir, poolPf).TryGetValue(pr.Index, out var chunks))
+        {
+            return null;
+        }
+
+        var best = double.MaxValue;
+        double? y = null;
+        foreach (var v in chunks)
+        {
+            for (int i = 0; i + 2 < v.Length; i += 3)
+            {
+                double dx = v[i] - dw.X, dz = v[i + 2] - dw.Z;
+                var d2 = dx * dx + dz * dz;
+                if (d2 < best)
+                {
+                    best = d2;
+                    y = v[i + 1];
+                }
+            }
+        }
+
+        return best <= 4.0 ? y : null;
     }
 
     // The placement is checked by the doorways: every doorway of a room that faces a neighbour should
@@ -831,6 +893,8 @@ public sealed class AOBuddyNav
             log.Add($"server door Room={sd.room} Adjoining={sd.adjoining} at ({sd.pos.X:0.0},{sd.pos.Z:0.0}).");
         }
 
+        var doorsNow = PlaceDoors(pluginDir, nav.Layout.TemplatePlayfield, pool, d); // the placement.s own doorways, at the pool mesh floor levels
+
         foreach (var mr in d.Rooms)
         {
             var sd = doors.Where(x => x.room == mr.Index).ToList();
@@ -839,52 +903,89 @@ public sealed class AOBuddyNav
                 continue;
             }
 
-            var pr = pool.Rooms[mr.PoolIndex];
-            int x1 = pr.Rect[0], z1 = pr.Rect[1], x2 = pr.Rect[2], z2 = pr.Rect[3];
-            int w = x2 - x1 + 1, h = z2 - z1 + 1;
-            int turnsT = ((-mr.Rot) % 4 + 4) % 4;
-            double tx = 1, tz = 1;
-            for (int k = 0; k < turnsT; k++)
-            {
-                (tx, tz) = (-tz, tx);
-            }
-
-            var (gx, gz) = TurnBy(turnsT, w % 2 == 0 ? 1 : 0, h % 2 == 0 ? 1 : 0);
-            int tp = ((-pr.Rot) % 4 + 4) % 4;
-            var lds = new List<(double lx, double lz)>();
-            foreach (var dw in DoorwaysFromField(pr))
-            {
-                double lx = dw.X - pr.Pos[0], lz = dw.Z - pr.Pos[2];
-                for (int t = 0; t < tp; t++)
-                {
-                    (lx, lz) = (lz, -lx);
-                }
-
-                lds.Add((lx, lz));
-            }
-
-            var curCx = mr.Pos[0] - tx;
-            var curCz = mr.Pos[2] - tz;
-            var bestDist = double.MaxValue;
-            var bestCx = curCx;
-            var bestCz = curCz;
+            // THE SERVER'S OWN PLACEMENT RULE, read off the doors: the building is hung door by
+            // door - every room sits where its doors say, rotated by the table and translated so
+            // each of its doorways lands exactly on the shared door point (same level, same XZ).
+            // So translate the room by the CONSENSUS of its rows' implied shifts, not by one
+            // best-paired row: the doors decode drops notch doors (grey_mh4 lost 2 of 7), and a
+            // single greedy pairing can hook a wrong doorway and drag the whole room off - which
+            // is exactly what the old per-row best-pair solve did (2026-10-08: it moved 3 rooms
+            // and dropped the doorway meeting from 34/34 to 6/34).
+            var now = doorsNow[mr.Index];
+            var shifts = new List<(double dx, double dy, double dz)>();
             foreach (var s in sd)
             {
-                foreach (var ld in lds)
+                // this row's own doorway: the nearest placed one (XZ) whose outward normal faces
+                // the row's adjoining room - hub rooms sit doorways 2 m apart, and without the
+                // normal test the nearest hook can be the neighbour doorway and drag the whole
+                // room half a slot off
+                var adjRoom = s.adjoining >= 0 && s.adjoining < d.Rooms.Count ? d.Rooms[s.adjoining] : null;
+                var bestI = -1;
+                var bestD = double.MaxValue;
+                for (var i = 0; i < now.Count; i++)
                 {
-                    var (fx, fz) = FwdRot(mr.Rot, ld.lx, ld.lz);
-                    double icx = s.pos.X - fx - tx, icz = s.pos.Z - fz - tz;
-                    var dist = (icx - curCx) * (icx - curCx) + (icz - curCz) * (icz - curCz);
-                    if (dist < bestDist)
+                    var dd = (now[i].X - s.pos.X) * (now[i].X - s.pos.X) + (now[i].Z - s.pos.Z) * (now[i].Z - s.pos.Z);
+                    if (dd >= bestD)
                     {
-                        bestDist = dist;
-                        bestCx = icx;
-                        bestCz = icz;
+                        continue;
                     }
+
+                    if (adjRoom != null)
+                    {
+                        var nx = adjRoom.Pos[0] - mr.Pos[0];
+                        var nz = adjRoom.Pos[2] - mr.Pos[2];
+                        var len = Math.Sqrt(nx * nx + nz * nz);
+                        if (len > 0.5 && (now[i].Nx * nx + now[i].Nz * nz) / len < 0.3)
+                        {
+                            continue; // this doorway faces away from the adjoining room
+                        }
+                    }
+
+                    bestD = dd;
+                    bestI = i;
                 }
+
+                if (bestI < 0 || bestD > 9.0)
+                {
+                    log.Add($"  row ({s.pos.X:0.0},{s.pos.Z:0.0}) adj {s.adjoining}: no doorway within 3,0 m (decode gap) - abstains.");
+                    continue; // no doorway near this row (a decode gap): it votes nothing
+                }
+
+                // a row without a level (old dumps carry X/Z only) votes XZ and abstains on Y
+                var dy = float.IsNaN(s.pos.Y) ? 0.0 : s.pos.Y - now[bestI].Y;
+                shifts.Add((s.pos.X - now[bestI].X, dy, s.pos.Z - now[bestI].Z));
             }
 
-            var move = Math.Sqrt(bestDist);
+            if (shifts.Count == 0)
+            {
+                log.Add($"room {mr.PoolName} f{mr.Floor}: {sd.Count} server row(s), none paired to a doorway - the room keeps the slot placement.");
+                continue;
+            }
+
+            // the cluster vote: the shift most others agree with (within 0.3 m) is the room's move
+            var bestCount = 0;
+            var (bDx, bDy, bDz) = (0.0, 0.0, 0.0);
+            foreach (var a in shifts)
+            {
+                var near = shifts.Where(b =>
+                    Math.Abs(a.dx - b.dx) < 0.3 && Math.Abs(a.dy - b.dy) < 0.3 && Math.Abs(a.dz - b.dz) < 0.3).ToList();
+                if (near.Count <= bestCount)
+                {
+                    continue;
+                }
+
+                bestCount = near.Count;
+                bDx = near.Average(x => x.dx);
+                bDy = near.Average(x => x.dy);
+                bDz = near.Average(x => x.dz);
+            }
+
+            if (bestCount < shifts.Count)
+            {
+                log.Add($"room {mr.PoolName} f{mr.Floor}: {shifts.Count - bestCount} of {shifts.Count} door row(s) disagree with the consensus - the minority stays unplaced.");
+            }
+
+            var move = Math.Sqrt(bDx * bDx + bDy * bDy + bDz * bDz);
             if (move > 0.05)
             {
                 worst = Math.Max(worst, move);
@@ -892,11 +993,11 @@ public sealed class AOBuddyNav
                 {
                     moved++;
                     movedAny = true;
-                    mr.Pos = new[] { (float)(bestCx + tx), mr.Pos[1], (float)(bestCz + tz) };
-                    mr.GeomPos = new[] { (float)(bestCx + gx), mr.Pos[1], (float)(bestCz + gz) };
+                    mr.Pos = new[] { (float)(mr.Pos[0] + bDx), (float)(mr.Pos[1] + bDy), (float)(mr.Pos[2] + bDz) };
+                    mr.GeomPos = new[] { (float)(mr.GeomPos[0] + bDx), (float)(mr.GeomPos[1] + bDy), (float)(mr.GeomPos[2] + bDz) };
                 }
 
-                log.Add($"room {mr.PoolName} f{mr.Floor} would move {move:0.0} m by its server door(s)" +
+                log.Add($"room {mr.PoolName} f{mr.Floor} moves {move:0.0} m onto its server door(s) ({bDx:+0.0;-0.0},{bDy:+0.0;-0.0},{bDz:+0.0;-0.0}; {bestCount}/{shifts.Count} rows)" +
                         (apply ? "." : " (log-only - the slot placement stands)."));
             }
         }
@@ -905,11 +1006,11 @@ public sealed class AOBuddyNav
         {
             nav.Walls = PlaceBin(pluginDir, nav.Layout.TemplatePlayfield, pool, d, "walls.bin");
             nav.Surfaces = PlaceBin(pluginDir, nav.Layout.TemplatePlayfield, pool, d, "collision.bin");
-            var doorsPlaced = PlaceDoors(pool, d);
+            var doorsPlaced = PlaceDoors(pluginDir, nav.Layout.TemplatePlayfield, pool, d);
             nav.MissionDoorways = doorsPlaced.SelectMany(list => list).ToList();
         }
 
-        var doorsNow = PlaceDoors(pool, d);
+        doorsNow = PlaceDoors(pluginDir, nav.Layout.TemplatePlayfield, pool, d); // re-placed when the shift applied
         DoorCheck = $"{moved} room(s) moved by server doors (worst {worst:0.0} m); " +
                     CheckDoorways(d, doorsNow);
         log.Add(DoorCheck);
@@ -990,6 +1091,7 @@ public sealed class AOBuddyNav
     {
         public double X, Y, Z, Nx, Nz;
         public int Floor;
+        public int Room = -1; // the placed room this side belongs to (mission placement order)
     } // N: out of the room
 
     /// <summary>
@@ -1000,7 +1102,7 @@ public sealed class AOBuddyNav
     ///     and 4(W-1)-3 the east. Worked out on pool 351 (Subway - Ventil). North doors decode 1 m short in
     ///     x on every size, corrected here.
     /// </summary>
-    private static List<Doorway> DoorwaysFromField(NavDungeon.Room pr)
+    public static List<Doorway> DoorwaysFromField(NavDungeon.Room pr)
     {
         var outp = new List<Doorway>();
         if (pr.Doors == null)
@@ -1493,6 +1595,7 @@ public sealed class NavDungeon
         [JsonIgnore] public int Floor; // mission rooms only: the floor as the server numbered it
         [JsonIgnore] public string PoolName = ""; // mission rooms only: the pool room's own name
         [JsonIgnore] public int PoolIndex = -1; // mission rooms only: the pool room's index (= its collision record)
+        [JsonIgnore] public int[] Slot; // mission rooms only: the zone-in room table's own (X,Z) cell
         [JsonIgnore] public float[] GeomPos; // mission rooms only: the point its walls and doors turn about (Pos: the tiles')
     }
 

@@ -99,7 +99,14 @@ public sealed class NavGridCache
                 {
                     if (mnav != null)
                     {
-                        var mgrid = (IWalkGrid)OverlandGrid.Build(dir, pf, mnav, logger) ?? FloorGrid.Build(dir, pf, mnav, logger);
+                        // the precalculated pool grids: loaded from cache or built on first
+                        // encounter of the pool (a second, once) - null falls back to the
+                        // per-mission triangle path
+                        var north = mnav.Layout != null
+                            ? NorthboundPool.For(dir, mnav.Layout.TemplatePlayfield, logger)
+                            : null;
+                        var mgrid = (IWalkGrid)OverlandGrid.Build(dir, pf, mnav, logger)
+                                    ?? FloorGrid.Build(dir, pf, mnav, logger, north);
                         return (mnav, mgrid);
                     }
 

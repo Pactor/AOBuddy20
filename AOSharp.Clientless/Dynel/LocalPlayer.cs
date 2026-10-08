@@ -209,7 +209,7 @@ public class LocalPlayer : PlayerChar
     }
 
     /// <summary>
-    ///     The FullCharacter's NANO ENTRIES (the message's SkillLocks) are the nano line locks: an
+    ///     The FullCharacter's NANO ENTRIES (the message's SkillLock) are the nano line locks: an
     ///     identity (1:nanoline) plus duration and remaining, both in seconds. Seed the tracker -
     ///     this is the wire's own view of what is still locked, on our own character only.
     /// </summary>

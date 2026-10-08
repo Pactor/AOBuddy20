@@ -2,7 +2,7 @@
 # decode.sh <pcap>  ->  $SP/decoded/<tag>_s<N>.csv/.txt  (PcapDecode --ordered)
 SP="${SP:-$(cd "$(dirname "$0")" && pwd)}"
 TSHARK="/c/Program Files/Wireshark/tshark.exe"
-BIN=/e/Funcom/OmniCell/Tools/Capture/bin
+BIN=/f/TestCellao/OmniCell/Tools/Capture/bin
 PCAP="$1"
 STEM=$(basename "$PCAP" .pcapng); TAG=${STEM#marked-}; TAG=${TAG%%_*}
 OUT=$SP/decoded

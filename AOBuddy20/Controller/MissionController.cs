@@ -1042,7 +1042,7 @@ public sealed class MissionController : IPacketConsumer
             _lastDoorApply = _phaseTime;
             var lines = AOBuddyNav.CorrectWithServerDoors(
                 AppDomain.CurrentDomain.BaseDirectory, _nav,
-                myDoors.Select(x => (x.room, x.adjoining, x.pos)).ToList(), out var movedAny);
+                myDoors.Select(x => (x.room, x.adjoining, x.pos)).ToList(), out var movedAny, apply: true);
             foreach (var line in lines)
             {
                 _logger.LogInformation("MISSION: " + line);
@@ -3480,15 +3480,22 @@ public sealed class MissionController : IPacketConsumer
         try
         {
             var dump = new System.Text.StringBuilder();
-            dump.AppendLine($"layout {_nav.Name} pf {_missionPf}, {_nav.Dungeon.Rooms.Count} room(s):");
+            dump.AppendLine($"layout {_nav.Name} pf {_missionPf}, {_nav.Dungeon.Rooms.Count} room(s)" +
+                            (_nav.Layout != null ? $" w {_nav.Layout.Width} h {_nav.Layout.Height} wh {_nav.Layout.WorldHeight}" : "") + ":");
             foreach (var rm in _nav.Dungeon.Rooms)
             {
+                // slot (X,Z) = the zone-in room table's own grid cell - the exact placement seed,
+                // so an offline rebuild needs no centre inversion (its rounding bent rooms up to
+                // half a slot in z, which bent every offline door comparison with it). Taken from
+                // the room itself: duplicated pool rooms share PoolIndex, so a lookup by it gave
+                // every twin the first placement's slot.
                 dump.AppendLine(
-                    $"  room {rm.Index} {rm.PoolName} f{rm.Floor} centre ({rm.Pos[0]:0.0},{rm.Pos[2]:0.0}) y {rm.Pos[1]:0.0} rot {rm.Rot}");
+                    $"  room {rm.Index} {rm.PoolName} f{rm.Floor} centre ({rm.Pos[0]:0.0},{rm.Pos[2]:0.0}) y {rm.Pos[1]:0.0} rot {rm.Rot}" +
+                    (rm.Slot != null ? $" slot ({rm.Slot[0]},{rm.Slot[1]})" : ""));
             }
 
             dump.AppendLine($"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Y:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
-            dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Z:0.0})"))}");
+            dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Y:0.0},{sd.pos.Z:0.0})"))}");
             dump.AppendLine($"server exit: {(_serverExitByPf.TryGetValue(_missionPf, out var sx) ? $"{sx.X:0.0},{sx.Z:0.0}" : "none seen")}");
             dump.AppendLine($"target: {(TryGetTargetPos(out var tp) ? $"{tp.X:0.0},{tp.Z:0.0}" : "not seen")}");
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"mission-layout-{_missionPf}.txt"), dump.ToString());
