@@ -559,6 +559,16 @@ public sealed class AOBuddyNav
         }
 
         var d = new NavDungeon { Playfield = m.Instance, Name = "mission from " + pool.Name, Tilemap = pool.Tilemap, Cell = pool.Cell, HeightScale = pool.HeightScale, Atlas = pool.Atlas, Rooms = new List<NavDungeon.Room>() };
+        // A room's parked Pos[1] is where the pool atlas happens to park it, not its build height:
+        // pool 341 parks WildCave_Long8_1 at y 3 while every room it joins sits at y 5, and the
+        // server built it at 5 too (its door packet: (270,5,175) for a room composed at 3). Placed
+        // at 3 its doorways bridge at 3 - level islands 2 m under the neighbours, sealed off in the
+        // grid (Grey Caves 2026-10-08: the bot could not leave or enter that room at all). So each
+        // floor takes its parking height from the FIRST room placed on it - floor 0's first room is
+        // the entrance, whose level is where the server drops you - and every later room on that
+        // floor is rebased onto it. The (floor - lowestFloor) stacking is unchanged: Grey Caves
+        // 2026-09-23 walked floors 0/-1/-2 at y 133/69/0 with parkings 5/5/0.
+        var floorPark = new Dictionary<int, float>();
         foreach (var pr in m.Rooms)
         {
             int idx = pr[0], floor = pr[1], X = pr[2], Z = pr[3], rot = pr[4];
@@ -568,6 +578,10 @@ public sealed class AOBuddyNav
             }
 
             var src = pool.Rooms[idx];
+            if (!floorPark.TryGetValue(floor, out var park))
+            {
+                floorPark[floor] = park = src.Pos[1];
+            }
             int w = src.Rect[2] - src.Rect[0] + 1, h = src.Rect[3] - src.Rect[1] + 1;
             int tw = rot % 2 == 0 ? w : h, th = rot % 2 == 0 ? h : w; // footprint after rotation
             double ox = X * slot, oz = (m.Height - Z) * slot - th * pool.Cell;
@@ -592,7 +606,7 @@ public sealed class AOBuddyNav
             var (gx, gz) = Turned(w % 2 == 0 ? 1 : 0, h % 2 == 0 ? 1 : 0);
             var (tx, tz) = Turned(1, 1);
             double cx = ox + tw * pool.Cell / 2.0 - 1, cz = oz + th * pool.Cell / 2.0 + 1;
-            var y = src.Pos[1] + (floor - lowestFloor) * m.WorldHeight;
+            var y = park + (floor - lowestFloor) * m.WorldHeight;
             d.Rooms.Add(new NavDungeon.Room
             {
                 Index = d.Rooms.Count, Name = src.Name + " f" + floor, PoolName = src.Name, PoolIndex = idx, Floor = floor, Flags = src.Flags, Rot = rot, Rect = src.Rect,
@@ -943,7 +957,11 @@ public sealed class AOBuddyNav
                     {
                         if (da.Nx * db.Nx + da.Nz * db.Nz < -0.9)
                         {
-                            best = Math.Min(best, Math.Sqrt((da.X - db.X) * (da.X - db.X) + (da.Z - db.Z) * (da.Z - db.Z)));
+                            // Y counts: two doorways that meet in X/Z but sit 2 m apart in height are
+                            // not a passage (the Grey Caves room 4 of 2026-10-08 met its neighbours
+                            // in plan while its doorway bridges lay 2 m under their floors)
+                            var dy = da.Y - db.Y;
+                            best = Math.Min(best, Math.Sqrt((da.X - db.X) * (da.X - db.X) + (da.Z - db.Z) * (da.Z - db.Z) + dy * dy));
                         }
                     }
                 }

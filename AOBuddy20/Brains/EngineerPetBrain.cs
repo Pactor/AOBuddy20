@@ -173,8 +173,10 @@ public sealed class EngineerPetBrain : PetBrain
 
         // No robot: work on summoning one. Claim the task while establishing it so the bot gets its
         // pet before the lower-priority work (selfbuff/resupply/mission) runs - but not in the login
-        // dormancy (PetBrain.CadenceAllowed): the external-buffing brain gets the first minute.
-        if (!CadenceAllowed())
+        // dormancy (PetBrain.CadenceAllowed): the external-buffing brain gets the first minute. And
+        // not while the robot is merely out of sight (the presence grace): a stream gap is not a
+        // dead robot, and the summon would waste a cast plus its 120 s nanoline lock.
+        if (!CadenceAllowed() || RolePresent(me, PetType.Attack))
         {
             return true;
         }

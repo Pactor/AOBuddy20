@@ -3487,7 +3487,7 @@ public sealed class MissionController : IPacketConsumer
                     $"  room {rm.Index} {rm.PoolName} f{rm.Floor} centre ({rm.Pos[0]:0.0},{rm.Pos[2]:0.0}) y {rm.Pos[1]:0.0} rot {rm.Rot}");
             }
 
-            dump.AppendLine($"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
+            dump.AppendLine($"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Y:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
             dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Z:0.0})"))}");
             dump.AppendLine($"server exit: {(_serverExitByPf.TryGetValue(_missionPf, out var sx) ? $"{sx.X:0.0},{sx.Z:0.0}" : "none seen")}");
             dump.AppendLine($"target: {(TryGetTargetPos(out var tp) ? $"{tp.X:0.0},{tp.Z:0.0}" : "not seen")}");

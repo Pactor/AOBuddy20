@@ -166,11 +166,11 @@ public sealed class MetaphysicistBrain : PetBrain
 
     // ---- Roster -----------------------------------------------------------------------------
 
-    private static bool RosterComplete(LocalPlayer me)
+    private bool RosterComplete(LocalPlayer me)
     {
         foreach (var (line, role) in Slots)
         {
-            if (me.Pets.Count(p => p.Role == role) < 1)
+            if (!RolePresent(me, role))
             {
                 return false;
             }
@@ -211,9 +211,9 @@ public sealed class MetaphysicistBrain : PetBrain
     {
         foreach (var (line, role) in Slots)
         {
-            if (me.Pets.Count(p => p.Role == role) >= 1)
+            if (RolePresent(me, role))
             {
-                continue;
+                continue; // filled - or merely out of sight (the grace, not the re-summon path)
             }
 
             CastBest(me, line);

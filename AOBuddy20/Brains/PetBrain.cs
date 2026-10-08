@@ -263,6 +263,52 @@ public abstract class PetBrain
         return me.Pets.FirstOrDefault(p => p.Role == PetType.Support);
     }
 
+    // PET PRESENCE GRACE (owner, 2026-10-08): me.Pets reads the live dynel stream, and a pet that
+    // drops out of it for a moment (out of sight, a missed update) read as "line missing" - the
+    // cadence cast again although the pet was out all along, a wasted summon and another 120 s
+    // nanoline lock. A role counts as present for this long after its last sighting; only a real
+    // absence (death, terminate, a zone) outlives the grace.
+    protected const double PetAbsenceGraceSec = 10.0;
+    private readonly Dictionary<PetType, double> _roleLastSeen = new();
+    private readonly HashSet<PetType> _roleGraced = new();
+
+    /// <summary>
+    ///     Is this wire role filled - seen now, or seen within the grace window? Call it every
+    ///     tick with the live answer (it stamps the sighting); the return smooths only the gaps.
+    /// </summary>
+    protected bool RolePresent(LocalPlayer me, PetType role)
+    {
+        if (me.Pets.Any(p => p.Role == role))
+        {
+            _roleLastSeen[role] = _clock;
+            if (_roleGraced.Remove(role))
+            {
+                _logger.LogInformation(
+                    $"PET: the {Describe(role)} pet is back in sight (a stream gap, no re-summon was made).");
+            }
+
+            return true;
+        }
+
+        if (_roleLastSeen.TryGetValue(role, out var seen) && _clock - seen < PetAbsenceGraceSec)
+        {
+            _roleGraced.Add(role);
+            return true; // out of sight for moments - not gone
+        }
+
+        return false;
+    }
+
+    private static string Describe(PetType role)
+    {
+        return role switch
+        {
+            PetType.Attack => "attack",
+            PetType.Heal => "heal",
+            _ => "support",
+        };
+    }
+
     // ---- ENGINE: commands (the SDK channel) -------------------------------------------------
 
     /// <summary>Command the whole roster. All pets take the same commands.</summary>
