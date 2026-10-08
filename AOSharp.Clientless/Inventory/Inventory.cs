@@ -437,7 +437,7 @@ public static class Inventory
         _items.Add(item);
     }
 
-    internal static void RemoveItem(Item item, bool wipeContainer = true)
+    public static void RemoveItem(Item item, bool wipeContainer = true)
     {
         _items.Remove(item);
 

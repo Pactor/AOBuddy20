@@ -326,6 +326,31 @@ public sealed class MissionController : IPacketConsumer
             case "status":
                 reply("Mission: " + Describe());
                 break;
+            case "clear":
+                // 'mission clear': the run stops AND the mission is deleted - abandoned, no
+                // re-roll (that is 'skip'), no resume (that is 'stop').
+                if (_heldQuests.Count == 0 && !Active)
+                {
+                    reply("No mission to clear.");
+                    break;
+                }
+
+                if (Active)
+                {
+                    Stop("owner clear");
+                }
+
+                if (_heldQuests.Count > 0)
+                {
+                    DeleteHeld("owner clear");
+                    reply("Mission cancelled and deleted.");
+                }
+                else
+                {
+                    reply("Mission run stopped - nothing held to delete.");
+                }
+
+                break;
             case "skip":
                 // AOBuddy10's 'mission run skip': the held mission is deleted and a fresh one is rolled.
                 if (_heldQuests.Count == 0)
@@ -400,7 +425,7 @@ public sealed class MissionController : IPacketConsumer
                 break;
             }
             default:
-                reply("Usage: mission run | stop | skip | status | probe x z | roll | list | accept n | buybags n | " +
+                reply("Usage: mission run | stop | clear | skip | status | probe x z | roll | list | accept n | buybags n | " +
                       "want [add <name or query> | remove n | list | mode always|list | status | lines [part] | " +
                       "drop|undrop <nano name> | clear got]");
                 break;
@@ -2546,6 +2571,7 @@ public sealed class MissionController : IPacketConsumer
     // stale ones stay in the packs (AOBuddy10 learned that the hard way, 2026-09-26).
     private void DeleteHeld(string why)
     {
+        var keys = MissionKeys();
         foreach (var id in _heldQuests.Keys.ToList())
         {
             Client.Send(new QuestMessage { Action = QuestAction.Delete, Mission = id });
@@ -2553,6 +2579,21 @@ public sealed class MissionController : IPacketConsumer
         }
 
         _heldQuests.Clear();
+
+        // QuestAction.Delete makes the server vanish the door key (a live client sees it go) - but
+        // the removal echo is not guaranteed to reach a clientless session's inventory model, so
+        // the key would linger THERE (and in the monitor's item view). Drop it locally and fire the
+        // same event the wire removal would.
+        foreach (var key in keys)
+        {
+            Inventory.RemoveItem(key);
+            Inventory.ItemRemoved?.Invoke(key);
+        }
+
+        if (keys.Count > 0)
+        {
+            _logger.LogInformation($"MISSION: dropped {keys.Count} mission key(s) from the packs ({why}).");
+        }
     }
 
     // A mission that can't be finished is deleted and the loop rolls on: only the owner stops the run.
@@ -2663,8 +2704,9 @@ public sealed class MissionController : IPacketConsumer
     // its name names the building - how a restart shows what the held quest is for (AOBuddy10 MissionKeys).
     private static List<Item> MissionKeys()
     {
-        return Inventory.Items.Where(i => i != null && i.Slot.Type == IdentityType.Inventory &&
-                                          i.UniqueIdentity.Type == IdentityType.MissionKey).ToList();
+        // bags included: the key arrives INSIDE a bag (BAGPROBE: owner = the bag's identity), so
+        // the loose-inventory filter missed it and the delete never found it
+        return Inventory.Items.Where(i => i != null && i.UniqueIdentity.Type == IdentityType.MissionKey).ToList();
     }
 
     private static string KeysText()
