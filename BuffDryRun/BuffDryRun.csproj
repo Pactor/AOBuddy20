@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!-- Standalone dry-run tool: serves a local web page on :9090 that runs the REAL
+         BuffCatalog planner against a simulated character. No client, no login, no network.
+         Nothing in AOBuddy20 or the SDK is changed by running this. -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <Nullable>disable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <AssemblyName>BuffDryRun</AssemblyName>
+        <RootNamespace>BuffDryRun</RootNamespace>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\AOBuddy20\AOBuddy20.csproj"/>
+        <ProjectReference Include="..\AOSharp.Clientless\AOSharp.Clientless.csproj"/>
+        <ProjectReference Include="..\AOSharp.Common\AOSharp.Common.csproj"/>
+    </ItemGroup>
+
+</Project>
