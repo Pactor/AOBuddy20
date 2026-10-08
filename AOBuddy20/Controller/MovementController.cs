@@ -762,6 +762,23 @@ public sealed class MovementController : IPacketConsumer
         router.Register(DCMoveHandler, N3MessageType.CharDCMove, (int)ControlPriority.None);
         router.Register(SetPosHandler, N3MessageType.SetPos, (int)ControlPriority.None);
         router.Register(ZoneInHandler, N3MessageType.PlayfieldAnarchyF, (int)ControlPriority.None); // the proxy return playfield
+
+        // THE TEAM INVITE, ROUTED (owner, 2026-10-08): several recipients need it (owner auto-accept,
+        // the Scotty warp here, the buff bots), and the old single Team.TeamRequest raise died whole
+        // when any subscriber threw - the rest never saw the invite. The router guards each recipient
+        // separately; false = the next recipient sees it too. OnTeamRequest itself gates on the Scotty
+        // window, so a stopped movement controller no-ops there.
+        router.Register(TeamInviteHandler, N3MessageType.TeamInvite, (int)ControlPriority.None);
+    }
+
+    // The routed invite: unpack the inviter (the packet carries the name the client never streams)
+    // and hand it to the same decision the Team.TeamRequest subscription serves (that path stays for
+    // the CharacterAction form of an invite).
+    private bool TeamInviteHandler(AOMessage e)
+    {
+        var invite = (TeamInviteMessage)e.Body;
+        OnTeamRequest(this, new TeamRequestEventArgs(invite.Requestor, invite.Name));
+        return false;
     }
 
     // ── lifecycle ─────────────────────────────────────────────────────────────────────────

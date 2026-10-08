@@ -279,6 +279,8 @@ internal class Program
             provider.GetService<MovementController>()?.RegisterPackets(router);
             provider.GetService<ResupplyController>()?.RegisterPackets(router);
             provider.GetService<MissionController>()?.RegisterPackets(router);
+            provider.GetService<TeamController>()?.RegisterPackets(router); // the routed team invite
+            provider.GetService<BuffBotController>()?.RegisterPackets(router);
         }
     }
 

@@ -869,15 +869,14 @@ public static class Client
             }
         });
 
-        _n3MsgCallbacks.Add(N3MessageType.TeamInvite, msg =>
-        {
-            var teamInviteMsg = (TeamInviteMessage)msg;
-
-            // The packet names the inviter (TeamInviteMessage.Name) - the inviter is often a toon the
-            // client does not stream, so this is the only place the name exists.
-            var teamReqArgs = new TeamRequestEventArgs(teamInviteMsg.Requestor, teamInviteMsg.Name);
-            Team.TeamRequest?.Invoke(null, teamReqArgs);
-        });
+        // TEAM INVITE (N3 TeamInvite, the form that carries the inviter's NAME - the inviter is often
+        // a toon the client does not stream, so the packet is the only place the name exists) is NOT
+        // raised here anymore: AOBuddy20's PacketRouter owns it (Client.MessageReceived fires before
+        // these callbacks), because the invite needs SEVERAL recipients - owner auto-accept, the
+        // Scotty warp, the buff bots - and a single Team.TeamRequest raise died whole when any one
+        // subscriber threw, so the rest never saw the invite (owner, 2026-10-08: the buff bots' invite
+        // was sometimes missed). The CharacterAction form still raises Team.TeamRequest via
+        // Team.OnTeamMessage.
     }
 
     private static void OnCharacterAction(CharacterActionMessage charActionMessage)

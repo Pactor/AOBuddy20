@@ -11,12 +11,15 @@
 
 using AOBuddy20.Configuration;
 using AOBuddy20.Enums;
+using AOBuddy20.Interfaces;
+using AOBuddy20.Network;
 using AOBuddy20.Nav;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Serilog.Events;
+using SmokeLounge.AOtomation.Messaging.Messages;
 using SmokeLounge.AOtomation.Messaging.Messages.N3Messages;
 
 namespace AOBuddy20.Controlling;
@@ -101,7 +104,23 @@ public sealed class BuffBotController
         _catalog = catalog;
         _movement = movement;
         _logger = logger;
-        Team.TeamRequest += OnTeamRequest; // the buff bot answers by inviting us
+        Team.TeamRequest += OnTeamRequest; // the CharacterAction form; the N3 form comes routed (below)
+    }
+
+    // THE INVITE, ROUTED (owner, 2026-10-08): the N3 TeamInvite - the form that carries the inviter's
+    // name - is delivered by the PacketRouter to every recipient separately guarded (owner auto-accept,
+    // the Scotty warp, us). The old single Team.TeamRequest chain died whole when any subscriber threw,
+    // and ours was sometimes never reached. False = the next recipient sees the invite too.
+    public void RegisterPackets(PacketRouter router)
+    {
+        router.Register(TeamInviteHandler, N3MessageType.TeamInvite, 0);
+    }
+
+    private bool TeamInviteHandler(AOMessage e)
+    {
+        var invite = (TeamInviteMessage)e.Body;
+        OnTeamRequest(this, new TeamRequestEventArgs(invite.Requestor, invite.Name));
+        return false;
     }
 
     // ---- The buff spot (4a.1b): walk to the bot before asking --------------------------------

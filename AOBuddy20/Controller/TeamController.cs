@@ -10,8 +10,12 @@
 // ---------------------------------------------------------------------------------------
 
 using AOBuddy20.Configuration;
+using AOBuddy20.Interfaces;
+using AOBuddy20.Network;
 using AOSharp.Clientless;
 using Microsoft.Extensions.Logging;
+using SmokeLounge.AOtomation.Messaging.Messages;
+using SmokeLounge.AOtomation.Messaging.Messages.N3Messages;
 
 namespace AOBuddy20.Controlling;
 
@@ -21,10 +25,12 @@ namespace AOBuddy20.Controlling;
 ///     team-cast buffs, shared XP, and so the owner's pets/teammates are recognised). Only the owner's
 ///     invite - every other invite is left to whoever owns it (Scotty warps -> MovementController, buff
 ///     bots -> BuffBotController; both gate on their own state, so on an owner invite they no-op and this
-///     accepts). Subscribes in the ctor and lives for the session; the owner is matched by configured
-///     name off the invite packet (the inviter is often a toon the client never streams).
+///     accepts). The invite arrives ROUTED (PacketRouter, several guarded recipients - owner, 2026-10-08:
+///     a single event chain died whole when any subscriber threw and the rest missed the invite); the
+///     owner is matched by configured name off the invite packet (the inviter is often a toon the client
+///     never streams).
 /// </summary>
-public sealed class TeamController
+public sealed class TeamController : IPacketConsumer
 {
     private readonly AccountInfo _config;
     private readonly ILogger<TeamController> _logger;
@@ -33,7 +39,21 @@ public sealed class TeamController
     {
         _config = config;
         _logger = logger;
-        Team.TeamRequest += OnTeamRequest;
+        Team.TeamRequest += OnTeamRequest; // the CharacterAction form of an invite
+    }
+
+    public void RegisterPackets(PacketRouter router)
+    {
+        // The N3 TeamInvite form - the one that carries the inviter's name. false = the other
+        // recipients (the Scotty warp, the buff bots) see the invite too.
+        router.Register(TeamInviteHandler, N3MessageType.TeamInvite, 0);
+    }
+
+    private bool TeamInviteHandler(AOMessage e)
+    {
+        var invite = (TeamInviteMessage)e.Body;
+        OnTeamRequest(this, new TeamRequestEventArgs(invite.Requestor, invite.Name));
+        return false;
     }
 
     private void OnTeamRequest(object? sender, TeamRequestEventArgs e)
