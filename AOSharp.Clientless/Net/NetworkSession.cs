@@ -69,7 +69,7 @@ public class NetworkSession
     }
 
     internal bool InPlay => _stateMachine.IsInState(State.InPlay);
-    internal bool Connected => _tcpClient.Connected;
+    internal bool Connected => _tcpClient is { Connected: true };
 
     internal void Update()
     {
@@ -530,9 +530,23 @@ public class NetworkSession
         }
     }
 
+    // The next reconnect's delay, when a specific one is warranted: AlreadyLoggedIn means the
+    // server still holds the character session - retry SHORT (it releases within seconds of the
+    // old socket dying), not on the 30 s default. Consumed by the next Reconnect().
+    private int _nextReconnectDelayMs;
+
     private void Reconnect()
     {
-        _tcpClient.Close();
+        try
+        {
+            _tcpClient?.Close();
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"reconnect: closing the old socket failed: {ex.Message}");
+        }
+
+        _tcpClient = null;
         _sessionCookie = null;
         lock (_sendLock)
         {
@@ -541,7 +555,24 @@ public class NetworkSession
 
         if (Client.Config.AutoReconnect)
         {
-            Task.Delay(Client.Config.ReconnectDelay).ContinueWith(t => Connect());
+            // GUARDED: this continuation is the only thing between a dead session and a dead bot -
+            // the plain ContinueWith died silently on its first exception and the bot sat
+            // disconnected until a manual restart (2026-10-08 18:53, AlreadyLoggedIn).
+            var delay = _nextReconnectDelayMs > 0 ? _nextReconnectDelayMs : Client.Config.ReconnectDelay;
+            _nextReconnectDelayMs = 0;
+            _logger.Debug($"reconnecting in {delay} ms...");
+            Task.Delay(delay).ContinueWith(t =>
+            {
+                try
+                {
+                    Connect();
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error($"reconnect attempt failed: {ex.Message} - scheduling a retry.");
+                    Reconnect();
+                }
+            });
         }
         else
         {
@@ -674,7 +705,19 @@ public class NetworkSession
         {
             var loginErrorMsg = (LoginErrorMessage)msg;
 
-            _logger.Debug($"Failed to login: {loginErrorMsg.Error}");
+            // AlreadyLoggedIn: the server still holds the character session of the connection that
+            // just died - it releases within seconds of the old socket closing. Retry SHORT (2 s)
+            // instead of the 30 s default: the bot sat 5 minutes dead on exactly this (2026-10-08
+            // 18:53, the retry chain had died silently on top of it).
+            if (loginErrorMsg.Error == LoginError.AlreadyLoggedIn)
+            {
+                _logger.Information("Failed to login: AlreadyLoggedIn - the server still holds the session, retrying in 2 s.");
+                _nextReconnectDelayMs = 2000;
+            }
+            else
+            {
+                _logger.Debug($"Failed to login: {loginErrorMsg.Error}");
+            }
 
             _stateMachine.Fire(Trigger.FailedToLogin);
         });
