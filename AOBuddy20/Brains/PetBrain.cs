@@ -135,9 +135,38 @@ public abstract class PetBrain
     protected readonly ControlArbiter _controlArbiter;
     private readonly BuffBotController? _buffBot; // the external-buff session source (null: no gate)
 
-    protected double _clock; // the brain's own clock, accumulated from dt
+    protected double _clock; // the brain's own clock, accumulated from dt (0 = the login; brains
+                             // are selected exactly once per process - BotLoop review.md #12)
     private bool _holding;   // an episode is open: arbiter held at ControlPriority.Pet
     private double _lastTickErrorAt = double.NegativeInfinity; // throttle the recovery log
+
+    // LOGIN DORMANCY (owner, 2026-10-08): the first minute after login the cadence summons hold
+    // off - the external-buffing brain gets the first claim. Why: the pet brain is autonomous
+    // from its first tick, and a roster filled at base skills locks every pet nanoline for 120 s
+    // (the wire's SkillLocks) - precisely the window the buff-first pipeline needed to re-summon
+    // at peak. A session opened inside the window is NOT delayed: its per-line cast is the punch
+    // (RequestSummon), which never passes this cadence gate.
+    protected const double LoginDormancySec = 60.0;
+    private bool _dormancyLogged;
+
+    /// <summary>False for the first LoginDormancySec after login (one line, once); true after.</summary>
+    protected bool CadenceAllowed()
+    {
+        if (_clock >= LoginDormancySec)
+        {
+            return true;
+        }
+
+        if (!_dormancyLogged)
+        {
+            _dormancyLogged = true;
+            _logger.LogInformation(
+                $"PET: login dormancy - cadence summons wait {LoginDormancySec:0}s so the external " +
+                "buffing brain gets the first claim (a session's own casts are never held).");
+        }
+
+        return false;
+    }
 
     /// <summary>
     ///     One line describing every nano running on the character at this instant (owner's

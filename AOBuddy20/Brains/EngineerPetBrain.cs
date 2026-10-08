@@ -172,7 +172,13 @@ public sealed class EngineerPetBrain : PetBrain
         }
 
         // No robot: work on summoning one. Claim the task while establishing it so the bot gets its
-        // pet before the lower-priority work (selfbuff/resupply/mission) runs.
+        // pet before the lower-priority work (selfbuff/resupply/mission) runs - but not in the login
+        // dormancy (PetBrain.CadenceAllowed): the external-buffing brain gets the first minute.
+        if (!CadenceAllowed())
+        {
+            return true;
+        }
+
         _sinceDecide += dt;
         if (_sinceDecide < DecideEverySec)
         {

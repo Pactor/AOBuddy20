@@ -134,7 +134,13 @@ public sealed class MetaphysicistBrain : PetBrain
             return true;
         }
 
-        // A line is missing: work on summoning it, roughly once a second.
+        // A line is missing: work on summoning it, roughly once a second - but not in the login
+        // dormancy (the punch above is exempt: a session's per-line cast must never wait it out).
+        if (!CadenceAllowed())
+        {
+            return true;
+        }
+
         _sinceDecide += dt;
         if (_sinceDecide < DecideEverySec)
         {
