@@ -43,6 +43,12 @@ public sealed class FollowController
     private const float OnHimDist = 0.15f;
     private const float LockHeadingDeg = 2f;
 
+    // When the owner leaves our view while mirror-locked (almost always because he just crossed a
+    // zone line / stepped into a whompa booth), HOLD the mirror this long and keep replaying his queued
+    // crossing steps - riding his EXACT booth across - instead of breaking into a blind heading-push
+    // that lands in the wrong booth. A real cross fires a zone Reset well inside this window.
+    private const double MirrorCrossGraceSec = 3.0;
+
     private readonly ILogger _logger;
     private readonly Movement _movement;
     private readonly int _sendIntervalMs;
@@ -62,6 +68,7 @@ public sealed class FollowController
     private Quaternion _lastSeenHeading = Quaternion.Identity;
     private bool _lostPushed;
     private bool _sawHim; // (0,0,0) is a real coordinate: a flag, not a default position
+    private double _crossGrace; // seconds the mirror has been held after the owner left view (the crossing ride)
 
     // His speed, measured off his own position samples, for the outrun warning.
     private Vector3? _speedRefPos;
@@ -86,6 +93,7 @@ public sealed class FollowController
         }
 
         _mirrorLocked = false;
+        _crossGrace = 0;
         MirrorQueue.Clear();
         _logger.LogInformation($"FOLLOW: mirror broken - {why}. Re-stacking.");
     }
@@ -94,6 +102,7 @@ public sealed class FollowController
     public void Reset()
     {
         _mirrorLocked = false;
+        _crossGrace = 0;
         MirrorQueue.Clear();
         _lostTarget = null;
         _lostPushed = false;
@@ -126,24 +135,41 @@ public sealed class FollowController
         // him. When he stands still his client sends nothing, and neither do we.
         if (_mirrorLocked)
         {
+            // Replay whatever of his movement stream has queued. At a zone/whompa crossing these are his
+            // exact steps INTO the booth - replaying them walks us into the SAME booth he took, which is
+            // the whole point of the mirror (a blind heading-push lands in the wrong booth).
             while (MirrorQueue.TryDequeue(out var m))
             {
                 _movement.Mirror(me, m);
             }
 
-            var reference = ownerVisible ? ownerPos : _lastSeenPos;
-            var off = Vector3.Distance(me.MovementComponent.Position, reference);
-            if (off > MirrorBreakMeters)
+            if (ownerVisible)
             {
-                BreakMirror($"{off:0.0} m off him (server moved us / couldn't copy a move)");
-            }
-            else if (!ownerVisible)
-            {
-                BreakMirror("he left the playfield");
+                _crossGrace = 0;
+                var off = Vector3.Distance(me.MovementComponent.Position, ownerPos);
+                if (off > MirrorBreakMeters)
+                {
+                    BreakMirror($"{off:0.0} m off him (server moved us / couldn't copy a move)");
+                }
+                else
+                {
+                    return; // locked and on him
+                }
             }
             else
             {
-                return;
+                // He left our view - almost always because he just crossed. DON'T break into a blind
+                // push: HOLD the mirror and keep replaying his queued crossing steps so we ride his exact
+                // booth across. A real cross fires a zone Reset (clearing all this) well inside the grace;
+                // only if the grace runs out with no cross do we give up and fall back to the lost-walk.
+                _crossGrace += dt;
+                if (_crossGrace < MirrorCrossGraceSec)
+                {
+                    _movement.Hold(me, _sendIntervalMs); // sit tight on the crossing; replayed steps above move us
+                    return;
+                }
+
+                BreakMirror($"he left the playfield and did not cross in {MirrorCrossGraceSec:0}s");
             }
         }
 

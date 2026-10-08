@@ -89,9 +89,19 @@ public sealed class OwnerChat
         _running = true;
         Client.Chat.PrivateMessageReceived += OnTell;
         Client.OnUpdate += GreetWhenOwnerVisible;
+        if (_config.UsePrivateChannel)
+        {
+            // OPT-IN path: also obey commands sent in the bot's own private channel and accept a
+            // private-channel invite from the owner. Tells stay on, so this adds a channel without
+            // taking the tell fallback away (AccountInfo.UsePrivateChannel).
+            Client.Chat.PrivateGroupMessageReceived += OnPrivateGroupMessage;
+            Client.Chat.PrivateGroupInviteMessageReceived += OnPrivateGroupInvite;
+        }
+
         _logger.LogInformation(string.IsNullOrEmpty(_config.Owner)
             ? "Owner chat started. No owner configured - tells will be logged but NOT obeyed."
-            : $"Owner chat started. Obeying tells from '{_config.Owner}'.");
+            : $"Owner chat started. Obeying tells from '{_config.Owner}'." +
+              (_config.UsePrivateChannel ? " Private channel ENABLED (opt-in, tells still on)." : string.Empty));
     }
 
     public void Stop()
@@ -105,6 +115,8 @@ public sealed class OwnerChat
         if (Client.Chat != null)
         {
             Client.Chat.PrivateMessageReceived -= OnTell;
+            Client.Chat.PrivateGroupMessageReceived -= OnPrivateGroupMessage;
+            Client.Chat.PrivateGroupInviteMessageReceived -= OnPrivateGroupInvite;
         }
 
         Client.OnUpdate -= GreetWhenOwnerVisible;
@@ -193,14 +205,76 @@ public sealed class OwnerChat
 
         _greeted = true;
         Client.OnUpdate -= GreetWhenOwnerVisible;
+        var ownerId = (uint)owner.Identity.Instance;
         try
         {
-            Client.SendPrivateMessage((uint)owner.Identity.Instance, "AOBuddy20 online - send 'help' for commands.");
+            Client.SendPrivateMessage(ownerId, "AOBuddy20 online - send 'help' for commands.");
+            if (_config.UsePrivateChannel && Client.Chat != null)
+            {
+                // Tyrbot pattern: invite the owner into the bot's own private channel (channel id ==
+                // the bot's character id). The owner's client gets the invite and joins; commands can
+                // then flow over the channel as well as by tell.
+                Client.Chat.InvitePrivateGroup(ownerId);
+                _logger.LogInformation($"Invited owner (id={ownerId}) to the private channel.");
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Greeting failed.");
         }
+    }
+
+    // OPT-IN: a command spoken in the bot's private channel, answered back in the same channel.
+    private void OnPrivateGroupMessage(object? sender, PrivateGroupMsg msg)
+    {
+        if (!IsOwnerSender(msg.SenderName, msg.SenderId))
+        {
+            _logger.LogInformation($"PRIVCHAN (not obeyed) from {msg.SenderName} (id={msg.SenderId}): {msg.Message}");
+            return;
+        }
+
+        _logger.LogInformation($"CMD (privchan) from {msg.SenderName}: '{msg.Message}'");
+        _resupply.SetTellId(msg.SenderId); // async replies answer the owner by tell, same as the tell path
+        _sell.SetTellId(msg.SenderId);
+        _mission.SetTellId(msg.SenderId);
+        try
+        {
+            HandleCommand(msg.Message, text => Client.Chat?.SendPrivateGroupMessage(msg.ChannelId, text));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Private channel command error.");
+            try
+            {
+                Client.Chat?.SendPrivateGroupMessage(msg.ChannelId, $"Command error: {ex.Message}");
+            }
+            catch
+            {
+                // answering is best-effort
+            }
+        }
+    }
+
+    // OPT-IN: if the owner invites the bot to a private channel instead, accept it.
+    private void OnPrivateGroupInvite(object? sender, PrivateGroupInviteArgs e)
+    {
+        if (Client.Chat == null)
+        {
+            return;
+        }
+
+        var owner = DynelManager.Players.FirstOrDefault(p =>
+            string.Equals(p.Name, _config.Owner, StringComparison.OrdinalIgnoreCase));
+        var isOwner = (owner != null && (uint)owner.Identity.Instance == e.Requester)
+                      || (e.Requester != 0 && e.Requester == _tellId);
+        if (!isOwner)
+        {
+            _logger.LogInformation($"Private channel invite from id={e.Requester} ignored (not the owner).");
+            return;
+        }
+
+        Client.Chat.AcceptPrivateGroupInvite(e.Requester);
+        _logger.LogInformation($"Accepted private channel invite from owner (id={e.Requester}).");
     }
 
     // ── commands ──────────────────────────────────────────────────────────────────────────
