@@ -14,9 +14,9 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\AOBuddy20\AOBuddy20.csproj"/>
-        <ProjectReference Include="..\AOSharp.Clientless\AOSharp.Clientless.csproj"/>
-        <ProjectReference Include="..\AOSharp.Common\AOSharp.Common.csproj"/>
+        <ProjectReference Include="..\..\AOBuddy20\AOBuddy20.csproj"/>
+        <ProjectReference Include="..\..\AOSharp.Clientless\AOSharp.Clientless.csproj"/>
+        <ProjectReference Include="..\..\AOSharp.Common\AOSharp.Common.csproj"/>
     </ItemGroup>
 
 </Project>
