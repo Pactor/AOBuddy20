@@ -244,7 +244,7 @@ public class PetFirstBuffCycle
     {
         _rememberedMaxNcu = me.TryGetStat(Stat.MaxNCU, out var n) ? n : 0;
         _logger.LogInformation($"PETCYCLE: NCU remembered ({source}): Max {_rememberedMaxNcu}, " +
-                               $"free {_rememberedMaxNcu - (me.TryGetStat(Stat.CurrentNCU, out var c) ? c : 0)}.");
+                               $"free {BuffCatalog.FreeNcu(me, _rememberedMaxNcu.Value)}.");
     }
 
     // ---- THE OUTCOME LEDGER (owner, 2026-10-08) ----------------------------------------------
@@ -659,8 +659,7 @@ public class PetFirstBuffCycle
                     var freed = _c.CancelForeignSingles(me,
                         new[] { _line.PrimaryStat, (int)Stat.SpaceTime, }, $"{_line.Label} line");
 
-                    var curNcu = me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0;
-                    var budget = _c.RememberedMaxNcu(me) - curNcu + freed;
+                    var budget = BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me)) + freed;
 
                     _plan = _c._catalog.PlanPetLine(me, _line.PrimaryStat, (int)Stat.SpaceTime, budget, IsSlOrLe(me));
                     _ask = _plan.Where(b => !Satisfied(me, b, _line.PrimaryStat, (int)Stat.SpaceTime)).ToList();
@@ -1158,7 +1157,7 @@ public class PetFirstBuffCycle
             // THE INTER-LINE FIX for the lift: singles raising none of the needed stats go
             // (previous lines' leftovers), the freed NCU priced into the lift's budget.
             var freed = _c.CancelForeignSingles(me, needs.Keys.ToList(), $"{_line.Label} pet-buff lift");
-            var budget = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0) + freed;
+            var budget = BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me)) + freed;
             _lift = _c._catalog.PlanCasterLift(me, needs, budget, IsSlOrLe(me));
             var needText = string.Join(", ", needs.Select(n => $"{(Stat)n.Key} +{n.Value}"));
             if (_lift.Count == 0)
@@ -1308,6 +1307,7 @@ public class PetFirstBuffCycle
         private bool _comfortPlanned; // the comfort fill is planned once, then it rides the walk
         private BuffCatalog.BuffAction? _current;
         private BuffCatalog.BuffEntry? _currentEntry; // the entry behind _current (ledgered on landing)
+        private int _comfortFrom; // the _actions mark where the comfort fill begins (its walk re-checks the NCU)
         private int _idx;
         private double _lastCastAt = double.NegativeInfinity;
         private Phase _phase = Phase.Clear;
@@ -1460,7 +1460,7 @@ public class PetFirstBuffCycle
                 return;
             }
 
-            var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
+            var free = BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me));
             var set = _c._catalog.PlanCasterLift(me, needs, free, IsSlOrLe(me), excludeWrangles: true);
             if (set.Count == 0)
             {
@@ -1542,6 +1542,20 @@ public class PetFirstBuffCycle
                     continue;
                 }
 
+                // THE COMFORT RE-CHECK (owner, 2026-10-08): comfort is optional - when the NCU that
+                // was free at plan time is gone (an unknown running buff, a stat the wire still
+                // under-reports), skip the pick instead of waiting 90s out a cast the server refuses.
+                // Floor actions skip nothing: they MUST land, and the NcuWaitSec move-on already
+                // tolerates a refusal.
+                if (_idx >= _comfortFrom && a.Ncu > BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me)))
+                {
+                    _c._logger.LogInformation(
+                        $"PETCYCLE: comfort - '{a.Name}' needs {a.Ncu} NCU, " +
+                        $"{BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me))} free - skipped.");
+                    _idx++;
+                    continue;
+                }
+
                 if (a.Source == BuffCatalog.BuffSource.SelfCast)
                 {
                     me.Cast(a.SelfCastNanoId);
@@ -1571,7 +1585,8 @@ public class PetFirstBuffCycle
             if (!_comfortPlanned)
             {
                 _comfortPlanned = true;
-                var free = _c.RememberedMaxNcu(me) - (me.TryGetStat(Stat.CurrentNCU, out var used) ? used : 0);
+                _comfortFrom = _actions.Count; // the floor actions end here - the walk re-checks NCU past this mark
+                var free = BuffCatalog.FreeNcu(me, _c.RememberedMaxNcu(me));
                 _comfort = _c._catalog.PlanComfort(me, free, IsSlOrLe(me), "Metaphysicist");
                 var learned = new HashSet<int>(me.SpellList ?? Array.Empty<int>());
                 foreach (var b in _comfort)

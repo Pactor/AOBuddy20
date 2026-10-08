@@ -240,21 +240,12 @@ public abstract class SelfbuffingBrain
     /// <summary>
     ///     ENGINE: free NCU = MaxNCU - what is running. CurrentNCU sometimes reads 0 while buffs
     ///     are running (AOBuddy10's finding) - in that case the running buffs' own NCU sum stands
-    ///     in for it.
+    ///     in for it. (The shared implementation lives on BuffCatalog.FreeNcu - the pet-first cycle
+    ///     and the Engineer survival fill budget through it too.)
     /// </summary>
     protected static int FreeNcu(LocalPlayer me)
     {
-        if (!me.TryGetStat(Stat.MaxNCU, out var max))
-        {
-            return 0;
-        }
-
-        if (!me.TryGetStat(Stat.CurrentNCU, out var current) || current <= 0)
-        {
-            current = me.Buffs.Where(b => b?.NanoItem != null).Sum(b => b.NanoItem.NCU);
-        }
-
-        return Math.Max(0, max - current);
+        return BuffCatalog.FreeNcu(me);
     }
 
     /// <summary>

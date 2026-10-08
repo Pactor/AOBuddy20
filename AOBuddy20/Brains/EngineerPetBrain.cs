@@ -716,7 +716,8 @@ public sealed class EngineerPetBrain : PetBrain
         }
 
         // 2) Survival: fill whatever NCU is now free (the wrangle has lapsed) with HP/HoT/AC/shield.
-        var free = (me.TryGetStat(Stat.MaxNCU, out var mx) ? mx : 0) - (me.TryGetStat(Stat.CurrentNCU, out var cu) ? cu : 0);
+        // FreeNcu, not the raw CurrentNCU stat: it reads 0 while buffs run (BuffCatalog.FreeNcu).
+        var free = BuffCatalog.FreeNcu(me);
         if (free > 0)
         {
             TryApply(me, _catalog.SurvivalFill(me, free, paid, "Engineer", _catalog.BotName, learned.Contains,

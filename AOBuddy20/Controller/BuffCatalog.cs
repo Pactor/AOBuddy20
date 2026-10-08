@@ -403,6 +403,29 @@ public sealed class BuffCatalog
         return e?.Ncu ?? 0;
     }
 
+    /// <summary>
+    ///     Free NCU = Max − what is running. Stat.CurrentNCU (0xB4) reads 0 while buffs are running
+    ///     (AOBuddy10's finding; SelfbuffingBrain.FreeNcu carried the first workaround) and no packet
+    ///     handler ever feeds the stat, so the running buffs' own NCU sum stands in for it.
+    ///     <paramref name="maxFallback" /> stands in when the live MaxNCU reads 0 too (the pet cycle's
+    ///     remembered post-NCU-buff Max). EVERY NCU budget reads through here - the raw stat made the
+    ///     pet-first cycle plan comfort against a full bar while the floor set was already on it, and
+    ///     RRFE never landed (owner, 2026-10-08).
+    /// </summary>
+    public static int FreeNcu(LocalPlayer me, int maxFallback = 0)
+    {
+        var max = me.TryGetStat(Stat.MaxNCU, out var m) && m > 0 ? m : Math.Max(0, maxFallback);
+        if (max <= 0)
+        {
+            return 0;
+        }
+
+        var used = me.TryGetStat(Stat.CurrentNCU, out var c) && c > 0
+            ? c
+            : me.Buffs?.Where(b => b?.NanoItem != null).Sum(b => b.NanoItem.NCU) ?? 0;
+        return Math.Max(0, max - used);
+    }
+
     // The RECEIVER's own gate on a nano - the Level we must meet and the Shadowlands flag. A buff cast on
     // others carries BOTH gates on the landed nano's criteria: the CASTER's level (the higher one - the bot
     // must be that high to cast it) and the RECEIVER's "to use/affect" level (the lower one - what WE must
