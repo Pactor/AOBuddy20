@@ -247,6 +247,137 @@ public class PetFirstBuffCycle
                                $"free {_rememberedMaxNcu - (me.TryGetStat(Stat.CurrentNCU, out var c) ? c : 0)}.");
     }
 
+    // ---- THE OUTCOME LEDGER (owner, 2026-10-08) ----------------------------------------------
+    // The persistent buffs the cycle leaves on the bot - the NCU buff, the floor set, the comfort
+    // fill - recorded as each lands (the summon stacks are NOT here: the floor step strips them on
+    // purpose, so they are part of the means, not the outcome). The external-buffing brain compares
+    // this ledger against the ACTUAL buff state and only re-enters the pipeline when an entry is
+    // gone or worn to the rebuff fraction - the skill want alone must not re-open the cycle, since
+    // the cycle leaves its own gap behind (the stripped summon stacks) and would chase itself every
+    // retry window. Another buff of the same strain at equal-or-better gains counts as covering an
+    // entry, so an owner-cast or manually requested buff stands in for the cycle's own.
+
+    /// <summary>
+    ///     One persistent buff the cycle leaves on the bot (the NCU buff, a floor rung, a comfort
+    ///     pick): the landed ids that mark it on the wire, the gains a same-strain stand-in must
+    ///     match to count as covering it, and the remaining-time baseline taken at landing - the
+    ///     brain's rebuff line is a fraction of THAT, so a fresh replacement is measured against
+    ///     its own clock, not the original nano's.
+    /// </summary>
+    public sealed class OutcomeEntry
+    {
+        public readonly double BaselineSec;
+        public readonly IReadOnlyDictionary<int, int> Gains;
+        public readonly IReadOnlyList<int> LandIds;
+        public readonly string Name;
+        public readonly int Ncu;
+        public readonly int Strain;
+
+        public OutcomeEntry(string name, IReadOnlyList<int> landIds, int strain,
+            IReadOnlyDictionary<int, int> gains, double baselineSec, int ncu)
+        {
+            Name = name;
+            LandIds = landIds;
+            Strain = strain;
+            Gains = gains;
+            BaselineSec = baselineSec;
+            Ncu = ncu;
+        }
+    }
+
+    private readonly List<OutcomeEntry> _outcome = new List<OutcomeEntry>();
+
+    /// <summary>The persistent buffs the cycle left on the bot, in landing order - filled as it runs.</summary>
+    public IReadOnlyList<OutcomeEntry> Outcome => _outcome;
+
+    /// <summary>
+    ///     Ledger a landed persistent buff: its cover ids, the gains a same-strain stand-in must
+    ///     match, and the baseline = the running buff's remaining time at this instant (its full
+    ///     length, fresh off the cast). Recorded only for buffs that DID land - a step that moved
+    ///     on past a never-landing action leaves no entry, so the gate cannot chase a ghost.
+    /// </summary>
+    internal void RecordOutcome(string name, IReadOnlyCollection<int> landIds,
+        IReadOnlyDictionary<int, int> gains, int ncu, LocalPlayer me)
+    {
+        var ids = landIds.Distinct().ToList();
+        var baseline = 0.0;
+        if (me.Buffs != null)
+        {
+            foreach (var b in me.Buffs)
+            {
+                if (ids.Contains(b.Id))
+                {
+                    baseline = Math.Max(baseline, b.Cooldown?.RemainingTime ?? 0);
+                }
+            }
+        }
+
+        _outcome.Add(new OutcomeEntry(name, ids, ids.Count > 0 ? BuffCatalog.StrainOf(ids[0]) : 0,
+            gains, baseline, ncu));
+        _logger.LogInformation($"PETCYCLE: outcome + '{name}' (baseline {baseline / 60:0}m, {ncu} NCU).");
+    }
+
+    /// <summary>
+    ///     The best covering running buff's remaining share of the entry's baseline (-1: nothing
+    ///     covers it): the exact nano, or a same-strain buff contributing at least the recorded
+    ///     gains per stat.
+    /// </summary>
+    private static double CoverShare(LocalPlayer me, OutcomeEntry e)
+    {
+        if (me.Buffs == null)
+        {
+            return -1;
+        }
+
+        var best = -1.0;
+        foreach (var b in me.Buffs)
+        {
+            var covers = e.LandIds.Contains(b.Id) ||
+                         (BuffCatalog.StrainOf(b.Id) == e.Strain && e.Gains.Count > 0 &&
+                          e.Gains.All(g => BuffCatalog.SkillContributionOf(b.Id, g.Key) >= g.Value));
+            if (covers)
+            {
+                best = Math.Max(best, b.Cooldown?.RemainingTime ?? 0);
+            }
+        }
+
+        return best < 0 ? -1 : best / Math.Max(1.0, e.BaselineSec);
+    }
+
+    /// <summary>
+    ///     Is the whole outcome standing: every entry covered (exact nano or equal-or-better
+    ///     same-strain stand-in) and above the rebuff fraction of its baseline. An empty ledger
+    ///     is NOT alive - there is nothing standing, the caller may run.
+    /// </summary>
+    internal static bool OutcomeAlive(LocalPlayer me, IReadOnlyList<OutcomeEntry> outcome, double minFraction)
+    {
+        if (outcome.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var e in outcome)
+        {
+            var share = CoverShare(me, e);
+            if (share < 0 || share <= minFraction)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Per-entry freshness for the log: "name 82%" (??: nothing covers it any more).</summary>
+    internal static string OutcomeReport(LocalPlayer me, IReadOnlyList<OutcomeEntry> outcome)
+    {
+        return string.Join(", ", outcome.Select(e =>
+        {
+            var share = CoverShare(me, e);
+            return share < 0 ? $"{e.Name} ??" : $"{e.Name} {share * 100:F0}%";
+        }));
+    }
+
     internal void RecordSnapshot(PetType role, int formulaId, LocalPlayer me)
     {
         var floors = BuffCatalog.PetFloor(formulaId, me);
@@ -418,6 +549,10 @@ public class PetFirstBuffCycle
             if (_pick != null && BuffUp(me, _pick.LandId))
             {
                 _c.RememberNcu(me, $"'{_pick.Name}' landed");
+                // THE OUTCOME LEDGER: the NCU buff survives the whole cycle (the floor clear spares
+                // it) - it is outcome, its +Max NCU the gain a same-strain stand-in must match.
+                _c.RecordOutcome(_pick.Name, new[] { _pick.LandId, },
+                    new Dictionary<int, int> { [(int)Stat.MaxNCU] = _pick.MaxNcuAdded }, 0, me);
                 return true;
             }
 
@@ -1162,12 +1297,17 @@ public class PetFirstBuffCycle
     {
         private readonly List<BuffCatalog.BuffAction> _actions = new List<BuffCatalog.BuffAction>();
 
+        // THE OUTCOME LEDGER: each action's catalog entry, appended in lockstep with _actions -
+        // when the action lands, the entry goes into the cycle's outcome (the persistent buffs).
+        private readonly List<BuffCatalog.BuffEntry> _actionEntries = new List<BuffCatalog.BuffEntry>();
+
         private readonly PetFirstBuffCycle _c;
         private readonly NcuStep _ncu;
         private bool _clearOut;
         private List<BuffCatalog.BuffEntry> _comfort = new List<BuffCatalog.BuffEntry>();
         private bool _comfortPlanned; // the comfort fill is planned once, then it rides the walk
         private BuffCatalog.BuffAction? _current;
+        private BuffCatalog.BuffEntry? _currentEntry; // the entry behind _current (ledgered on landing)
         private int _idx;
         private double _lastCastAt = double.NegativeInfinity;
         private Phase _phase = Phase.Clear;
@@ -1336,6 +1476,7 @@ public class PetFirstBuffCycle
                 if (action.Source != BuffCatalog.BuffSource.Unavailable)
                 {
                     _actions.Add(action);
+                    _actionEntries.Add(b);
                 }
             }
 
@@ -1356,7 +1497,16 @@ public class PetFirstBuffCycle
                 if (ActionLanded(me, _current))
                 {
                     _c._logger.LogInformation($"PETCYCLE: floor - '{_current.Name}' landed.");
+                    if (_currentEntry != null)
+                    {
+                        // THE OUTCOME LEDGER: a floor/comfort buff that landed is part of the
+                        // persistent set the brain later compares against.
+                        _c.RecordOutcome(_currentEntry.Name, _currentEntry.LandIds,
+                            _currentEntry.Modifies, _currentEntry.Ncu, me);
+                    }
+
                     _current = null;
+                    _currentEntry = null;
                     _idx++;
                 }
                 else if (_c._t - _phaseAt > NcuWaitSec)
@@ -1364,6 +1514,7 @@ public class PetFirstBuffCycle
                     _c._logger.LogWarning(
                         $"PETCYCLE: floor - '{_current.Name}' did not land in {NcuWaitSec:0}s - moving on.");
                     _current = null;
+                    _currentEntry = null; // never landed - no outcome entry, no ghost to chase
                     _idx++;
                 }
                 else
@@ -1402,12 +1553,14 @@ public class PetFirstBuffCycle
                     }
 
                     _current = a;
+                    _currentEntry = _actionEntries[_idx];
                     _phaseAt = _c._t;
                     _c._logger.LogInformation($"PETCYCLE: floor - self-casting '{a.Name}' ({a.SelfCastNanoId}).");
                     return false;
                 }
 
                 _current = a;
+                _currentEntry = _actionEntries[_idx];
                 _phaseAt = _c._t;
                 _turn = new BuffBotController.GuidedTurn { Action = a, };
                 return false; // the controller sends the tell and watches the landing
@@ -1427,6 +1580,7 @@ public class PetFirstBuffCycle
                     if (action.Source != BuffCatalog.BuffSource.Unavailable)
                     {
                         _actions.Add(action);
+                        _actionEntries.Add(b);
                     }
                 }
 

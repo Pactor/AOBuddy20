@@ -186,6 +186,10 @@ internal class Program
         // loaded data is immutable from here on.
         Zoning.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         ItemValues.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        // THE WANT DATA (AOBuddy10's want run, ported 2026-10-08): ItemWantData.bin - which nano
+        // program each crystal uploads and each template's ItemClass. The mission want list
+        // ('mission want') matches its rewards against it at query time.
+        WantData.Load(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         // THE NANO LIBRARY (GameData/nanos.ocp, omnicell's content pack): every nano formula,
         // stats dictionary included - the OnUse heal amounts and the stacking orders the
         // brains will decide on. Names come from ItemData.bin at query time.

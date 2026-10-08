@@ -36,8 +36,13 @@ namespace AOBuddy20.Brains;
 ///     Coordination runs even with PetAutoBuff off (an owner-started 'buffs pet' session gets
 ///     the same hold/release/request treatment around it); ASKING is what PetAutoBuff gates.
 ///     The MP contributes the LineSpec table; the cycle itself is shared with the Engineer and
-///     Bureaucrat pet classes and extends by appending steps. Runs on the update thread
-///     (BotLoop), like every brain.
+///     Bureaucrat pet classes and extends by appending steps. RE-ENTRY (owner, 2026-10-08) is
+///     gated by the cycle's OUTCOME ledger: the persistent buffs it left on the bot (NCU, floor,
+///     comfort) are compared against the actual buff state and the pipeline only re-opens when an
+///     entry is gone or worn to 25% of its landing baseline - the skill want alone must not
+///     re-open it, since the cycle leaves its own gap behind and would chase itself forever
+///     (unless a line needs MORE than that steady gap: a better pet became learnable). Runs on
+///     the update thread (BotLoop), like every brain.
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 [Brain(BrainKind.ExternalBuffing, Profession.Metaphysicist)]
@@ -79,6 +84,17 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     private int _opportunityLoggedFor; // the want id we last logged a buff opportunity for
     private bool _sessionSeen;         // a buff session ran last tick - its end releases the hold
     private bool _claimed;             // the arbiter is ours at ControlPriority.ExternalBuffing
+
+    // THE OUTCOME GATE (owner, 2026-10-08): what the last AUTO cycle left on the bot (the cycle's
+    // Outcome ledger - NCU buff, floor set, comfort fill) and the per-line skill gap it leaves
+    // behind ON PURPOSE (the floor step strips the summon stacks). That steady gap equals itself
+    // forever, so the want alone must not re-open the pipeline: the brain re-enters only when an
+    // outcome buff is gone or worn to <=25% of its landing baseline, or a line needs MORE than its
+    // steady gap (a better pet became learnable - the upgrade must not wait out the decay).
+    private const double RebuffFraction = 0.25;
+    private IReadOnlyList<PetFirstBuffCycle.OutcomeEntry> _outcome = Array.Empty<PetFirstBuffCycle.OutcomeEntry>();
+    private readonly Dictionary<PetLine, int> _steadyNeeds = new Dictionary<PetLine, int>();
+    private int _suppressedFor; // the want id we last logged the outcome gate's stay-out for
 
     // THE CYCLE (owner, 2026-10-07): the pet-first pipeline (strip -> NCU -> per line buff+cast)
     // running as a guided session; the brain only decides WHEN to open it and hands its turns to
@@ -128,7 +144,22 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         if (_sessionSeen)
         {
             _sessionSeen = false;
+            if (_cycle != null)
+            {
+                // OUR auto cycle is over: adopt its outcome ledger (the persistent buffs it left
+                // on us) and record the per-line gap it leaves behind - the steady state every
+                // later want is measured against by the outcome gate below.
+                _outcome = _cycle.Outcome;
+                _steadyNeeds.Clear();
+                foreach (var (line, _, _, primary, _) in Lines)
+                {
+                    var (_, need) = BestLearned(me, line, primary);
+                    _steadyNeeds[line] = need;
+                }
+            }
+
             _cycle = null;
+            _suppressedFor = 0; // a fresh episode gets a fresh stay-out line
             pet.SetSummonHold(false);
             pet.RequestSummon();
             Release();
@@ -171,6 +202,35 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         if (_clock - _askedAt < AskRetrySec)
         {
             return false; // asked recently - give the last session's outcome time to show
+        }
+
+        // THE OUTCOME GATE (owner, 2026-10-08): compare the ACTUAL buff state against the outcome
+        // the last cycle precalculated. The steady gap equals itself forever (the floor step strips
+        // the summon stacks to make room for the floor set), so without this the want re-opened the
+        // pipeline every retry window and the bot stripped its own fresh buffs over and over.
+        // Re-enter only when an outcome buff is gone or worn to the rebuff fraction - or when a
+        // line needs MORE than its steady gap (UpgradeOpened): a better pet became learnable.
+        var upgrade = UpgradeOpened(me);
+        var outcomeAlive = _outcome.Count > 0 && PetFirstBuffCycle.OutcomeAlive(me, _outcome, RebuffFraction);
+        if (!upgrade && outcomeAlive)
+        {
+            if (_suppressedFor != want.Value.Pet.Id)
+            {
+                _suppressedFor = want.Value.Pet.Id;
+                _logger.LogInformation(
+                    $"EXTBUFF: '{want.Value.Pet.Name}' still needs +{want.Value.Need} nano skills, but the last " +
+                    $"cycle's outcome is standing ({PetFirstBuffCycle.OutcomeReport(me, _outcome)}) - staying out " +
+                    "until it wears to 25%.");
+            }
+
+            return false;
+        }
+
+        if (!upgrade && _outcome.Count > 0)
+        {
+            _logger.LogInformation(
+                $"EXTBUFF: the outcome has worn to the rebuff line ({PetFirstBuffCycle.OutcomeReport(me, _outcome)}) - " +
+                "re-entering the pipeline.");
         }
 
         // THE PET-FIRST CYCLE (owner, 2026-10-07): the pipeline runs as a GUIDED session - clear
@@ -218,6 +278,27 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         }
 
         return null;
+    }
+
+    /// <summary>
+    ///     True when any line's summon needs MORE skill lift than the steady gap the last cycle
+    ///     left behind (empty table: treat any want as an upgrade - nothing is recorded yet).
+    ///     That is a better pet having become learnable - levelled, new formula uploaded, a debuff
+    ///     wore off - and the upgrade must not wait out the outcome's 25% decay. Lines sitting at
+    ///     their steady gap keep quiet; that gap is the cycle's own design, not a problem to fix.
+    /// </summary>
+    private bool UpgradeOpened(LocalPlayer me)
+    {
+        foreach (var (line, _, _, primary, _) in Lines)
+        {
+            var (_, need) = BestLearned(me, line, primary);
+            if (need > _steadyNeeds.GetValueOrDefault(line, 0))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

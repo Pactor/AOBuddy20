@@ -74,6 +74,7 @@ public class AccountInfo
     public int MissionSliderCreditsXp = 0;
     public float MissionTerminalRadius = 5f; // a terminal within this of the bot is used without the saved one
     public List<string> MissionZones = new(); // zone names or ids a mission may sit in (empty = any)
+    public int WantUnseenRolls = 500; // want run: rolls near a nano's QL before it is judged no mission reward
 
     // Local control API (BotApi): /status /nav /inventory /log and POST /command on 127.0.0.1 only -
     // the monitor (tools/AOBuddyMonitor), the MCP (tools/aobuddy-mcp) and run-bot.ps1 talk to it. 0 = off.

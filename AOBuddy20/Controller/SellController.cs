@@ -106,6 +106,10 @@ public sealed class SellController
 
     public bool Active => _phase != Phase.Idle;
 
+    /// <summary>Items the predicate answers true for never sell, wherever they sit (the mission
+    /// run's want list keeps what it rolled for, AOBuddy10's Bankable). Null sells everything.</summary>
+    public Func<Item, bool> KeepFromSale;
+
     public SellController(ILogger<SellController> logger, MovementController movement,
         ControlArbiter controlArbiter, AccountInfo config)
     {
@@ -557,6 +561,11 @@ public sealed class SellController
         if (ItemValues.IsNoDrop(i.Id, i.HighId))
         {
             return false; // NODROP: never sellable, stays in the bag (owner, 2026-10-02)
+        }
+
+        if (KeepFromSale != null && KeepFromSale(i))
+        {
+            return false; // kept by another controller's rule (the want list): stays in the bag
         }
 
         if (_refusedSlots.Contains(i.Slot))
