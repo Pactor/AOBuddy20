@@ -89,6 +89,12 @@ public sealed class HealController
     private const double RestStallSeconds = 15.0;
     private const double RestCooldownSeconds = 6.0;
 
+    // The "nothing usable in the packs" drought lines at most this often. A once-per-drought flag did
+    // not survive the drought branch itself: it closes its own episode every tick (EndEpisode), the
+    // close reset the flag, and the line re-logged every tick (2026-10-08, owner: "spamming the logs").
+    // A real action - a rest, a stim, a cast - re-arms the line at once.
+    private const double ShortLogSeconds = 5.0;
+
     private enum Kind { Stim, Recharger }
 
     private readonly ILogger<HealController> _logger;
@@ -118,7 +124,7 @@ public sealed class HealController
     private bool _castConfirmed;
     private double _castRecharge; // stat 210 of the cast nano, seconds - armed on the land
 
-    private bool _loggedShort; // "nothing usable" once per drought, not once per tick
+    private double _loggedShortAt = double.NegativeInfinity; // the last "nothing usable" line (ShortLogSeconds gate)
 
     // The rest cycle's state (out of combat, recharger): we sat for it, when, and what the body
     // has gained since - the stall guard reads the peaks, not the tick-to-tick deltas.
@@ -364,9 +370,9 @@ public sealed class HealController
         if (BestUsable(Kind.Recharger, me) == null)
         {
             _rechargeDemanded = false;
-            if (!_loggedShort)
+            if (_clock - _loggedShortAt >= ShortLogSeconds)
             {
-                _loggedShort = true;
+                _loggedShortAt = _clock;
                 _logger.LogInformation(
                     "HEAL: heal/nano want out of combat, but no usable recharger in the packs - not sitting (release; resupply stocks them).");
             }
@@ -386,7 +392,7 @@ public sealed class HealController
         _restPeakHealth = -1;
         _restPeakNano = -1;
         _sitHopefulLogged = false;
-        _loggedShort = false;
+        _loggedShortAt = double.NegativeInfinity;
         _logger.LogInformation($"HEAL: sitting for a recharger ({reason}).");
         return _holding;
     }
@@ -407,9 +413,9 @@ public sealed class HealController
 
         if (stim == null && nano == null)
         {
-            if (!_loggedShort)
+            if (_clock - _loggedShortAt >= ShortLogSeconds)
             {
-                _loggedShort = true;
+                _loggedShortAt = _clock;
                 _logger.LogInformation(_clock < _stimLockedUntil
                     ? "HEAL: want a heal but the stim is locked and no castable heal nano - riding the lock out."
                     : "HEAL: want a heal but nothing usable in the packs - resupply stocks them.");
@@ -426,7 +432,7 @@ public sealed class HealController
             stim.Use();
             _cooldownLeft = UseCooldownSeconds; // the shared stim timer still gates the next recharger
             _stimLockedUntil = _clock + lockSeconds; // the First-Aid lock, from the item's own data
-            _loggedShort = false;
+            _loggedShortAt = double.NegativeInfinity;
             _logger.LogInformation($"HEAL: used {stim.Name} QL {stim.Ql} ({reason}; heals {stimHealNow}); " +
                                    $"{Carry(Kind.Stim, me) - 1} left, First Aid locked {lockSeconds:0}s.");
             _controlArbiter.ReleaseControl();
@@ -442,7 +448,7 @@ public sealed class HealController
         _castSentAt = _clock;
         _castConfirmed = false;
         _castRecharge = nano.Stat(210) / 100.0; // hundredths of seconds, per the server's own ×10 ms
-        _loggedShort = false;
+        _loggedShortAt = double.NegativeInfinity;
         _logger.LogInformation($"HEAL: casting {NanoLibrary.NameOf(nano.NanoId)} ({reason}; heals {nanoHeal}, " +
                                $"cost {nanoCost}, recharge {_castRecharge:0.#}s) - holding until it lands.");
         return true;
@@ -583,7 +589,9 @@ public sealed class HealController
         }
 
         DropRest();
-        _loggedShort = false;
+        // No _loggedShortAt reset here: the drought branch closes its own episode every tick, and a
+        // reset with the close re-armed the drought line per tick. ShortLogSeconds gates the cadence;
+        // a real action (rest, stim, cast) re-arms it at once.
     }
 
     // One rest tick: the sit is out, the echo may or may not have landed, the item may or may not
@@ -648,9 +656,9 @@ public sealed class HealController
         var it = BestUsable(Kind.Recharger, me);
         if (it == null)
         {
-            if (!_loggedShort)
+            if (_clock - _loggedShortAt >= ShortLogSeconds)
             {
-                _loggedShort = true;
+                _loggedShortAt = _clock;
                 _logger.LogInformation("HEAL: seated for a recharger but none usable in the packs - resupply stocks them.");
             }
 
@@ -671,7 +679,7 @@ public sealed class HealController
         _resting = false;
         ReleaseHold($"rest over - {why}");
         _restCooldownLeft = RestCooldownSeconds;
-        _loggedShort = false;
+        _loggedShortAt = double.NegativeInfinity;
         _movement.Stand("rest over: " + why);
     }
 
@@ -688,7 +696,7 @@ public sealed class HealController
         _rechargeDemanded = false; // dead/zoned: the demand loses its context with the rest
         ReleaseHold("rest dropped");
         _restCooldownLeft = RestCooldownSeconds;
-        _loggedShort = false;
+        _loggedShortAt = double.NegativeInfinity;
     }
 
     // The arbiter is ours (a rest, or a cast in flight): let it go. Writes None unconditionally -
