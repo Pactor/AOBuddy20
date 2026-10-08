@@ -106,13 +106,14 @@ public class PetFirstBuffCycle
     private double _t;
 
     public PetFirstBuffCycle(PetBrain pet, BuffCatalog catalog, ILogger logger, IReadOnlyList<LineSpec> lines,
-        HealController heal)
+        HealController heal, bool floorOnly = false)
     {
         _pet = pet;
         _catalog = catalog;
         _logger = logger;
         _lines = lines.ToList();
         _heal = heal;
+        FloorOnly = floorOnly;
         _steps = BuildSteps();
         _logger.LogInformation(
             $"PETCYCLE: open - {_steps.Count} steps: {string.Join(" -> ", _steps.Select(s => s.Describe))}.");
@@ -126,6 +127,14 @@ public class PetFirstBuffCycle
     }
 
     /// <summary>
+    ///     FLOOR-ONLY SHAPE (owner, 2026-10-08): the roster is already up and only the obedience
+    ///     floor + the comfort fill are missing - no pet swaps, no line stacks. Set before
+    ///     <see cref="BuildSteps" /> runs (the ctor); the caller seeds the floor snapshots from
+    ///     the formulas the lines wear (RecordSnapshot + the pet brain's LastSummonNanoFor).
+    /// </summary>
+    protected bool FloorOnly;
+
+    /// <summary>
     ///     THE PIPELINE. Subclasses (Engineer / Bureaucrat cycles) extend here: insert or
     ///     append steps around these; the contract is only <see cref="IStep" />. No whole-roster
     ///     clear: each line terminates its OWN old pet right before the new summon (the swap), so
@@ -134,6 +143,14 @@ public class PetFirstBuffCycle
     protected virtual List<IStep> BuildSteps()
     {
         var ncu = new NcuStep(this);
+
+        if (FloorOnly)
+        {
+            // No ClearBuffsStep: the FloorStep itself clears everything but the NCU buff, and no
+            // line steps - the pets stay out through the whole session.
+            return new List<IStep> { ncu, new FloorStep(this, ncu) };
+        }
+
         var steps = new List<IStep> { new ClearBuffsStep(this), ncu, };
         foreach (var l in _lines)
         {

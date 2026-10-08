@@ -82,6 +82,8 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
     private double _sinceDecide;
     private double _askedAt = -1e9;
     private int _opportunityLoggedFor; // the want id we last logged a buff opportunity for
+    private int _unreachableFor; // the want id we last logged a beyond-the-ceiling stay-out for
+    private int _lockWaitFor; // the want id we last logged a nanoline-lock wait for
     private bool _sessionSeen;         // a buff session ran last tick - its end releases the hold
     private bool _claimed;             // the arbiter is ours at ControlPriority.ExternalBuffing
 
@@ -178,7 +180,7 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         var want = FindWant(me);
         if (want == null)
         {
-            return false;
+            return MaybeQoLFill(me, pet);
         }
 
         if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName))
@@ -233,6 +235,25 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
                 "re-entering the pipeline.");
         }
 
+        // THE LINE LOCKS (owner, 2026-10-08): a pet cast just before the pipeline - the pet brain's
+        // own cadence, or one inherited across a relog - locks its nano line for 120 s (the wire's
+        // own LockDuration, seeded by every FullCharacter and taught by our own casts), and the
+        // cycle's peak re-summon of that line was refused mid-dance. Open only with all three pet
+        // lines free; the decide tick re-checks every second. The QoL fill is NOT held by this: it
+        // casts no pets, and it is exactly what should run while a lock runs out.
+        var lockLeft = Lines.Max(l => me.PetLineLockLeft(l.Strain));
+        if (lockLeft > 0)
+        {
+            if (_lockWaitFor != want.Value.Pet.Id)
+            {
+                _lockWaitFor = want.Value.Pet.Id;
+                _logger.LogInformation(
+                    $"EXTBUFF: a pet nanoline is still locked ({lockLeft:0}s of the 120s left) - holding the pipeline until it clears.");
+            }
+
+            return false;
+        }
+
         // THE PET-FIRST CYCLE (owner, 2026-10-07): the pipeline runs as a GUIDED session - clear
         // roster, strip buffs, NCU buff (and remember the NCU), then per line: the best
         // primary+TS stack as ONE multi-code tell, wait ALL landed, cast the line's pet, next
@@ -256,28 +277,150 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
         return Claim();
     }
 
+    /// <summary>
+    ///     THE QoL FILL (owner, 2026-10-08): once the ROSTER is up - however it came up, the full
+    ///     cycle or the pet brain's own cadence (a fresh login, a re-summon after a pet death) -
+    ///     the obedience floor and then the comfort fill (musts, then nice-to-haves) must be
+    ///     asked for. The full cycle leaves them behind as its outcome; with no tier want there
+    ///     was nothing to open a session, and the bot stood there with three pets and zero QoL
+    ///     buffs (10:42, 2026-10-08). Same gates as a want (config, team, retry) and the SAME
+    ///     outcome ledger: while the set stands the fill stays quiet, and it re-enters when it
+    ///     wears to the rebuff line. The pets stay out through it - no swaps.
+    /// </summary>
+    private bool MaybeQoLFill(LocalPlayer me, PetBrain pet)
+    {
+        if (!_config.PetAutoBuff || string.IsNullOrWhiteSpace(_config.BuffBotName) || Team.IsInTeam)
+        {
+            return false; // the same handshakes a want needs: the bot configured, and us un-teamed
+        }
+
+        if (_clock - _askedAt < AskRetrySec)
+        {
+            return false; // asked recently - give the last session's outcome time to show
+        }
+
+        if (!Lines.All(l => me.Pets.Any(p => p.Role == l.Role)))
+        {
+            return false; // the roster is still filling - the pet brain owns the body until it is up
+        }
+
+        if (PetFirstBuffCycle.OutcomeAlive(me, _outcome, RebuffFraction))
+        {
+            return false; // the floor + comfort set is standing - quiet until it wears
+        }
+
+        var fill = new PetFirstBuffCycle(pet, _catalog, _logger, _lineSpecs, _heal, floorOnly: true);
+        foreach (var (_, role, _, _, _) in Lines)
+        {
+            if (pet.LastSummonNanoFor(role) is int formula)
+            {
+                fill.RecordSnapshot(role, formula, me); // the floor math keys on the formulas worn
+            }
+        }
+
+        if (!_buffBot.RequestGuidedBuffs("floor + QoL fill (roster up)", fill.NextTurn, CycleCapSec))
+        {
+            return false; // cannot start (active/teamed) - the next decide tick tries again
+        }
+
+        _cycle = fill;
+        _askedAt = _clock;
+        pet.SetSummonHold(true); // no pet-brain summons mid-fill: the step clears every buff first
+        _logger.LogInformation("EXTBUFF: roster up, the floor/QoL set is missing - opening the floor + comfort fill (no pet swaps).");
+        return Claim();
+    }
+
     // ---- The want ---------------------------------------------------------------------------
 
     /// <summary>
     ///     The first line (pet-brain fill order: attack, heal, mezz) whose best learned summon is
-    ///     blocked by its skill pair alone. Lines with their pet up are NOT skipped any more: the
-    ///     old "already have the pet" check made an up-but-inferior pet a done answer - now it is
-    ///     the roster the swap replaces (terminated before the ask, re-summoned at the peak).
+    ///     blocked by its skill pair alone - and only when asking can CHANGE something:
+    ///       - the wanted tier must be BETTER than the tier the line already wears (the last
+    ///         summon's formula): an up-but-inferior pet is the roster the swap replaces, an equal
+    ///         one is the designed steady state - the 0.8 floor leaves exactly that residual gap on
+    ///         purpose, and chasing it re-opened the pipeline a minute after the very pets cast
+    ///         (owner, 2026-10-08 10:27: all three pets up at 10:26, then 'Calling of Restite
+    ///         needs +92' tore them down again; after a restart the outcome ledger is empty, so
+    ///         nothing else vetoed it);
+    ///       - and the line's best affordable stack must REACH the wanted tier: current skills
+    ///         plus the lift of the not-yet-running plan entries, on BOTH stats of the pair. A
+    ///         tier beyond the buff bot's ceiling is not ours to summon however learnable it is.
     ///     The scan's math is stat-based, so without a skill gap it stays quiet and a maxed
     ///     roster is never disturbed.
     /// </summary>
     private (NanoItem Pet, int Need, string Label)? FindWant(LocalPlayer me)
     {
-        foreach (var (line, _, _, primary, label) in Lines)
+        foreach (var (line, role, _, primary, label) in Lines)
         {
             var (pet, need) = BestLearned(me, line, primary);
-            if (pet != null && need > 0)
+            if (pet == null || need <= 0)
             {
-                return (pet, need, label);
+                continue;
             }
+
+            // ALREADY OUT, EQUAL OR BETTER: the pet the line wears was cast at skills that met
+            // this very formula - a want at or below it is the floor's own steady gap.
+            if (me.Pets.Any(p => p.Role == role)
+                && _bank.Pet.LastSummonNanoFor(role) is int lastId
+                && ItemData.Find(lastId, out NanoItem worn) && pet.Ql <= worn.Ql)
+            {
+                continue;
+            }
+
+            var (reaches, liftPrimary, liftTs) = StackReaches(me, primary, pet);
+            if (!reaches)
+            {
+                if (_unreachableFor != pet.Id)
+                {
+                    _unreachableFor = pet.Id;
+                    _logger.LogInformation(
+                        $"EXTBUFF: '{pet.Name}' (ql {pet.Ql}) needs +{need} nano skills - beyond even the fresh " +
+                        $"stack (+{liftPrimary} {primary}/+{liftTs} TS on top of current); not asking. A level or " +
+                        "a new formula has to close in first.");
+                }
+
+                continue;
+            }
+
+            return (pet, need, label);
         }
 
         return null;
+    }
+
+    /// <summary>
+    ///     Can the line's best affordable stack close the wanted formula's gap? Current stats
+    ///     already carry every running buff, so only the plan entries NOT running lift further
+    ///     (PlanPetLine is the same planner the cycle asks with, so the ceiling here is the
+    ///     ceiling the cycle could actually buy).
+    /// </summary>
+    private (bool Reaches, int LiftPrimary, int LiftTs) StackReaches(LocalPlayer me, Stat primary, NanoItem pet)
+    {
+        if (!_catalog.Loaded)
+        {
+            return (true, 0, 0); // no catalog to reason with - keep the old trigger
+        }
+
+        var budget = BuffCatalog.FreeNcu(me, me.TryGetStat(Stat.MaxNCU, out var maxNcu) ? maxNcu : 0);
+        var plan = _catalog.PlanPetLine(me, (int)primary, (int)Stat.SpaceTime, budget, PetFirstBuffCycle.IsSlOrLe(me));
+        var liftPrimary = 0;
+        var liftTs = 0;
+        foreach (var e in plan)
+        {
+            if (me.Buffs != null && e.LandIds.Count > 0 && me.Buffs.Any(r => e.LandIds.Contains(r.Id)))
+            {
+                continue; // already running: its lift is inside the current stats
+            }
+
+            liftPrimary += BuffCatalog.GainFor(e, (int)primary);
+            liftTs += BuffCatalog.GainFor(e, (int)Stat.SpaceTime);
+        }
+
+        var curPrimary = me.TryGetStat(primary, out var p) ? p : 0;
+        var curTs = me.TryGetStat(Stat.SpaceTime, out var t) ? t : 0;
+        var reaches = SkillReq(pet, primary) - curPrimary <= liftPrimary &&
+                      SkillReq(pet, Stat.SpaceTime) - curTs <= liftTs;
+        return (reaches, liftPrimary, liftTs);
     }
 
     /// <summary>

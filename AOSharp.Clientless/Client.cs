@@ -447,6 +447,12 @@ public static class Client
 
             DynelManager.LocalPlayerProxy.ApplyFullCharUpdate(fullCharMsg);
 
+            // THE NANO LINE LOCKS (capture 20261008-110200): the FullCharacter's nano entries
+            // (Unknown8) carry them - identity (1:nanoline), duration and remaining in seconds;
+            // after an attack pet cast the relog showed {1:1015, 120, 42}. Seed the tracker: the
+            // lock survives a relog server-side, and a fresh process's own-cast knowledge is empty.
+            DynelManager.LocalPlayer?.ApplyNanoLineLocks(fullCharMsg.SkillLocks);
+
             // AUTHORITATIVE pet ownership: our own FullCharacter lists our pets (decoded by the corrected
             // fallback reader when a pet is up). Mark those NPCs as owned so me.Pets is reliable regardless
             // of the flaky per-update pet-master bit. Match on INSTANCE — the FullCharacter pet-list

@@ -128,7 +128,7 @@ public class FullCharacterMessage : N3Message
     [AoMember(8)] public int Unknown7 { get; set; }
 
     [AoMember(9, SerializeSize = ArraySizeType.Int32)]
-    public UnknownDataType2[] Unknown8 { get; set; }
+    public UnknownDataType2[] SkillLocks { get; set; }
 
     [AoMember(10, SerializeSize = ArraySizeType.X3F1)]
     public GameTuple<int, int>[] Stats1 { get; set; }

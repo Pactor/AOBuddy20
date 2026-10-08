@@ -154,10 +154,13 @@ public class LocalPlayer : PlayerChar
         });
 
         // If this cast summons a pet, open the ownership-claim window (see ExpectingPetUntilMs). The pet
-        // appears a few seconds later (after the cast), so allow a generous window.
-        if (IsPetSummonNano(nanoId))
+        // appears a few seconds later (after the cast), so allow a generous window. And the cast locks
+        // its NANO LINE for 120 s (the wire's LockDuration - see _petLineLockedUntil): no echo arrives
+        // mid-session, so the send itself teaches the tracker.
+        if (IsPetSummonNano(nanoId) && ItemData.Find(nanoId, out NanoItem cast) && cast != null)
         {
             ExpectingPetUntilMs = Environment.TickCount64 + 12000;
+            _petLineLockedUntil[cast.NanoLine] = Environment.TickCount64 + 120_000;
         }
     }
 
@@ -187,6 +190,39 @@ public class LocalPlayer : PlayerChar
         }
 
         return ni.NanoLine == NanoLine.AttackPets || ni.NanoLine == NanoLine.HealPets || ni.NanoLine == NanoLine.SupportPets;
+    }
+
+    // A landed pet-summon cast locks its NANO LINE for 120 s - the wire's own LockDuration (capture
+    // 20261008-110200: after an attack pet cast, the next login's FullCharacter carried the entry
+    // {1:1015 AttackPets, 120 s, 42 s left}; after a heal pet cast {1:1016 HealPets, 120, 86}). No
+    // wire echo arrives mid-session, so OUR casts teach the tracker locally (CastNano below), and
+    // every FullCharacter - the login and each zone - re-seeds it from the packet (the lock survives
+    // a relog server-side; a fresh process starts empty and would otherwise walk straight into it).
+    private readonly Dictionary<NanoLine, long> _petLineLockedUntil = new();
+
+    /// <summary>Seconds until the pet nanoline's lock clears; 0 when it is free.</summary>
+    public double PetLineLockLeft(NanoLine line)
+    {
+        return _petLineLockedUntil.TryGetValue(line, out var until)
+            ? Math.Max(0, (until - Environment.TickCount64) / 1000.0)
+            : 0;
+    }
+
+    /// <summary>
+    ///     The FullCharacter's NANO ENTRIES (the message's Unknown8) are the nano line locks: an
+    ///     identity (1:nanoline) plus duration and remaining, both in seconds. Seed the tracker -
+    ///     this is the wire's own view of what is still locked, on our own character only.
+    /// </summary>
+    internal void ApplyNanoLineLocks(FullCharacterMessage.UnknownDataType2[]? entries)
+    {
+        foreach (var e in entries ?? Array.Empty<FullCharacterMessage.UnknownDataType2>())
+        {
+            if (e?.Unknown2 != null && (int)e.Unknown2.Type == 1 && e.Unknown2.Instance > 0 && e.Unknown4 > 0)
+            {
+                _petLineLockedUntil[(NanoLine)e.Unknown2.Instance] =
+                    Environment.TickCount64 + e.Unknown4 * 1000L;
+            }
+        }
     }
 
     // A nano was uploaded/learned mid-session (server SpellList message). The FullCharacter only refreshes
