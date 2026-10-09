@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: MissionController.cs
 //
-// Last modified: 2026-10-08
+// Last modified: 2026-10-09
 // Created:       2026-09-30 00:09
 //
 // Long live OmniCell and AOBuddy
@@ -17,6 +17,7 @@ using AOBuddy20.Enums;
 using AOBuddy20.Interfaces;
 using AOBuddy20.Nav;
 using AOBuddy20.Network;
+using AOBuddy20.PacketConsumers;
 using AOBuddy20.Storage;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
@@ -77,6 +78,20 @@ namespace AOBuddy20.Controlling;
 ///     Every roll's rewards are counted in offered-&lt;character&gt;.json, so a wanted nano never
 ///     offered near its QL is dropped from the list as not a mission reward. Wanted items (and
 ///     nano crystals) never sell - the sell step keeps them (AOBuddy10's Bankable).
+///
+///     CLEAR MODE (AOBuddy10, owner 2026-09-25, ported 2026-10-09): 'mission run clear on' - kill
+///     every mob in the building BEFORE the objective (the XP, and for Omni and Clan a side token
+///     with the reward). The walk is this controller's: fight what is on us, close on the nearest
+///     pull (one at a time), walk every room on the floor (rooms count on arrival, the person's
+///     rooms last), ride buttons to floors with rooms left - and keep walking until the server's
+///     share of dead mobs passes 90% (owner, 2026-10-09: the last run finished after 2-3 kills of
+///     many). The swing is the combat brains': while <see cref="Clearing" /> holds,
+///     <see cref="SuppressCombat" /> answers false and the brain engages what the run walks to
+///     (attackers, then the pull pick); a pet class fights through its attack pet. The server
+///     counts the clear for us - FormatFeedback 110/79979934, one float, the share of the
+///     building's mobs dead (AOBuddy10 capture 20260925-110325) - and the run keeps its own count
+///     of mobs seen/dead for sessions it never sends the line to. The person a find-person
+///     mission sent us to is never an enemy - abstain from him even if he attacks while clearing.
 /// </summary>
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class MissionController : IPacketConsumer
@@ -139,6 +154,7 @@ public sealed class MissionController : IPacketConsumer
     private readonly SellController _sell;
     private readonly LootBagStore _lootBags;
     private readonly AccountInfo _config;
+    private readonly Awareness _awareness; // the monster picture the clear mode fights by
 
     private Phase _phase = Phase.Idle;
     private double _phaseTime;
@@ -253,13 +269,16 @@ public sealed class MissionController : IPacketConsumer
 
     public bool Active => _phase != Phase.Idle;
 
-    /// <summary>Inside a mission building (blitzing, stashing or leaving): no combat. BotLoop skips
-    /// the combat brains while this holds; the heal (stims) keeps working.</summary>
-    public bool SuppressCombat => _phase is Phase.Blitz or Phase.RewardBag or Phase.Leaving;
+    /// <summary>Inside a mission building: no combat - EXCEPT while clearing, where every fight
+    /// is the job (the brains swing, the heal keeps preempting both). BotLoop skips the combat
+    /// brains while this holds; the heal (stims, and the recharger rest between rooms) keeps
+    /// working either way.</summary>
+    public bool SuppressCombat =>
+        _phase is Phase.RewardBag or Phase.Leaving || (_phase == Phase.Blitz && !Clearing);
 
     public MissionController(ILogger<MissionController> logger, MovementController movement,
         ControlArbiter controlArbiter, ResupplyController resupply, SellController sell,
-        LootBagStore lootBags, AccountInfo config)
+        LootBagStore lootBags, AccountInfo config, Awareness awareness)
     {
         _logger = logger;
         _movement = movement;
@@ -268,6 +287,7 @@ public sealed class MissionController : IPacketConsumer
         _sell = sell;
         _lootBags = lootBags;
         _config = config;
+        _awareness = awareness;
         // Wanted items never sell: the reward lands in a loot bag and the sell step empties the
         // bags - without this the run would sell back what it just rolled for (AOBuddy10 kept
         // wanted items and nano crystals out of the sale with its Bankable rule).
@@ -304,6 +324,22 @@ public sealed class MissionController : IPacketConsumer
         switch (sub)
         {
             case "run":
+                // 'mission run clear on|off' (AOBuddy10's flag): toggles clear mode and says so -
+                // the run itself is a bare 'mission run', which keeps the mode on.
+                if (parts.Length > 2 && parts[2].Equals("clear", StringComparison.OrdinalIgnoreCase))
+                {
+                    var v = parts.Length > 3 ? parts[3].ToLowerInvariant() : "";
+                    if (v == "on" || v == "off")
+                    {
+                        ClearOn = v == "on";
+                    }
+
+                    reply("Clear mode: " + (ClearOn ? "ON" : "off") +
+                          (Active && ClearPct >= 0 ? $" ({ClearText} of this building)" : "") +
+                          " - every mob in the building dies before the objective. 'mission run clear on|off'.");
+                    break;
+                }
+
                 // A bare 'mission run' is the ordinary loop again: the want run switches off and
                 // the difficulty goes back to the owner's setting (AOBuddy10's 'mission run').
                 _wantRun = false;
@@ -425,7 +461,7 @@ public sealed class MissionController : IPacketConsumer
                 break;
             }
             default:
-                reply("Usage: mission run | stop | clear | skip | status | probe x z | roll | list | accept n | buybags n | " +
+                reply("Usage: mission run [clear on|off] | stop | clear | skip | status | probe x z | roll | list | accept n | buybags n | " +
                       "want [add <name or query> | remove n | list | mode always|list | status | lines [part] | " +
                       "drop|undrop <nano name> | clear got]");
                 break;
@@ -443,7 +479,7 @@ public sealed class MissionController : IPacketConsumer
             Phase.Idle => "idle. " + mission + ". Terminal: " + (_savedTerminal != null
                 ? $"pf {_savedTerminal.pf} ({_savedTerminal.x:0},{_savedTerminal.z:0})"
                 : "none saved"),
-            Phase.Blitz => "blitz" + RecordText() + ": " + _goalWhat,
+            Phase.Blitz => "blitz" + (ClearOn ? $" [clear: {ClearText}]" : "") + RecordText() + ": " + _goalWhat,
             Phase.WaitingSell => "bags full - waiting on the sell run, then back to the terminal.",
             _ => $"{_phase}: {_goalWhat}; {mission}",
         };
@@ -804,8 +840,30 @@ public sealed class MissionController : IPacketConsumer
         _record = null;
         _items.Clear();
         _searchedRooms.Clear();
+        ResetClearing();
         _presses = 0;
         _fullBags.Clear();
+    }
+
+    // The clear book of ONE building: rooms walked, mobs seen/dead and their rooms, the person's
+    // room, the pull pick and its refusals, the server's %. The mode (ClearOn) is NOT reset - it
+    // is the run's setting, not the building's.
+    private void ResetClearing()
+    {
+        ClearPct = -1;
+        _clearVisited.Clear();
+        _mobRoom.Clear();
+        _mobsSeen.Clear();
+        _mobsDead.Clear();
+        _clearGaveUp = false;
+        _clearPasses = 0;
+        _clearScanAt = -1;
+        _personRoomName = null;
+        _personFloor = int.MinValue;
+        _personId = Identity.None;
+        _pullId = Identity.None;
+        PullPick = null;
+        _pullAside.Clear();
     }
 
     // ---- Wire -----------------------------------------------------------------
@@ -819,6 +877,7 @@ public sealed class MissionController : IPacketConsumer
         router.Register(SimpleItemHandler, N3MessageType.SimpleItemFullUpdate, 0);
         router.Register(ZoneInHandler, N3MessageType.PlayfieldAnarchyF, 0); // raw bytes: the building layout
         router.Register(DoorFullUpdateHandler, N3MessageType.DoorFullUpdate, 0); // server doors: exact
+        router.Register(ClearPctHandler, N3MessageType.FormatFeedback, 0); // the clear %'s own line
     }
 
     // The zone-in's raw bytes: NavData composes the mission building's rooms out of the
@@ -1018,6 +1077,61 @@ public sealed class MissionController : IPacketConsumer
         return template >= ButtonLowest && template <= ButtonHighest;
     }
 
+    // The server's share of the building's mobs dead (CLEAR MODE): category 110, message
+    // 79979934, one float - after each kill, 38.5, 46.2 ... 100 in steps of 1/13 in AOBuddy10's
+    // capture 20260925-110325; at 100 the token came with the reward. The find-person target is
+    // not counted. `Message` carries the raw '~&' ext string: category and message id as 5
+    // base-85 chars each, then 'f' and the float as 5 base-85 chars (ExtMessageFormatter parses
+    // the same string, so the offsets are its wire shape).
+    private const int ClearCategory = 110;
+    private const int ClearMessage = 79979934;
+
+    private bool ClearPctHandler(AOMessage arg)
+    {
+        if (arg.Body is FormatFeedbackMessage ff && TryClearPct(ff.Message, out var pct))
+        {
+            ClearPct = pct;
+            _logger.LogInformation($"MISSION: cleared {pct:0.#}% of this mission's mobs.");
+        }
+
+        return false;
+    }
+
+    /// <summary>'~&amp;' + category and message id (5 base-85 chars each) + 'f' + a base-85 float.</summary>
+    private static bool TryClearPct(string s, out float pct)
+    {
+        pct = 0;
+        if (s == null || s.Length < 18 || s[0] != '~' || s[1] != '&')
+        {
+            return false;
+        }
+
+        if (B85(s, 2) != ClearCategory || B85(s, 7) != ClearMessage || s[12] != 'f')
+        {
+            return false;
+        }
+
+        pct = BitConverter.ToSingle(BitConverter.GetBytes((int)(uint)B85(s, 13)), 0);
+        return pct >= 0 && pct <= 100.01f;
+    }
+
+    private static long B85(string s, int p)
+    {
+        long v = 0;
+        for (var i = 0; i < 5; i++)
+        {
+            var c = s[p + i] - 33;
+            if (c < 0 || c > 84)
+            {
+                return -1;
+            }
+
+            v = v * 85 + c;
+        }
+
+        return v;
+    }
+
     // ---- Frame ----------------------------------------------------------------
 
     /// <summary>
@@ -1187,6 +1301,7 @@ public sealed class MissionController : IPacketConsumer
             _searchedRooms.Clear();
             _checkedDoors.Clear();
             _lastSearchRoom = -1;
+            ResetClearing(); // a new building: the clear book starts over (the mode stays on)
             _presses = 0;
             _completed = false;
             _acts = 0;
@@ -1733,7 +1848,9 @@ public sealed class MissionController : IPacketConsumer
             return;
         }
 
-        if (_phaseTime > BlitzTimeout)
+        // A clearing building gets three times the clock: every room is walked and fought before
+        // the objective (AOBuddy10 MissionRun's clear-mode timeout).
+        if (_phaseTime > (ClearOn ? 3 * BlitzTimeout : BlitzTimeout))
         {
             DropMission("it was taking too long");
             return;
@@ -1758,6 +1875,15 @@ public sealed class MissionController : IPacketConsumer
                 DropMission("no quest record for this building");
             }
 
+            return;
+        }
+
+        // CLEAR MODE: the objective waits until the building is cleared - or clearing gives up
+        // (two passes over every reachable room). The tick below walks and fights; the swing is
+        // the combat brains' (SuppressCombat answers false while Clearing holds).
+        if (Clearing)
+        {
+            ClearTick(me);
             return;
         }
 
@@ -2041,6 +2167,523 @@ public sealed class MissionController : IPacketConsumer
         _presses++;
         _logger.LogInformation($"MISSION: pressed button {_items[button].Template} at " +
                                $"({_items[button].Pos.X:0.0} {_items[button].Pos.Z:0.0}) (press {_presses}/{MaxPresses}).");
+    }
+
+    // ---- CLEAR MODE (AOBuddy10, owner 2026-09-25) -----------------------------------
+    // Kill every mob in the building before the objective: the XP, and for Omni and Clan a side
+    // token with the reward. The split is AOBuddy10's (MissionRun fought, MissionController
+    // planned): THIS controller walks and books - fight what is on us (never the person we came
+    // to find, even when he swings at us), close on the nearest pull one at a time, walk every
+    // room (rooms count on ARRIVAL, never on setting out), ride buttons to floors with rooms
+    // left, then walk the building again until the server's share of dead mobs passes THE OWNER'S
+    // 90% LINE - only then the objective (a session without that line falls back to the own
+    // count). The COMBAT BRAIN swings: it reads PullPick and the Awareness books and engages what
+    // we walk to, in reach. The server counts the clear for us (the 110/79979934 float above);
+    // the seen/dead sets below are the fallback.
+
+    /// <summary>The mode toggle: 'mission run clear on|off' (a session toggle, like follow/stay).</summary>
+    public bool ClearOn;
+
+    /// <summary>The server's share of the building's mobs dead, or -1 (no line seen this building).</summary>
+    public float ClearPct { get; private set; } = -1;
+
+    /// <summary>Clearing is on and still owed: the Blitz tick fights and walks rooms instead of
+    /// searching for the objective. It holds until the server's share of dead mobs passes
+    /// <see cref="ClearDonePct" /> - THE OWNER'S LINE (2026-10-09): the objective waits for 90% at
+    /// least, however long the walk takes (the 3x blitz timeout is the backstop).</summary>
+    public bool Clearing => ClearOn && _nav != null && _record != null && !_completed &&
+                            !_clearGaveUp && _phase == Phase.Blitz && ClearPct < ClearDonePct;
+
+    /// <summary>The share of dead mobs the objective waits for (owner, 2026-10-09: the last run
+    /// finished after 2-3 kills of many - never again below this line).</summary>
+    private const float ClearDonePct = 90f;
+
+    /// <summary>The mob the walk is closing on - the combat brain engages it once in reach.</summary>
+    public NpcChar PullPick;
+
+    /// <summary>The person a find-person mission sent us to, once sighted: never an enemy. The
+    /// moment he is selected the server shows him 'fighting' us though he never lands a blow, and
+    /// the swing at him ran 12 and 70+ minutes in AOBuddy10 (Kirby Schatz, Levi McDannold) - and
+    /// the owner: abstain from him even if he attacks while clearing.</summary>
+    public Identity ClearFoeForbidden => _personId;
+
+    // A room counts as walked by standing in it (ClearScan, every 0.5 s - passing through is
+    // enough, not only reaching its centre) or when its hop ends without one (the walk timed out
+    // or was given up: the room is not gettable from here). NEVER on setting out - the first run
+    // skimmed whole floors that way and handed over to the objective after 2-3 kills. Keyed
+    // (floor, room index) like _searchedRooms.
+    private readonly HashSet<(int floor, int idx)> _clearVisited = new();
+
+    // Where each live mob was last seen (second pass: only those rooms get walked again - the
+    // owner: 'he often visits already cleared rooms, as if there still was a mob').
+    private readonly Dictionary<Identity, (int floor, int idx)> _mobRoom = new();
+
+    // Our own count: every mob seen alive in the building, and every one of them seen dead
+    // (Health 0 - the server shows it on the death and the corpse). The find-person target is
+    // neither.
+    private readonly HashSet<Identity> _mobsSeen = new();
+    private readonly HashSet<Identity> _mobsDead = new();
+
+    private bool _clearGaveUp;
+    private int _clearPasses;
+    private double _clearScanAt = -1;
+    private string _personRoomName;
+    private int _personFloor = int.MinValue;
+    private Identity _personId; // Identity.None until the person is sighted
+    private Identity _pullId; // the pull pick's identity, kept while it lives
+    private (int floor, int idx)? _currentClearRoom; // the room hop in flight - marked walked when it ends
+    private readonly Dictionary<Identity, double> _pullAside = new(); // mob -> phase time it may be pulled again
+
+    // AOBuddy10's PullTarget ranges: 20 m in sight (the mob in the next room is seen from its
+    // doorway - 'you know the mob is in that room, kill it first'), 3 m of floor band, the walk
+    // stands 4 m out - inside the brain's 6 m engage gate. A fight that reaches beyond the swing
+    // (a shooter standing off) is walked up to 3 m out, still inside the 8 m fight gate.
+    private const float PullSightMetres = 20f;
+    private const float PullYBand = 3f;
+    private const float PullReach = 4f;
+    private const float FightWalkReach = 3f;
+    private const float PullAsideSeconds = 60f;
+
+    private void ClearTick(LocalPlayer me)
+    {
+        var pos = me.Transform.Position;
+        ClearScan(me, pos);
+
+        // FIGHT ON (AOBuddy10's 'clear mode: every fight is the job'): the body swinging, or a
+        // real foe on us or our pets. The person we came to find is NOT one - he shows as
+        // 'fighting' the bot the moment he is selected, and the owner: abstain from him even if
+        // he attacks while clearing. In reach we stand and fight; beyond it we close.
+        if (me.IsAttacking || RealFoeOnUs)
+        {
+            _currentClearRoom = null; // a fight replaces whatever hop was walking
+            FightTick(me, pos);
+            return;
+        }
+
+        // A walk the movement gave up from under us (no way through): a pull sits out a minute,
+        // a room counts as walked (it is not gettable from here) - the next pick must not be the
+        // same one every tick.
+        if (_goalSet && !_movement.HasGoal(ControlPriority.Mission))
+        {
+            if (_pullId != Identity.None && _goalWhat.StartsWith("clear: the pull", StringComparison.Ordinal))
+            {
+                _pullAside[_pullId] = _phaseTime + PullAsideSeconds;
+                _logger.LogInformation("MISSION: clearing: no walk to the pull right now - it sits out a minute.");
+                _pullId = Identity.None;
+                PullPick = null;
+            }
+            else if (_currentClearRoom.HasValue)
+            {
+                _clearVisited.Add(_currentClearRoom.Value);
+                _logger.LogInformation("MISSION: clearing: no walk to the room right now - it counts as walked.");
+                _currentClearRoom = null;
+            }
+
+            _goalSet = false;
+        }
+
+        // Hurt: no new pulls - the heal rest runs first (AOBuddy10 pulled only at 70%+; the one
+        // time it pulled on after a fight it dragged five mobs and fled at 29%).
+        var hp = HpPct(me);
+        if (hp >= 0 && hp < 70)
+        {
+            return;
+        }
+
+        // A hop in flight owns the walk until it lands or times out (the search's gate): reached
+        // falls through to the next move; the timeout ends the hop - a pull that never got walked
+        // to sits out two minutes, the room in flight counts as walked.
+        if (_goalSet && _movement.HasGoal(ControlPriority.Mission) &&
+            !_movement.IsGoalReached(ControlPriority.Mission))
+        {
+            if (_phaseTime - _goalAt < SearchHopTimeout)
+            {
+                return;
+            }
+
+            if (_pullId != Identity.None && _goalWhat.StartsWith("clear: the pull", StringComparison.Ordinal))
+            {
+                _pullAside[_pullId] = _phaseTime + 2 * PullAsideSeconds;
+                _logger.LogInformation("MISSION: clearing: the pull never arrived in time - it sits out two minutes.");
+                _pullId = Identity.None;
+                PullPick = null;
+            }
+            else if (_currentClearRoom.HasValue)
+            {
+                _clearVisited.Add(_currentClearRoom.Value);
+                _logger.LogInformation("MISSION: clearing: the room never arrived in time - it counts as walked.");
+                _currentClearRoom = null;
+            }
+
+            _movement.ClearDesiredGoal(ControlPriority.Mission);
+            _goalSet = false;
+        }
+
+        // PULL: the nearest mob close by on our floor, one at a time ('find a mob, stop, kill it,
+        // move on'). It replaces the room hop in flight - that room stays unmarked and is walked
+        // after.
+        var pick = PullTarget(me, pos);
+        if (pick != null)
+        {
+            _currentClearRoom = null;
+            WalkTo(pos, pick.Transform.Position, PullReach, $"clear: the pull '{pick.Name}'");
+            return;
+        }
+
+        // ROOM WALK: the nearest room on my floor not yet walked - the person's rooms LAST (their
+        // mobs die like the rest, only after every other room is done).
+        var myFloor = FloorAt(pos);
+        var next = _nav.Dungeon.Rooms
+            .Select((r, i) => (r, i))
+            .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)) && !IsPersonRoom(x.r))
+            .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
+            .Cast<(NavDungeon.Room r, int i)?>()
+            .FirstOrDefault()
+            ?? _nav.Dungeon.Rooms
+                .Select((r, i) => (r, i))
+                .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)))
+                .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
+                .Cast<(NavDungeon.Room r, int i)?>()
+                .FirstOrDefault();
+        if (next.HasValue)
+        {
+            var (rm, idx) = next.Value;
+            _currentClearRoom = (rm.Floor, idx); // marked walked on arrival (standing) or when the hop ends
+            _lastSearchRoom = idx; // NextDoorHop streams the room's inner sections on arrival
+            var centre = new Vector3(rm.Pos[0], rm.Pos[1], rm.Pos[2]);
+            WalkTo(pos, centre, SearchReach, $"clear: {rm.PoolName} (floor {rm.Floor})");
+            return;
+        }
+
+        // BEHIND THE DOORS of the room just set out to before the next room: an inner section
+        // streams only once the body crosses its door - the search's own rule, and mobs hide
+        // behind those doors too.
+        var doorHop = NextDoorHop(pos, myFloor);
+        if (doorHop.pos.HasValue)
+        {
+            WalkTo(pos, doorHop.pos.Value, doorHop.reach, doorHop.what);
+            return;
+        }
+
+        // FLOOR CHANGE: a floor with rooms left is reached by a button, as in the search. (The
+        // room walk cleared MY floor: this fires only when another floor still has rooms.)
+        if (_presses < MaxPresses && _nav.Dungeon.Rooms
+                .Select((r, i) => (r, i))
+                .Any(x => !_clearVisited.Contains((x.r.Floor, x.i))))
+        {
+            var button = NearestButton(pos);
+            if (button != Identity.None)
+            {
+                _currentClearRoom = null;
+                WalkTo(pos, _items[button].Pos, ButtonReach, "clear: the button to another floor");
+                PressButton(me, button);
+                return;
+            }
+        }
+
+        // Every reachable room is walked. What now is THE OWNER'S RULE (2026-10-09): the last run
+        // finished after 2-3 kills of many - the objective waits for the server's share of dead
+        // mobs to pass the 90% line, however many passes that takes (mobs wander into view; the
+        // 3x blitz timeout is the backstop). Only a session the server never sends a share to
+        // falls back to AOBuddy10's own count: one narrowing pass over the rooms live mobs were
+        // last seen in, then every mob seen dead - or give up.
+        if (ClearPct >= 0)
+        {
+            _clearPasses++;
+            _clearVisited.Clear(); // a full pass again: ClearScan re-marks the rooms we stand in
+            _currentClearRoom = null;
+            _logger.LogInformation($"MISSION: clearing - {ClearText}, below the {ClearDonePct:0}% line; " +
+                                   $"walking the building again (pass {_clearPasses + 1}).");
+            return;
+        }
+
+        if (_clearPasses == 0 && _mobRoom.Count > 0)
+        {
+            var again = new HashSet<(int floor, int idx)>(_mobRoom.Values);
+            _clearPasses = 1;
+            _currentClearRoom = null;
+            foreach (var rm in _nav.Dungeon.Rooms.Select((r, i) => (r, i)))
+            {
+                var key = (rm.r.Floor, rm.i);
+                if (again.Contains(key))
+                {
+                    _clearVisited.Remove(key);
+                }
+                else
+                {
+                    _clearVisited.Add(key);
+                }
+            }
+
+            _logger.LogInformation($"MISSION: clearing ({ClearText}) - walked every room I can reach; " +
+                                   $"back to the {again.Count} room(s) where mobs were last seen.");
+            return;
+        }
+
+        _clearGaveUp = true;
+        PullPick = null;
+        if (_mobsSeen.Count > 0 && _mobsDead.Count == _mobsSeen.Count)
+        {
+            // No 'x% cleared' line this session, but every mob we saw is dead: cleared by our own count.
+            _logger.LogInformation($"MISSION: cleared by my count - all {_mobsSeen.Count} mob(s) seen are dead " +
+                                   "and every reachable room is walked; on to the objective.");
+            Tell($"Cleared it: all {_mobsSeen.Count} mobs I saw are dead; doing the objective.");
+        }
+        else
+        {
+            _logger.LogInformation($"MISSION: clear mode gave up at {ClearText} - no 'x% cleared' line from the " +
+                                   "server; on to the objective.");
+            Tell($"Couldn't clear this one ({ClearText}); doing the objective.");
+        }
+    }
+
+    // A REAL foe on us or our pets - the person we came to find does not count, whatever the
+    // server shows him doing.
+    private bool RealFoeOnUs
+    {
+        get
+        {
+            foreach (var s in _awareness.OnBot.Concat(_awareness.OnPets))
+            {
+                if (s.Mob != null && s.Mob.Identity != _personId)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    // The fight in progress: an engaged foe beyond the swing reach is walked up to (a shooter
+    // standing off must not pin the body - AOBuddy10 walked up to out-of-reach mobs); in reach
+    // the walk goal is cleared once so the body stands and fights.
+    private void FightTick(LocalPlayer me, Vector3 pos)
+    {
+        var foe = FoeInRange(me, FightWalkReach + 5f) ?? FoeInRange(me, 25f);
+        if (foe != null && Movement.Flat(pos, foe.Transform.Position) > FightWalkReach)
+        {
+            WalkTo(pos, foe.Transform.Position, FightWalkReach, $"fight: '{foe.Name}'");
+            return;
+        }
+
+        if (_goalSet && _movement.HasGoal(ControlPriority.Mission))
+        {
+            _movement.ClearDesiredGoal(ControlPriority.Mission);
+            _goalSet = false;
+        }
+    }
+
+    // The nearest live attacker of us or our pets within reach - never the person we came to find.
+    private NpcChar FoeInRange(LocalPlayer me, float maxMetres)
+    {
+        NpcChar best = null;
+        var bestD = float.MaxValue;
+        foreach (var s in _awareness.OnBot.Concat(_awareness.OnPets))
+        {
+            var n = s.Mob;
+            if (n == null || n.Identity == _personId || DynelManager.Dead.Contains(n.Identity) ||
+                (n.TryGetStat(Stat.Health, out var hp) && hp <= 0))
+            {
+                continue;
+            }
+
+            var d = Movement.Flat(me.Transform.Position, n.Transform.Position);
+            if (d < bestD && d <= maxMetres)
+            {
+                bestD = d;
+                best = n;
+            }
+        }
+
+        return best;
+    }
+
+    // The pull pick, kept while it lives and in sight (one fight at a time); null when nothing is
+    // worth closing on.
+    private NpcChar PullTarget(LocalPlayer me, Vector3 pos)
+    {
+        if (_pullId != Identity.None)
+        {
+            var held = DynelManager.Find(_pullId, out NpcChar cur) ? cur : null;
+            if (held != null && Pullable(me, held) &&
+                Movement.Flat(pos, held.Transform.Position) <= PullSightMetres + 10f)
+            {
+                PullPick = held;
+                return held;
+            }
+
+            _pullId = Identity.None;
+            PullPick = null;
+        }
+
+        foreach (var n in DynelManager.Npcs
+                     .Where(n => n != null && Pullable(me, n))
+                     .Where(n => Movement.Flat(pos, n.Transform.Position) <= PullSightMetres &&
+                                 Math.Abs(n.Transform.Position.Y - pos.Y) <= PullYBand)
+                     .OrderBy(n => Movement.Flat(pos, n.Transform.Position)))
+        {
+            _pullId = n.Identity;
+            PullPick = n;
+            _logger.LogInformation($"MISSION: clearing ({ClearText}): going for '{n.Name}' " +
+                                   $"({Movement.Flat(pos, n.Transform.Position):0} m).");
+            return n;
+        }
+
+        return null;
+    }
+
+    // Fit to fight: not a pet (ours or anyone's), alive, not the person we came to find, not
+    // sitting out a pull refusal.
+    private bool Pullable(LocalPlayer me, NpcChar n)
+    {
+        return !n.Owner.HasValue
+               && n.Identity != _personId
+               && !me.Pets.Any(p => p.Identity == n.Identity)
+               && !DynelManager.Dead.Contains(n.Identity)
+               && (!n.TryGetStat(Stat.Health, out var hp) || hp > 0)
+               && (!_pullAside.TryGetValue(n.Identity, out var until) || _phaseTime > until);
+    }
+
+    // Every half second while clearing: the room we stand in counts as walked, every mob in sight
+    // is placed in its room, dead ones drop out - and the find-person target, once sighted, marks
+    // his room(s) for last (AOBuddy10's ClearScan).
+    private void ClearScan(LocalPlayer me, Vector3 pos)
+    {
+        if (_phaseTime - _clearScanAt < 0.5)
+        {
+            return;
+        }
+
+        _clearScanAt = _phaseTime;
+        var here = RoomIndexAt(pos);
+        if (here.HasValue)
+        {
+            _clearVisited.Add(here.Value);
+        }
+
+        foreach (var n in DynelManager.Npcs)
+        {
+            if (n == null || n.Owner.HasValue || n.Identity == _personId ||
+                me.Pets.Any(p => p.Identity == n.Identity))
+            {
+                continue;
+            }
+
+            if (n.TryGetStat(Stat.Health, out var hp) && hp <= 0)
+            {
+                if (_mobsSeen.Contains(n.Identity))
+                {
+                    _mobsDead.Add(n.Identity);
+                }
+
+                _mobRoom.Remove(n.Identity);
+                continue;
+            }
+
+            var room = RoomIndexAt(n.Transform.Position);
+            if (room.HasValue)
+            {
+                _mobsSeen.Add(n.Identity);
+                _mobRoom[n.Identity] = room.Value;
+            }
+        }
+
+        // THE PERSON: sighted once, never fought, his rooms (every entry with that name - a
+        // duplicated pool room shares the name) come last.
+        if (_record.Type == TypeFindPerson && _personId == Identity.None)
+        {
+            SimpleChar person = null;
+            if (_record.TargetA.HasValue)
+            {
+                DynelManager.Find(_record.TargetA.Value, out SimpleChar byId);
+                person = byId;
+            }
+
+            if (person == null)
+            {
+                // No record id (or not streamed yet): the name-match rule FindTarget uses.
+                var text = _record.Text ?? "";
+                person = DynelManager.Npcs.FirstOrDefault(npc => npc != null && !npc.Owner.HasValue &&
+                                                                 !string.IsNullOrEmpty(npc.Name) && npc.Name.Length >= 4 &&
+                                                                 text.IndexOf(npc.Name, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            if (person != null)
+            {
+                _personId = person.Identity;
+                _personFloor = FloorAt(person.Transform.Position);
+                var proom = RoomIndexAt(person.Transform.Position);
+                _personRoomName = proom.HasValue ? _nav.Dungeon.Rooms[proom.Value.idx].PoolName : null;
+                _logger.LogInformation($"MISSION: '{person.Name}', the mission's target, is in room " +
+                                       $"'{_personRoomName ?? "?"}' on floor {_personFloor}; " +
+                                       "clearing the other rooms first.");
+            }
+        }
+    }
+
+    // The room covering a spot: the floor rule of FloorAt (nearest tile height), then among the
+    // rooms of that floor the one whose cells cover the spot, nearest centre as the tiebreak.
+    // Null between rooms (the void the corridors cross).
+    private (int floor, int idx)? RoomIndexAt(Vector3 p)
+    {
+        var bestY = double.MaxValue;
+        foreach (var rm in _nav.Dungeon.Rooms)
+        {
+            var y = _nav.Dungeon.FloorHeight(rm, p.X, p.Z);
+            if (!double.IsNaN(y))
+            {
+                bestY = Math.Min(bestY, Math.Abs(y - p.Y));
+            }
+        }
+
+        if (bestY == double.MaxValue)
+        {
+            return null;
+        }
+
+        (int floor, int idx)? best = null;
+        var bestFlat = double.MaxValue;
+        var rooms = _nav.Dungeon.Rooms;
+        for (var i = 0; i < rooms.Count; i++)
+        {
+            var rm = rooms[i];
+            var y = _nav.Dungeon.FloorHeight(rm, p.X, p.Z);
+            if (double.IsNaN(y) || Math.Abs(y - p.Y) > bestY + 1.0 ||
+                !_nav.Dungeon.CellOf(rm, p.X, p.Z, out _, out _))
+            {
+                continue;
+            }
+
+            var d = Movement.Flat(p, new Vector3(rm.Pos[0], p.Y, rm.Pos[2]));
+            if (d < bestFlat)
+            {
+                bestFlat = d;
+                best = (rm.Floor, i);
+            }
+        }
+
+        return best;
+    }
+
+    // Every room entry with the person's name on his floor is his (duplicated pool rooms share
+    // the pool name).
+    private bool IsPersonRoom(NavDungeon.Room rm)
+    {
+        return _personRoomName != null && rm.Floor == _personFloor && rm.PoolName == _personRoomName;
+    }
+
+    private string ClearText => ClearPct >= 0
+        ? $"{ClearPct:0.#}% cleared"
+        : _mobsSeen.Count == 0
+            ? "no mob seen yet"
+            : $"{_mobsDead.Count} of {_mobsSeen.Count} mobs seen dead";
+
+    private static int HpPct(LocalPlayer me)
+    {
+        return me.TryGetStat(Stat.Health, out var hp) && me.TryGetStat(Stat.MaxHealth, out var max) && max > 0
+            ? (int)(100.0 * Math.Min(hp, max) / max)
+            : -1;
     }
 
     // ---- The objective -----------------------------------------------------------

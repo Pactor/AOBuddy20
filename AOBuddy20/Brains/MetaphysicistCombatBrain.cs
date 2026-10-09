@@ -12,6 +12,7 @@
 using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
 using AOBuddy20.Network;
+using AOBuddy20.PacketConsumers;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
@@ -40,13 +41,25 @@ namespace AOBuddy20.Brains;
 public class MetaphysicistCombatBrain : GeneralCombatBrain
 {
     public MetaphysicistCombatBrain(ILogger<MetaphysicistCombatBrain> logger, ControlArbiter controlArbiter,
-        PacketRouter packetRouter, OwnerAssist ownerAssist, BrainBank brains)
-        : base(logger, controlArbiter, packetRouter, ownerAssist, brains)
+        PacketRouter packetRouter, OwnerAssist ownerAssist, BrainBank brains,
+        MissionController mission, Awareness awareness)
+        : base(logger, controlArbiter, packetRouter, ownerAssist, brains, mission, awareness)
     {
     }
 
     protected override SimpleChar? SelectTarget(LocalPlayer me)
     {
+        // CLEAR MODE: the pets clear the building with the run - the same ladder the general brain
+        // walks (what is on us, then the run's pull pick), driven onto the pets in OnEngage below.
+        if (_mission.Clearing)
+        {
+            var foe = ClearTarget(me);
+            if (foe != null)
+            {
+                return foe;
+            }
+        }
+
         // 1. the owner's fight (himself, or the pets he is fighting through)
         var mob = _ownerAssist.Target(me, out _);
         if (mob != null)
@@ -55,10 +68,13 @@ public class MetaphysicistCombatBrain : GeneralCombatBrain
         }
 
         // 2. anything that has turned on us or our pets - the meta does not get to pick fights,
-        //    but it does not get to be lunch either: the pets answer aggro.
+        //    but it does not get to be lunch either: the pets answer aggro. Never the person a
+        //    find-person mission sent us to: he shows as 'fighting' the bot the moment he is
+        //    selected, and the owner - abstain from him even if he attacks while clearing.
         foreach (var npc in DynelManager.Npcs)
         {
-            if (!npc.FightingIdentity.HasValue || !IsAlive(npc))
+            if (!npc.FightingIdentity.HasValue || !IsAlive(npc) ||
+                npc.Identity == _mission.ClearFoeForbidden)
             {
                 continue;
             }
