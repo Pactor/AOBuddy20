@@ -22,7 +22,10 @@ knows about its body, its packs and the ground it walked lives in per-character 
   comfort fill.
 - **Mission blitz loop** — roll at a mission terminal (sliders configured), take find-item /
   find-person missions, walk in, select the target, bag the reward, walk out, repeat. A *want
-  list* restricts rolls to wanted rewards (exact item or kind/profession/QL queries).
+  list* restricts rolls to wanted rewards (exact item or kind/profession/QL queries). *Clear
+  mode* (`mission clear on`) kills every mob in the building before the objective — the XP, and
+  for Omni and Clan a side token with the reward; the objective waits until the server's clear
+  share passes 90%.
 - **Economy** — resupply stims/rechargers/backpacks from shop terminals (it remembers which
   terminal sells what), and sell bag contents to a vendor (NODROP and main inventory untouched).
 - **Survival** — stims in combat, rechargers with a sit/rest cycle out of combat, healing itself
@@ -152,10 +155,12 @@ pet-hold coordination around it.
 
 | Command | What it does |
 | --- | --- |
-| `mission run` | Start the blitz loop: roll at a (saved or nearby) terminal, take a find-item/find-person mission, travel to the building, walk in, select the target, bag the reward, walk out, repeat. A mission still in the quest log from before a restart is finished first. Switches a want run off. |
+| `mission run` | Start the blitz loop: roll at a (saved or nearby) terminal, take a find-item/find-person mission, travel to the building, walk in, select the target, bag the reward, walk out, repeat. A mission still in the quest log from before a restart is finished first. Switches a want run off; keeps clear mode as it is. |
 | `mission stop` | End the run. |
+| `mission clear on` / `mission clear off` | **Clear mode**: kill every mob in the building before the objective — the XP, and for Omni and Clan a side token with the reward. The bot fights what attacks it, closes on the nearest pull one at a time, walks every room (the find-person target's room last — he is never fought, even when he swings at the bot), rides buttons to floors with rooms left, and keeps walking until the server's "% of the building's mobs dead" share passes **90%** — only then the objective. Rooms count as walked on arrival, never on setting out. Toggling works mid-run: `off` hands the body back to the objective. `mission run clear on\|off` is the same toggle. Session-only (like follow/stay). |
+| `mission clear` | **Abandon**: stop any run AND delete the held mission — no re-roll (that is `skip`), no resume (that is `stop`). Drops the mission key from the packs with it. |
 | `mission skip` | Delete the held mission and roll a fresh one (drops an in-progress mission; deletes a held one when idle). |
-| `mission status` | Phase, held mission, saved terminal. |
+| `mission status` | Phase, held mission, saved terminal — and while clearing, the clear share (`x% cleared`, or `n of m mobs seen dead` when the server sends no share). |
 | `mission roll` | One by-hand roll at the terminal the bot stands at — the offer list lands with `mission list`. No run is started. |
 | `mission list` | The missions offered by the last roll, numbered, with the reason a mission would be skipped. |
 | `mission accept <n>` | Accept the nth offer from the list by hand. |

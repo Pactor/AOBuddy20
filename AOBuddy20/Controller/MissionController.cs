@@ -328,15 +328,7 @@ public sealed class MissionController : IPacketConsumer
                 // the run itself is a bare 'mission run', which keeps the mode on.
                 if (parts.Length > 2 && parts[2].Equals("clear", StringComparison.OrdinalIgnoreCase))
                 {
-                    var v = parts.Length > 3 ? parts[3].ToLowerInvariant() : "";
-                    if (v == "on" || v == "off")
-                    {
-                        ClearOn = v == "on";
-                    }
-
-                    reply("Clear mode: " + (ClearOn ? "ON" : "off") +
-                          (Active && ClearPct >= 0 ? $" ({ClearText} of this building)" : "") +
-                          " - every mob in the building dies before the objective. 'mission run clear on|off'.");
+                    ToggleClearMode(parts.Length > 3 ? parts[3].ToLowerInvariant() : "", reply);
                     break;
                 }
 
@@ -363,11 +355,21 @@ public sealed class MissionController : IPacketConsumer
                 reply("Mission: " + Describe());
                 break;
             case "clear":
-                // 'mission clear': the run stops AND the mission is deleted - abandoned, no
+                // 'mission clear on|off' (owner 2026-10-09: he typed the natural spelling and the
+                // run blitzed on - this used to fall into the abandon below): the CLEAR MODE
+                // toggle, same as 'mission run clear on|off'.
+                if (parts.Length > 2 && (parts[2].Equals("on", StringComparison.OrdinalIgnoreCase) ||
+                                         parts[2].Equals("off", StringComparison.OrdinalIgnoreCase)))
+                {
+                    ToggleClearMode(parts[2].ToLowerInvariant(), reply);
+                    break;
+                }
+
+                // Bare 'mission clear': the run stops AND the mission is deleted - abandoned, no
                 // re-roll (that is 'skip'), no resume (that is 'stop').
                 if (_heldQuests.Count == 0 && !Active)
                 {
-                    reply("No mission to clear.");
+                    reply("No mission to clear. ('mission clear on|off' toggles clear mode.)");
                     break;
                 }
 
@@ -461,7 +463,7 @@ public sealed class MissionController : IPacketConsumer
                 break;
             }
             default:
-                reply("Usage: mission run [clear on|off] | stop | clear | skip | status | probe x z | roll | list | accept n | buybags n | " +
+                reply("Usage: mission run | stop | clear [on|off] | skip | status | probe x z | roll | list | accept n | buybags n | " +
                       "want [add <name or query> | remove n | list | mode always|list | status | lines [part] | " +
                       "drop|undrop <nano name> | clear got]");
                 break;
@@ -2181,8 +2183,22 @@ public sealed class MissionController : IPacketConsumer
     // we walk to, in reach. The server counts the clear for us (the 110/79979934 float above);
     // the seen/dead sets below are the fallback.
 
-    /// <summary>The mode toggle: 'mission run clear on|off' (a session toggle, like follow/stay).</summary>
+    /// <summary>The mode toggle: 'mission clear on|off' (a session toggle, like follow/stay).</summary>
     public bool ClearOn;
+
+    // 'mission clear on|off' and 'mission run clear on|off' - one toggle, both spellings.
+    private void ToggleClearMode(string v, Action<string> reply)
+    {
+        if (v == "on" || v == "off")
+        {
+            ClearOn = v == "on";
+        }
+
+        reply("Clear mode: " + (ClearOn ? "ON" : "off") +
+              (Active && ClearPct >= 0 ? $" ({ClearText} of this building)" : "") +
+              " - every mob in the building dies before the objective (90% at least). " +
+              "'mission clear on|off'.");
+    }
 
     /// <summary>The server's share of the building's mobs dead, or -1 (no line seen this building).</summary>
     public float ClearPct { get; private set; } = -1;
