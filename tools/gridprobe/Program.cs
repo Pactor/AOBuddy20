@@ -15,6 +15,11 @@ using AOSharp.Common.GameData;
 //   gridprobe selftest                                  - synthetic checks of the exact line-wall test
 //   gridprobe mission <poolPf> <layout.txt>             - rebuild a saved mission instance
 //                                                         (Build/mission-layout-*.txt) and sweep it
+//   gridprobe <pluginDir> missionx <poolPf> <layout.txt> path <x0> <z0> <y0> <x1> <z1> <y1>
+//     [block|pricy <x> <z> <r>]...                       - replay a mission planner query on the
+//                                                         northbound grid ('classic' opts out), with
+//                                                         synthetic mark discs: block = hard (extra),
+//                                                         pricy = soft cost (the yank marks' semantics)
 var pluginDir = args.Length > 0 ? args[0] : "";
 
 if (args.Length > 0 && args[0] == "selftest")
@@ -1036,7 +1041,12 @@ internal static class MissionX
 
         var nav = AOBuddyNav.ComposeMission(args[0], m);
         FloorGrid.DebugSkipRoomTiles = args.Any(a => a == "notiles");
-        var grid = FloorGrid.Build(args[0], m.Instance, nav, s => Console.WriteLine("  [grid] " + s));
+        // live parity: NavGridCache hands every mission build the pool's precalculated lattices;
+        // 'classic' opts out so the two grids answer the same query side by side
+        var north = args.Any(a => a == "classic")
+            ? null
+            : NorthboundPool.For(args[0], poolPf, s => Console.WriteLine("  [nb] " + s));
+        var grid = FloorGrid.Build(args[0], m.Instance, nav, s => Console.WriteLine("  [grid] " + s), north);
         if (nav == null || grid == null) { Console.WriteLine("compose/build failed"); return 1; }
         Console.WriteLine("doorway meeting: " + AOBuddyNav.DoorCheck);
         Console.WriteLine($"suppressor: {FloorGrid.DebugBuriedCells} tile floor(s) buried");
@@ -1071,7 +1081,19 @@ internal static class MissionX
             float F(string s) => float.Parse(s, inv);
             var a = new Vector3(F(args[5]), F(args[7]), F(args[6]));
             var b = new Vector3(F(args[8]), F(args[10]), F(args[9]));
-            var pts = grid.FindPath(a, b, null, 8f, 3f, out var why);
+            // synthetic marks after the coords, each 'block|pricy <x> <z> <r>' - a disc of hard
+            // (extra) or soft (pricey) cells, replaying what a yank band did before 2026-10-09
+            // and does since: 'block' should cut the corridor, 'pricy' must only toll it
+            HashSet<int> extra = null, pricey = null;
+            for (var i = 11; i + 3 < args.Length; i += 4)
+            {
+                var mk = new Vector3(F(args[i + 1]), 0, F(args[i + 2]));
+                var set = args[i] == "block" ? (extra ??= new HashSet<int>()) : (pricey ??= new HashSet<int>());
+                grid.CellsAlong(mk, mk, F(args[i + 3]), set);
+                Console.WriteLine($"  band {args[i]} at ({mk.X:0.0},{mk.Z:0.0}) r {F(args[i + 3]):0.0}");
+            }
+
+            var pts = grid.FindPath(a, b, extra, 8f, 3f, out var why, pricey);
             Console.WriteLine($"({a.X:0.0},{a.Y:0.0},{a.Z:0.0}) -> ({b.X:0.0},{b.Y:0.0},{b.Z:0.0}): " +
                 (pts != null ? $"{pts.Count} pts" : $"NO PATH - {why}"));
             if (pts != null)

@@ -23,7 +23,11 @@ public interface IWalkGrid
     int Pf { get; }
 
     HashSet<int> CellsAlong(Vector3 a, Vector3 b, float radius, HashSet<int> into = null);
-    List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why);
+
+    /// <summary>extra blocks hard (zone lines, contact exits, real obstacles); pricey only costs
+    /// RefusedCellWeight per cell - ground the server once refused is steered round, never sealed.</summary>
+    List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why,
+        HashSet<int> pricey = null);
 
     /// <summary>Standable ground at p — the front-ray test that finds a doorway exit's open side.</summary>
     bool OpenAt(Vector3 p);
@@ -96,6 +100,12 @@ public sealed class OverlandGrid : IWalkGrid
     // off ledges by habit): it is not road, and climbing through it costs DropClimbCost extra.
     private const float RoadFactor = 0.5f, SnapWeight = 2f, SnapRadius = 6f;
     private const float DropGrade = 1.2f, DropClimbCost = 10f; // = MaxRise: only what can't be walked up is a jump
+
+    // Per cell of ground the server once REFUSED us (PlanRoute's pricey set, the yank marks): a
+    // detour of a cell length per unit beats it, but a corridor with no way round is paid and
+    // crossed - the marks must never seal the only way back (owner, 2026-10-09, Grey Caves-Mines:
+    // yank bands across the narrow tunnels left the exit door unplannable and the run looped).
+    private const float RefusedCellWeight = 8f;
 
     // HOSTILE MOBS (MobDanger, ported 2026-10-03): crossing a spot's aggro circle through its middle
     // costs DetourPerMob x W metres per counted mob, fading to nothing at R - never a block. A cell's
@@ -1238,17 +1248,20 @@ public sealed class OverlandGrid : IWalkGrid
     ///     cell within reach of b. The first point is a itself; the last is b when b's cell is open and
     ///     reachable. Null (with why) when there is none.
     /// </summary>
-    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why)
-        => FindPath(a, b, extra, snap, reach, out why, float.NaN);
+    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why,
+        HashSet<int> pricey = null)
+        => FindPath(a, b, extra, snap, reach, out why, float.NaN, pricey);
 
     /// <summary>Same, with a goal HEIGHT: the path must arrive on a floor within 2.5 m of goalY (a wall-top, a walkway) instead of on whichever level touches the goal cell first. NaN goalY = any level.</summary>
-    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why, float goalY)
+    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why, float goalY,
+        HashSet<int> pricey = null)
     {
         // Between two fixed objects (whompahs, grids, doors) the route is planned once and kept
         // (RouteCache, ported 2026-10-03). A saved route was planned without today's mobs: through a
         // hostile spot, plan it afresh.
         why = "";
-        var saved = RouteCache.Get(this, a, b, reach, goalY, extra, (p, q) => Search(p, q, extra, snap, 1.5f, false, out _, float.NaN));
+        var saved = RouteCache.Get(this, a, b, reach, goalY, extra,
+            (p, q) => Search(p, q, extra, snap, 1.5f, false, out _, float.NaN, pricey));
         if (saved != null)
         {
             var (sHit, sAll, sNear) = MobDanger.Along(Pf, saved);
@@ -1261,7 +1274,8 @@ public sealed class OverlandGrid : IWalkGrid
         }
 
         // In sight of b first; if that walks nowhere (b's pocket is closed off), on distance alone.
-        var route = Search(a, b, extra, snap, reach, true, out why, goalY) ?? Search(a, b, extra, snap, reach, false, out _, goalY);
+        var route = Search(a, b, extra, snap, reach, true, out why, goalY, pricey)
+                    ?? Search(a, b, extra, snap, reach, false, out _, goalY, pricey);
         if (route != null)
         {
             RouteCache.Put(this, a, b, reach, goalY, route);
@@ -1276,7 +1290,8 @@ public sealed class OverlandGrid : IWalkGrid
         return route;
     }
 
-    private List<Vector3> Search(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, bool sight, out string why, float goalY)
+    private List<Vector3> Search(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, bool sight, out string why, float goalY,
+        HashSet<int> pricey = null)
     {
         why = "";
         var s = NearestOpen(a, snap, extra);
@@ -1399,7 +1414,11 @@ public sealed class OverlandGrid : IWalkGrid
                     float d = (dx != 0 && dz != 0 ? 1.4142f : 1f) * Cell;
                     float len1 = dx != 0 && dz != 0 ? 1.4142f : 1f;
                     float baseMul = 1f + WallCost(ncell) + (_water != null && _water[ncell] ? WaterWeight : 0f)
-                                    + (_learn != null ? _learn[ncell] : 0f) + DangerAt(ncell);
+                                    + (_learn != null ? _learn[ncell] : 0f) + DangerAt(ncell)
+                                    // refused ground is PRICED, not blocked (owner, 2026-10-09): the
+                                    // route steers round it where a detour is cheaper, and pays
+                                    // straight through a corridor with no way round
+                                    + (pricey != null && pricey.Contains(ncell) ? RefusedCellWeight : 0f);
                     float roadMul = _road != null && _road[ncell] ? RoadFactor : 1f;
                     for (int j = 0; j < FloorCount(ncell); j++)
                     {

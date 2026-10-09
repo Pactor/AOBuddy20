@@ -1569,8 +1569,14 @@ public sealed class MovementController : IPacketConsumer
             return; // no walk grid for this playfield: straight lines
         }
 
+        // Two kinds of marks (owner, 2026-10-09): the HARD ones - the stuck watch's and the wedge's
+        // cells (the body made no progress / is pinned: a real obstacle the data does not show) and
+        // the zone-line corridors and contact-exit discs below - block the search outright. The SOFT
+        // ones - _serverNo, the spots a yank refused - only COST (RefusedCellCost/Weight): the route
+        // steers round them while a detour is cheaper and pays through where the corridor is the
+        // only way, so refused ground can never seal the way back the way a block does.
         var extra = new HashSet<int>(_stuckCells);
-        extra.UnionWith(_serverNo); // spots the server already refused us, this session
+        var pricey = new HashSet<int>(_serverNo); // spots the server already refused us, this session
 
         // The travel leg's own line stays open: its goal IS the crossing point beyond it (a travel
         // goal never matches by accident - a manual goal in the same spot cancelled the plan).
@@ -1603,20 +1609,20 @@ public sealed class MovementController : IPacketConsumer
 
         // THE BLACKLISTS NEVER SEAL THE BODY IN (owner, 2026-10-03: "shouldn't blacklist cells
         // which were walked already"): every cell within ~3 m of where the server has us right
-        // now is walkable again for THIS plan. A yank band runs from where the server pulled us
+        // now is clear again for THIS plan - no toll either (the body IS on refused ground after
+        // every yank; leaving it must not cost). A yank band runs from where the server pulled us
         // back THROUGH the cells the walk claimed - and those cells can be the body's only way
         // out of a landing pocket: the Varmint Woods zone-in yank blacklisted the pocket's exit,
         // and every re-plan after failed "walled off" at the goal 1.2 km on with south and east
-        // wide open - no walk, no further yank, so the give-up never came. The marks still steer
-        // the route away from refused ground further out, and a spot that is truly bad collects
-        // its yank and its share of the give-up honestly. Unsealed LAST, so it wins over every
-        // band added above (a zone line we stand on included).
+        // wide open - no walk, no further yank, so the give-up never came. Unsealed LAST, so it
+        // wins over every band added above (a zone line we stand on included).
         var unseal = new HashSet<int>();
         grid.CellsAlong(from, from, 3f, unseal);
         extra.ExceptWith(unseal);
+        pricey.ExceptWith(unseal);
 
-        var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why) ??
-                    grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _);
+        var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why, pricey) ??
+                    grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _, pricey);
 
         // THE WAY OUT IS A WALKED ROAD (AOBuddy10 TryRoadOut, ported 2026-10-03): no way on the grid -
         // or a way that runs over RoadOutSnaps remembered pull-backs - and a recorded road starts
@@ -2408,16 +2414,18 @@ public sealed class MovementController : IPacketConsumer
             _routePrio = -1;
             _stuck.Reset();
             // Mark what the server just refused: the segment we walked into, from where it pulled
-            // us back to where it hauled us back from. This goal's replan avoids it via
-            // _stuckCells - and _serverNo keeps it across goals, or a fresh goal (a manual 'goto'
-            // after a give-up) walks straight into the same refusal again
-            // (owner, 2026-10-03 Aegean: a descent the heightfield showed but the cliff hid -
-            // three yanks, goal given up, and every retry yanked identically).
+            // us back to where it hauled us back from. SOFT marks (owner, 2026-10-09): the bands
+            // go into _serverNo and are PRICED by the planner, not blocked - a yank is a refusal,
+            // often no more than combat knockback on ground that walks fine (Grey Caves-Mines:
+            // six mid-fight yanks hard-banded the narrow tunnels and the exit door became
+            // unplannable; the run dropped and re-rolled in a loop). _serverNo keeps the marks
+            // across goals, so a fresh goal (a manual 'goto' after a give-up) still prices the
+            // same refusal (owner, 2026-10-03 Aegean: a descent the heightfield showed but the
+            // cliff hid - three yanks, goal given up, and every retry yanked identically).
             var grid = _nav.Grid;
             if (grid != null)
             {
                 var walked = me.MovementComponent.Position;
-                grid.CellsAlong(pos, walked, 1f, _stuckCells);
                 if (_serverNo.Count > 128)
                 {
                     _serverNo.Clear();

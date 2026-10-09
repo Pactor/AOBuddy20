@@ -95,7 +95,7 @@ namespace AOBuddyMonitor
             catch { return null; }
         }
 
-        private sealed class WalkedFile { public List<List<float[]>> Segments; }
+        private sealed class WalkedFile { public List<List<float[]>> Segments = null!; } // mapped by Newtonsoft
 
         // ---- mission floor plans (2026-09-26) ------------------------------------------------------------
         // A mission building is not in the client data: the bot composes it from the zone-in placement and

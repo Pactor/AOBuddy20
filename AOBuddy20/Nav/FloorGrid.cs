@@ -893,6 +893,12 @@ public sealed class FloorGrid : IWalkGrid
     // Missions only - the wall buckets exist only where UseComposedGeometry ran.
     private const float WallHugPenalty = 3.5f;
 
+    // Per cell of ground the server once REFUSED us (PlanRoute's pricey set, the yank marks): a
+    // detour of ~1.6 m per cell beats it, but a corridor with no way round is paid and crossed -
+    // the marks must never seal the only way back (owner, 2026-10-09, Grey Caves-Mines: yank
+    // bands across the narrow tunnels left the exit door unplannable and the run looped).
+    private const float RefusedCellCost = 8f;
+
     private void BuildWallHugCost()
     {
         foreach (var kv in _floors)
@@ -1553,13 +1559,14 @@ public sealed class FloorGrid : IWalkGrid
     ///     exact centre, exit standoff, then a FRESH search for the rest - so the walk through a door
     ///     never re-joins whatever line the through-route happened to have.
     /// </summary>
-    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why)
+    public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why,
+        HashSet<int> pricey = null)
     {
-        return FindPathCore(a, b, extra, snap, reach, null, 0, out why);
+        return FindPathCore(a, b, extra, snap, reach, null, 0, out why, pricey);
     }
 
     private List<Vector3> FindPathCore(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach,
-        HashSet<AOBuddyNav.Doorway> skip, int depth, out string why)
+        HashSet<AOBuddyNav.Doorway> skip, int depth, out string why, HashSet<int> pricey)
     {
         // DOOR PRECISION: the first crossed doorway (both endpoints on opposite sides of its plane,
         // the straight line passing within 3 m of its centre) splits the route into two freshly
@@ -1602,13 +1609,13 @@ public sealed class FloorGrid : IWalkGrid
             {
                 skip ??= new HashSet<AOBuddyNav.Doorway>();
                 skip.Add(dw);
-                var leg1 = FindPathCore(a, before, extra, snap, reach, skip, depth + 1, out _);
+                var leg1 = FindPathCore(a, before, extra, snap, reach, skip, depth + 1, out _, pricey);
                 if (leg1 == null)
                 {
                     continue; // this doorway does not work for the approach - try the next crossed one
                 }
 
-                var leg2 = FindPathCore(after, b, extra, snap, reach, skip, depth + 1, out _);
+                var leg2 = FindPathCore(after, b, extra, snap, reach, skip, depth + 1, out _, pricey);
                 if (leg2 == null)
                 {
                     continue;
@@ -1713,7 +1720,11 @@ public sealed class FloorGrid : IWalkGrid
                     }
 
                     float hug = _wallHug.Count > 0 && _wallHug.TryGetValue((long)nk * 8 + f, out var hc) ? hc : 0f;
-                    float ng = gc + (di != 0 && dj != 0 ? 1.4142f : 1f) + hug;
+                    // refused ground is PRICED, not blocked (owner, 2026-10-09): the route steers
+                    // round it where a detour is cheaper, and pays straight through a narrow
+                    // corridor - the soft marks can never cut the map in two the way a block does
+                    float refused = pricey != null && pricey.Contains(nk) ? RefusedCellCost : 0f;
+                    float ng = gc + (di != 0 && dj != 0 ? 1.4142f : 1f) + hug + refused;
                     if (gScore.TryGetValue(nn, out float old) && old <= ng)
                     {
                         continue;
