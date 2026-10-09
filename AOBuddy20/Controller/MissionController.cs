@@ -119,6 +119,8 @@ public sealed class MissionController : IPacketConsumer
     private const double EnterSideTimeout = 30.0; // an approach that never gets there
     private const double DoorStandTimeout = 8.0; // on the door this long without a zone: next side
     private const double DoorSettle = 0.6; // stand still before judging the door
+    private const double DoorUseEverySec = 3.0; // the entrance Use repeats this often while standing
+    private const float DoorUseRadius = 5f; // the IdentityType.Door dynel this close to the spot is the entrance
     private const double SearchHopTimeout = 25.0; // a room walk this long without arriving: next room
     private const int DoorSides = 8; // 45° ladder, this many sides per round
     private const int DoorRounds = 2; // and this many rounds, then the door is given up
@@ -230,6 +232,7 @@ public sealed class MissionController : IPacketConsumer
     private Vector3 _baseSide;
     private int _sideTry;
     private int _doorStage;
+    private double _doorUseAt = double.NegativeInfinity; // the last entrance Use (the stand beat repeats it)
     private int _exitStands;
 
     // The objective in progress.
@@ -799,6 +802,17 @@ public sealed class MissionController : IPacketConsumer
             .Where(d => d != null && d.Identity.Type == IdentityType.MissionTerminal &&
                         Movement.Flat(me.Transform.Position, d.Transform.Position) <= metres)
             .OrderBy(d => Movement.Flat(me.Transform.Position, d.Transform.Position))
+            .FirstOrDefault();
+    }
+
+    /// <summary>The ENTRANCE door dynel (IdentityType.Door) nearest the mission's door spot - the
+    /// city doors are objects in the facade and want the Use; null when the zone streams none.</summary>
+    private Dynel DoorWithin(Vector3 door, float metres)
+    {
+        return DynelManager.AllDynels
+            .Where(d => d != null && d.Identity.Type == IdentityType.Door &&
+                        Movement.Flat(door, d.Transform.Position) <= metres)
+            .OrderBy(d => Movement.Flat(door, d.Transform.Position))
             .FirstOrDefault();
     }
 
@@ -1806,13 +1820,40 @@ public sealed class MissionController : IPacketConsumer
         }
 
         // ONTO the door's own spot: the server moves us in when we stand there (capture: the owner's
-        // client stopped within 0.2 m of the door and was moved in 0.4 s later).
+        // client stopped within 0.2 m of the door and was moved in 0.4 s later). The USE beside it
+        // (owner, 2026-10-09): city doors do not take a standing body in - Upper Stret East Bank
+        // held the body ~2 m out under corrections through every side while the walk believed it
+        // stood 0.3 m from the spot. The door dynel gets the wire-proven GenericCmd Use (the same
+        // bytes the terminals and lift buttons get, capture 20260923-201746); a wilderness door
+        // that enters on its own is unaffected by the extra Use.
         WalkTo(me.Transform.Position, door, 0.4f, "standing on the door");
         if (_movement.IsGoalReached(ControlPriority.Mission))
         {
             if (_goalAt < 0)
             {
                 _goalAt = _phaseTime; // the stand beat starts when the door reads reached
+            }
+
+            if (_phaseTime - _doorUseAt > DoorUseEverySec)
+            {
+                _doorUseAt = _phaseTime;
+                var dynel = DoorWithin(door, DoorUseRadius);
+                if (dynel != null)
+                {
+                    GameCommands.UseObject(me, dynel.Identity);
+                    _logger.LogInformation(
+                        $"MISSION: using the entrance door {dynel.Identity} " +
+                        $"({Movement.Flat(door, dynel.Transform.Position):0.0} m from the spot).");
+                }
+                else
+                {
+                    var near = string.Join(", ", DynelManager.AllDynels
+                        .Where(d => d != null && Movement.Flat(door, d.Transform.Position) <= DoorUseRadius)
+                        .Select(d => $"{d.Identity.Type}:{d.Identity.Instance}")
+                        .Take(6));
+                    _logger.LogInformation($"MISSION: no IdentityType.Door within {DoorUseRadius:0} m of the entrance" +
+                                           (near.Length > 0 ? $" - nearby dynels: {near}" : " - nothing streams there."));
+                }
             }
 
             if (_phaseTime - _goalAt > DoorStandTimeout)
@@ -1833,6 +1874,7 @@ public sealed class MissionController : IPacketConsumer
         _movement.ClearDesiredGoal(ControlPriority.Mission);
         _goalSet = false;
         _goalAt = -1;
+        _doorUseAt = double.NegativeInfinity; // the next side's first Use fires on arrival
         if (_sideTry >= DoorSides * DoorRounds)
         {
             DropMission("I can't get through its door from any side");
