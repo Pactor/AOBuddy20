@@ -56,6 +56,20 @@ public class NetworkSession
     private NetworkStateMachine _stateMachine;
     private ZlibTcpClient _tcpClient;
 
+    // ZONE RE-ATTACH (owner, 2026-10-09: "the reconnect is a tad too fast - add a small delay
+    // before reconnecting on zoning"): when the zone connection drops mid-attach, the session is
+    // ALIVE on the zone gameserver. Reconnect() used to throw the session cookie away and fall
+    // into a FULL LOGIN - which only earns AlreadyLoggedIn until the server times the session out
+    // (2026-10-09 09:32:51, Tir -> Old Athen: the zone dropped 0.1 s in, and the relogin hammered
+    // AlreadyLoggedIn every 2 s for 31 s before the server let go). Now the drop out of Zoning
+    // keeps the cookie, waits a small beat, and re-attaches the SAME zone endpoint - the normal
+    // ZoneLogin handshake - instead of logging in over a held session. One re-attach try; if it
+    // drops again too, the cookie goes and the normal login chain runs.
+    private const int ZoneReattachDelayMs = 10000;
+    private IPEndPoint _zoneEndpoint; // the last ZoneInfo/ZoneRedirection endpoint
+    private int _zoneReattachTries;
+    private bool _leftZoning; // the connection dropped while attaching to a zone
+
     internal NetworkSession(ILogger logger, Dictionary<SystemMessageType, Action<SystemMessage>> sysMsgCallbacks,
         Dictionary<N3MessageType, Action<N3Message>> n3MsgCallbacks)
     {
@@ -157,6 +171,14 @@ public class NetworkSession
 
     public void Send(AOMessage aoMessage)
     {
+        // Disconnected (reconnect pending): nothing to send into. The movement thread keeps
+        // ticking while the session is down, and every send used to blow up here with a
+        // NullReferenceException (2026-10-09 09:32:51-09:33:01, one per movement tick).
+        if (_tcpClient == null)
+        {
+            return;
+        }
+
         lock (_sendLock)
         {
             aoMessage.Header.MessageId = _messageId;
@@ -547,11 +569,30 @@ public class NetworkSession
         }
 
         _tcpClient = null;
-        _sessionCookie = null;
         lock (_sendLock)
         {
             _messageId = 1;
         }
+
+        // A drop OUT OF ZONING with a live session: re-attach (same endpoint, same cookie, the
+        // small ZoneReattachDelayMs wait) instead of a full login over the held session. A second
+        // failed attach gives up on the cookie - the normal chain decides from there.
+        IPEndPoint reattachEndpoint = null;
+        if (_leftZoning && _sessionCookie != null && _zoneEndpoint != null && _zoneReattachTries < 1)
+        {
+            _zoneReattachTries++;
+            reattachEndpoint = _zoneEndpoint;
+            _nextReconnectDelayMs = ZoneReattachDelayMs;
+            _logger.Debug($"zone dropped mid-attach - re-attaching {_zoneEndpoint} with the session cookie in {ZoneReattachDelayMs} ms...");
+        }
+        else
+        {
+            _sessionCookie = null;
+            _zoneEndpoint = null;
+            _zoneReattachTries = 0;
+        }
+
+        _leftZoning = false;
 
         if (Client.Config.AutoReconnect)
         {
@@ -565,7 +606,14 @@ public class NetworkSession
             {
                 try
                 {
-                    Connect();
+                    if (reattachEndpoint != null)
+                    {
+                        _stateMachine.Fire(_stateMachine.ConnectTrigger, reattachEndpoint);
+                    }
+                    else
+                    {
+                        Connect();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -629,11 +677,17 @@ public class NetworkSession
 
         _stateMachine.Configure(State.Zoning)
             .OnEntry(() => { Client.OnTeleportStart(); })
+            .OnExit(() => _leftZoning = true) // a drop out of here re-attaches, not re-logins
             .SubstateOf(State.Connected)
             .Permit(Trigger.CharInPlay, State.InPlay)
             .Permit(Trigger.Disconnect, State.Disconnected);
 
         _stateMachine.Configure(State.InPlay)
+            .OnEntry(() =>
+            {
+                _leftZoning = false;
+                _zoneReattachTries = 0; // attached: the next zone gets a fresh re-attach budget
+            })
             .SubstateOf(State.Connected)
             .Ignore(Trigger.CharInPlay)
             .Permit(Trigger.Connect, State.Connecting)
@@ -667,6 +721,15 @@ public class NetworkSession
 
     private void OnInitiateCompressionMessage()
     {
+        // The packet can outlive its session: it sits in the inbound queue while a disconnect
+        // tears everything down, and this ran after Reconnect() - NullReferenceException on the
+        // cookie, logged as an "unparseable packet" (2026-10-09 09:32:51).
+        if (_sessionCookie == null)
+        {
+            _logger.Debug("zone login skipped: no session cookie (the session was torn down).");
+            return;
+        }
+
         Send(new ZoneLoginMessage
         {
             CharacterId = Client.LocalDynelId,
@@ -689,7 +752,9 @@ public class NetworkSession
                 Cookie2 = zoneInfoMsg.Cookie2,
             };
 
-            _stateMachine.Fire(_stateMachine.ConnectTrigger, new IPEndPoint(zoneInfoMsg.ServerIpAddress, zoneInfoMsg.ServerPort));
+            // Remembered so a drop mid-attach can re-attach THIS endpoint with the cookie.
+            _zoneEndpoint = new IPEndPoint(zoneInfoMsg.ServerIpAddress, zoneInfoMsg.ServerPort);
+            _stateMachine.Fire(_stateMachine.ConnectTrigger, _zoneEndpoint);
         });
 
         _internalSysMsgCallbacks.Add(SystemMessageType.ZoneRedirection, msg =>
@@ -698,7 +763,8 @@ public class NetworkSession
 
             _logger.Debug($"ZoneRediction to {zoneRedMsg.ServerIpAddress}:{zoneRedMsg.ServerPort}");
 
-            _stateMachine.Fire(_stateMachine.ConnectTrigger, new IPEndPoint(zoneRedMsg.ServerIpAddress, zoneRedMsg.ServerPort));
+            _zoneEndpoint = new IPEndPoint(zoneRedMsg.ServerIpAddress, zoneRedMsg.ServerPort);
+            _stateMachine.Fire(_stateMachine.ConnectTrigger, _zoneEndpoint);
         });
 
         _internalSysMsgCallbacks.Add(SystemMessageType.LoginError, msg =>
