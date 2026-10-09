@@ -320,7 +320,13 @@ public sealed class OwnerChat
     private void NanoResetCommand(Action<string> reply)
     {
         var me = DynelManager.LocalPlayer;
-        var buffs = me?.Buffs;
+        if (me == null)
+        {
+            reply("No character - nothing to reset.");
+            return;
+        }
+
+        var buffs = me.Buffs;
         if (buffs == null || buffs.Count == 0)
         {
             reply("No buffs running - nothing to reset.");
