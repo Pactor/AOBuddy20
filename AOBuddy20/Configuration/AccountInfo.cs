@@ -37,6 +37,8 @@ public class AccountInfo
     public int LowRechargerCount = 10; // warn when usable rechargers fall to this many
     public string ResupplyStimName = "Health and Nano Stim"; // exact name: "Stim" also matches Boosted/Burst/Swim
     public string ResupplyRechargerName = "Health and Nano Recharger";
+    public string ResupplyLockpickName = "Lockpick"; // the mission doors' key: used on a shut door (break/entry)
+    public int ResupplyLockpickTarget = 1; // one in the packs is the stock; it is not used up by success
     public int ResupplyStimTarget = 2; // top usable stims back up to this many (times 25)
     public int ResupplyRechargerTarget = 3; // top usable rechargers back up to this many (times 20)
     public float ResupplySearchRadius = 40f; // terminals within this of the bot are considered

@@ -96,7 +96,7 @@ namespace AOBuddy20.Controlling;
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class MissionController : IPacketConsumer
 {
-    private enum Phase { Idle, ToTerminal, Rolling, AwaitList, Accepting, ToDoor, EnterDoor, Blitz, RewardBag, Leaving, WaitingSell }
+    private enum Phase { Idle, ToTerminal, Rolling, AwaitList, Accepting, ToDoor, EnterDoor, Blitz, PickDoor, RewardBag, Leaving, WaitingSell }
 
     // Mission types (the terminal list's MissionIcon codes).
     public const int TypeFindPerson = 0x2C47;
@@ -121,6 +121,14 @@ public sealed class MissionController : IPacketConsumer
     private const double DoorSettle = 0.6; // stand still before judging the door
     private const double DoorUseEverySec = 3.0; // the entrance Use repeats this often while standing
     private const float DoorUseRadius = 5f; // the IdentityType.Door dynel this close to the spot is the entrance
+
+    // LOCKED DOORS (owner, 2026-10-09): shut doors want the lockpick from the packs, used ON the
+    // door - with the skill for it one of the first tries lands, but it is a bit of random, so
+    // twenty tries before the door is called a lost cause.
+    private const int DoorPickTries = 20;
+    private const double DoorPickEverySec = 2.0; // one pick attempt per this (the use takes a beat server-side)
+    private const double DoorPickApproachTimeout = 25.0; // the walk to the shut door that never got there
+    private const float DoorPickStandoff = 2.0f; // stop this far short of the door (its leaf bounces the body)
     private const double SearchHopTimeout = 25.0; // a room walk this long without arriving: next room
     private const int DoorSides = 8; // 45° ladder, this many sides per round
     private const int DoorRounds = 2; // and this many rounds, then the door is given up
@@ -194,7 +202,7 @@ public sealed class MissionController : IPacketConsumer
     // for the composed layout dropped the whole burst in the Tick's blind window (owner,
     // 2026-10-03: AOBuddy10 had the whole playfield at the entrance - no magic, we were
     // throwing the doors away).
-    private readonly List<(short room, short adjoining, Vector3 pos, int pf)> _serverDoors = new();
+    private readonly List<(short room, short adjoining, Vector3 pos, int pf, uint flags)> _serverDoors = new();
     private readonly HashSet<long> _doorKeys = new(); // streamed once each: the same door re-streams on every approach
     private int _doorKeysPf = -1; // the building _doorKeys was built for
     private readonly Dictionary<int, Vector3> _serverExitByPf = new();
@@ -234,6 +242,17 @@ public sealed class MissionController : IPacketConsumer
     private int _doorStage;
     private double _doorUseAt = double.NegativeInfinity; // the last entrance Use (the stand beat repeats it)
     private int _exitStands;
+
+    // The lockpick beat (Phase.PickDoor): the shut door we stand at, the tries spent on it, and
+    // the phase to resume when it opens (or honestly does not). _pickLost holds the doors the
+    // beat already failed on (a re-pick gets three minutes' rest).
+    private Phase _phaseBeforePick;
+    private Vector3 _pickDoorPos;
+    private long _pickDoorKey;
+    private string _pickDoorLabel = "";
+    private int _pickTries;
+    private double _pickAt = double.NegativeInfinity;
+    private readonly Dictionary<long, double> _pickLost = new();
 
     // The objective in progress.
     private int _acts;
@@ -816,6 +835,194 @@ public sealed class MissionController : IPacketConsumer
             .FirstOrDefault();
     }
 
+    /// <summary>The door's state bits, wire-named: stat 0 carries 0x40 locked, 0x80 open
+    /// (DoorFullUpdateMessage.Stats remarks).</summary>
+    private static string DoorState(uint flags) =>
+        (flags & 0x80) != 0 ? "OPEN" : (flags & 0x40) != 0 ? "LOCKED" : "shut";
+
+    /// <summary>The stall log's verdict: the streamed door nearest the goal (within 8 m) and its
+    /// state - a walk that cannot reach is usually standing at that door's closed leaf (owner,
+    /// 2026-10-09, Subway - Ventil: 11 m yank storms at the shut first doorway).</summary>
+    private string DoorVerdict(Vector3 goal)
+    {
+        var bestDist = double.MaxValue;
+        (short room, short adjoining, Vector3 pos, uint flags) best = default;
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf != _missionPf)
+            {
+                continue;
+            }
+
+            var dist = Movement.Flat(goal, d.pos);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                best = (d.room, d.adjoining, d.pos, d.flags);
+            }
+        }
+
+        return bestDist <= 8f
+            ? $" - the goal sits {bestDist:0.0} m from door r{best.room}~r{best.adjoining} ({DoorState(best.flags)})"
+            : "";
+    }
+
+    /// <summary>The door's physical identity (room pair + position, pf-less) - the dedupe key the
+    /// stream handler uses, and the lockpick beat's "this door is a lost cause" key.</summary>
+    private static long DoorKey(short room, short adjoining, Vector3 pos) =>
+        ((long)(ushort)room << 40) | ((long)(ushort)adjoining << 24)
+        | ((long)(ushort)(short)Math.Round(pos.X * 2) << 12) | (ushort)(short)Math.Round(pos.Z * 2);
+
+    /// <summary>The streamed door of this building that is NOT open and stands within 8 m of the
+    /// goal - the one the walk just bounced off. A door the lockpick beat already failed on sits
+    /// out three minutes: the random does not turn kind on a re-pick.</summary>
+    private (short room, short adjoining, Vector3 pos, uint flags)? ShutDoorNear(Vector3 goal)
+    {
+        var bestDist = double.MaxValue;
+        (short room, short adjoining, Vector3 pos, uint flags)? best = null;
+        var now = Environment.TickCount64 / 1000.0;
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf != _missionPf || (d.flags & 0x80) != 0)
+            {
+                continue; // another building's, or already open
+            }
+
+            if (_pickLost.TryGetValue(DoorKey(d.room, d.adjoining, d.pos), out var lostAt) && now - lostAt < 180)
+            {
+                continue;
+            }
+
+            var dist = Movement.Flat(goal, d.pos);
+            if (dist <= 8f && dist < bestDist)
+            {
+                bestDist = dist;
+                best = (d.room, d.adjoining, d.pos, d.flags);
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Whether the streamed door at this position re-streamed OPEN (the lockpick beat's
+    /// success signal - the flags refresh on every re-stream).</summary>
+    private bool DoorNowOpen(Vector3 doorPos)
+    {
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf == _missionPf && Movement.Flat(d.pos, doorPos) < 1.5f)
+            {
+                return (d.flags & 0x80) != 0;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The lockpick from the packs whose use req we meet - the mission doors' key.</summary>
+    private Item FindLockpick(LocalPlayer me)
+    {
+        return HealItems.AllInvItems()
+            .Where(it => it != null &&
+                         string.Equals(it.Name, _config.ResupplyLockpickName, StringComparison.OrdinalIgnoreCase) &&
+                         it.MeetsUseReqs(me, false))
+            .OrderByDescending(it => it.Ql)
+            .FirstOrDefault();
+    }
+
+    // ---- Phase: PickDoor (the lockpick beat) ---------------------------------------------
+    // The walk bounced off a shut door; walk up to it short of the leaf and use the pick on the
+    // door dynel until the re-stream says open - twenty tries, the open is a bit of random
+    // (owner, 2026-10-09: with the break/entry skill for it one of the first lands).
+
+    private void StartPicking((short room, short adjoining, Vector3 pos, uint flags) door)
+    {
+        _phaseBeforePick = _phase;
+        _pickDoorPos = door.pos;
+        _pickDoorKey = DoorKey(door.room, door.adjoining, door.pos);
+        _pickDoorLabel = door.adjoining >= 0 ? $"r{door.room}~r{door.adjoining}" : $"r{door.room}";
+        _pickTries = 0;
+        _pickAt = double.NegativeInfinity;
+        _doorStage = 0;
+        _goalSet = false;
+        _logger.LogInformation($"MISSION: {_pickDoorLabel} stands {DoorState(door.flags)} on the way - going for the lockpick.");
+        SetPhase(Phase.PickDoor);
+    }
+
+    private void PickDoorTick(LocalPlayer me)
+    {
+        if (_doorStage == 0)
+        {
+            // Stop SHORT of the leaf: the closed door bounces the body (the Subway yank storm).
+            var away = me.Transform.Position - _pickDoorPos;
+            away.Y = 0;
+            var stand = away.Magnitude > 0.01f ? _pickDoorPos + away.Normalize() * DoorPickStandoff : _pickDoorPos;
+            WalkTo(me.Transform.Position, stand, 1.0f, "the shut door (lockpick)");
+            if (_movement.IsGoalReached(ControlPriority.Mission))
+            {
+                _doorStage = 1;
+                _goalSet = false;
+                _goalAt = -1;
+                _pickAt = double.NegativeInfinity;
+            }
+            else if (_phaseTime > DoorPickApproachTimeout)
+            {
+                PickGiveUp("the approach never got there");
+            }
+
+            return;
+        }
+
+        if (DoorNowOpen(_pickDoorPos))
+        {
+            _logger.LogInformation($"MISSION: {_pickDoorLabel} is open - on with the run.");
+            ResumeAfterPick();
+            return;
+        }
+
+        if (_phaseTime - _pickAt < DoorPickEverySec)
+        {
+            return;
+        }
+
+        var pick = FindLockpick(me);
+        if (pick == null)
+        {
+            PickGiveUp($"no '{_config.ResupplyLockpickName}' in the packs - resupply stocks them");
+            return;
+        }
+
+        var dynel = DoorWithin(_pickDoorPos, DoorUseRadius);
+        if (dynel == null)
+        {
+            PickGiveUp("no door dynel streams at the shut door");
+            return;
+        }
+
+        _pickAt = _phaseTime;
+        _pickTries++;
+        GameCommands.UseItemOn(me, pick.Slot, dynel.Identity);
+        _logger.LogInformation($"MISSION: lockpick try {_pickTries}/{DoorPickTries} on {_pickDoorLabel} ({dynel.Identity}).");
+        if (_pickTries >= DoorPickTries)
+        {
+            PickGiveUp($"the pick did not open it in {DoorPickTries} tries");
+        }
+    }
+
+    private void PickGiveUp(string why)
+    {
+        _pickLost[_pickDoorKey] = Environment.TickCount64 / 1000.0;
+        _logger.LogInformation($"MISSION: {_pickDoorLabel} stays shut - {why}.");
+        ResumeAfterPick();
+    }
+
+    private void ResumeAfterPick()
+    {
+        _goalSet = false;
+        _movement.ClearDesiredGoal(ControlPriority.Mission);
+        SetPhase(_phaseBeforePick); // the giving-up branch re-runs there and asides the goal honestly
+    }
+
     public void Stop(string why)
     {
         if (!Active)
@@ -894,6 +1101,7 @@ public sealed class MissionController : IPacketConsumer
         router.Register(SimpleItemHandler, N3MessageType.SimpleItemFullUpdate, 0);
         router.Register(ZoneInHandler, N3MessageType.PlayfieldAnarchyF, 0); // raw bytes: the building layout
         router.Register(DoorFullUpdateHandler, N3MessageType.DoorFullUpdate, 0); // server doors: exact
+        router.Register(DoorStatusUpdateHandler, N3MessageType.DoorStatusUpdate, 0); // door open/close flips
         router.Register(ClearPctHandler, N3MessageType.FormatFeedback, 0); // the clear %'s own line
     }
 
@@ -902,6 +1110,19 @@ public sealed class MissionController : IPacketConsumer
     private bool ZoneInHandler(AOMessage arg)
     {
         _zoneInRaw = arg.RawPacket;
+        return false;
+    }
+
+    // The door's open/close flip (the lockpick's success may land here instead of a full update):
+    // logged with its identity so the next run proves how the state travels and which id names a
+    // door. Matching it back to _serverDoors waits for that wire truth.
+    private bool DoorStatusUpdateHandler(AOMessage arg)
+    {
+        if (arg.Body is DoorStatusUpdateMessage s)
+        {
+            _logger.LogInformation($"MISSION: door status {s.Identity}: {(s.Open != 0 ? "OPEN" : "closed")}.");
+        }
+
         return false;
     }
 
@@ -916,15 +1137,44 @@ public sealed class MissionController : IPacketConsumer
             return false;
         }
 
+        // THE STATE BITS (owner, 2026-10-09): stat 0 (Flags) carries 0x40 locked, 0x80 open - the
+        // same two bits DoorStatusUpdateMessage's Locked and Open are read from (its remarks). The
+        // Subway - Ventil run walked into 11 m yank storms at the first doorway: the doors there
+        // stream shut, and the planner (doors walkable by default) kept driving the body into a
+        // closed leaf. Logged per door; the walk gates and picks on this from here.
+        var flags = 0u;
+        if (door.Stats != null)
+        {
+            foreach (var s in door.Stats)
+            {
+                if (s.Value1 == Stat.Flags)
+                {
+                    flags = s.Value2;
+                    break;
+                }
+            }
+        }
+
         // The same door re-streams on every approach; one copy each keeps the corrector's count
         // honest (it re-applies when the count grows) and the search's door walk deduped. The key
         // is the door's physical identity (room pair + position), pf-less: the pre-compose copy
         // carries 0 and the re-stream the real playfield, and they are one door.
-        var key = ((long)(ushort)door.Room << 40) | ((long)(ushort)door.AdjoiningRoom << 24)
-                  | ((long)(ushort)(short)Math.Round(door.Coordinate.X * 2) << 12)
-                  | (ushort)(short)Math.Round(door.Coordinate.Z * 2);
+        var key = DoorKey(door.Room, door.AdjoiningRoom, door.Coordinate);
         if (!_doorKeys.Add(key))
         {
+            // A re-stream REFRESHES the state: the lockpick beat watches these flags flip to open
+            // (the door re-streams when it changes, and on every approach).
+            for (var i = 0; i < _serverDoors.Count; i++)
+            {
+                var d = _serverDoors[i];
+                if (d.room == door.Room && d.adjoining == door.AdjoiningRoom &&
+                    Movement.Flat(d.pos, door.Coordinate) < 0.5f)
+                {
+                    _serverDoors[i] = (d.room, d.adjoining, d.pos, d.pf, flags);
+                    break;
+                }
+            }
+
             return false;
         }
 
@@ -933,18 +1183,18 @@ public sealed class MissionController : IPacketConsumer
         // the search never checked one). What names the building is OUR compose: store doors under
         // it once composed, under 0 in the pre-compose blind window (OnZoneIn re-keys those).
         var pf = _missionPf >= 0 ? _missionPf : 0;
-        _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, pf));
+        _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, pf, flags));
         if (door.Room == -1)
         {
             _serverExitByPf[pf] = door.Coordinate;
             _logger.LogInformation($"MISSION: exit door at ({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0}," +
-                                   $"{door.Coordinate.Z:0.0}) pf {door.Playfield}->{pf}.");
+                                   $"{door.Coordinate.Z:0.0}) {DoorState(flags)} pf {door.Playfield}->{pf}.");
         }
         else
         {
             _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} at " +
                                    $"({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0},{door.Coordinate.Z:0.0}) " +
-                                   $"pf {door.Playfield}->{pf}.");
+                                   $"{DoorState(flags)} pf {door.Playfield}->{pf}.");
         }
 
         return false;
@@ -1253,6 +1503,9 @@ public sealed class MissionController : IPacketConsumer
             case Phase.Blitz:
                 BlitzTick(me);
                 break;
+            case Phase.PickDoor:
+                PickDoorTick(me);
+                break;
             case Phase.RewardBag:
                 RewardBagTick(me);
                 break;
@@ -1289,7 +1542,7 @@ public sealed class MissionController : IPacketConsumer
                 if (_serverDoors[i].pf == 0)
                 {
                     var d = _serverDoors[i];
-                    _serverDoors[i] = (d.room, d.adjoining, d.pos, _missionPf);
+                    _serverDoors[i] = (d.room, d.adjoining, d.pos, _missionPf, d.flags);
                 }
             }
 
@@ -2331,17 +2584,27 @@ public sealed class MissionController : IPacketConsumer
         // same one every tick.
         if (_goalSet && !_movement.HasGoal(ControlPriority.Mission))
         {
+            // A shut door at the goal gets picked before anything is given up on (owner,
+            // 2026-10-09): the yank storm the walk just suffered was the closed leaf bouncing
+            // the body, and twenty lockpick tries open it for the re-plan.
+            var shut = ShutDoorNear(_goalPos);
+            if (shut.HasValue)
+            {
+                StartPicking(shut.Value);
+                return;
+            }
+
             if (_pullId != Identity.None && _goalWhat.StartsWith("clear: the pull", StringComparison.Ordinal))
             {
                 _pullAside[_pullId] = _phaseTime + PullAsideSeconds;
-                _logger.LogInformation("MISSION: clearing: no walk to the pull right now - it sits out a minute.");
+                _logger.LogInformation($"MISSION: clearing: no walk to the pull right now{DoorVerdict(_goalPos)} - it sits out a minute.");
                 _pullId = Identity.None;
                 PullPick = null;
             }
             else if (_currentClearRoom.HasValue)
             {
                 _clearVisited.Add(_currentClearRoom.Value);
-                _logger.LogInformation("MISSION: clearing: no walk to the room right now - it counts as walked.");
+                _logger.LogInformation($"MISSION: clearing: no walk to the room right now{DoorVerdict(_goalPos)} - it counts as walked.");
                 _currentClearRoom = null;
             }
 
@@ -2967,9 +3230,9 @@ public sealed class MissionController : IPacketConsumer
 
         mj["floors"] = new JArray(_nav.Dungeon.Rooms.Select(r => r.Floor).Distinct().OrderBy(f => f).Select(f => new JValue(f)));
 
-        // The server's own doors (DoorFullUpdate/DoorStatusUpdate), re-keyed with the compose's pf
-        // like the planner's - the monitor draws them on the plan. AOBuddy20 tracks no lock/open
-        // state on them (the planner walks up and uses), so only the placement travels.
+        // The server's own doors (DoorFullUpdate), re-keyed with the compose's pf like the
+        // planner's - the monitor draws them on the plan with their state bits. DoorStatusUpdate
+        // is not tracked yet: the streamed state is the zone-in snapshot (owner, 2026-10-09).
         var doors = new JArray();
         var doorNo = 0;
         foreach (var d in _serverDoors.Where(x => x.pf == _missionPf))
@@ -2981,6 +3244,7 @@ public sealed class MissionController : IPacketConsumer
                 ["room"] = (int)d.room,
                 ["adjoiningRoom"] = (int)d.adjoining,
                 ["floor"] = FloorAt(d.pos),
+                ["state"] = DoorState(d.flags),
             });
             doorNo++;
         }
@@ -4246,7 +4510,7 @@ public sealed class MissionController : IPacketConsumer
             }
 
             dump.AppendLine($"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Y:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
-            dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Y:0.0},{sd.pos.Z:0.0})"))}");
+            dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Y:0.0},{sd.pos.Z:0.0}) {DoorState(sd.flags)}"))}");
             dump.AppendLine($"server exit: {(_serverExitByPf.TryGetValue(_missionPf, out var sx) ? $"{sx.X:0.0},{sx.Z:0.0}" : "none seen")}");
             dump.AppendLine($"target: {(TryGetTargetPos(out var tp) ? $"{tp.X:0.0},{tp.Z:0.0}" : "not seen")}");
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"mission-layout-{_missionPf}.txt"), dump.ToString());

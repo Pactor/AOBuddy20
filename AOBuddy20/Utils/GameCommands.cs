@@ -41,4 +41,16 @@ public static class GameCommands
         Client.Send(new GenericCmdMessage
         { Action = GenericCmdAction.Use, User = me.Identity, Target = target, Count = 1, Temp4 = 0 });
     }
+
+    /// <summary>
+    ///     Use an INVENTORY ITEM on a target (the lockpick on a shut mission door): the target is
+    ///     selected first, then the item's slot is used - the client's click-item, click-target.
+    ///     The item form is Item.Use's proven shape (Count=1, no Temp4 - the stims).
+    /// </summary>
+    public static void UseItemOn(LocalPlayer me, Identity itemSlot, Identity target)
+    {
+        Targeting.SetTarget(target);
+        Client.Send(new GenericCmdMessage
+        { Action = GenericCmdAction.Use, User = me.Identity, Target = itemSlot, Count = 1 });
+    }
 }

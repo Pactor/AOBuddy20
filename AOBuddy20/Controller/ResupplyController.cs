@@ -67,7 +67,7 @@ public sealed class ResupplyController : IPacketConsumer
 {
     private enum Phase { Idle, Approach, Opening, Adding, Settling, WaitMoney, Transit }
 
-    private enum Supply { Stim, Recharger, Container }
+    private enum Supply { Stim, Recharger, Container, Lockpick }
 
     private sealed class Offer
     {
@@ -191,11 +191,15 @@ public sealed class ResupplyController : IPacketConsumer
 
     /// <summary>
     ///     Below the warning floor on either supply - what solo mode will check before deciding to
-    ///     go shopping.
+    ///     go shopping. The lockpick rides along: locked mission doors want one in the packs
+    ///     (owner, 2026-10-09), and it hangs in a DIFFERENT machine than the pharmacy's - the
+    ///     machine memory learns which one sells it on the first trip.
     /// </summary>
     public bool NeedsResupply()
     {
-        return Have(Supply.Stim) <= _config.LowStimCount || Have(Supply.Recharger) <= _config.LowRechargerCount;
+        return Have(Supply.Stim) <= _config.LowStimCount ||
+               Have(Supply.Recharger) <= _config.LowRechargerCount ||
+               Have(Supply.Lockpick) < _config.ResupplyLockpickTarget;
     }
 
     // A container run prefers terminals whose name says containers/backpacks over the supply keywords.
@@ -310,7 +314,7 @@ public sealed class ResupplyController : IPacketConsumer
         _haveAtStart.Clear();
         _bought.Clear();
         _containerBuy = 0;
-        foreach (Supply s in new[] { Supply.Stim, Supply.Recharger })
+        foreach (Supply s in new[] { Supply.Stim, Supply.Recharger, Supply.Lockpick })
         {
             _haveAtStart[s] = Have(s);
             _bought[s] = 0;
@@ -808,7 +812,7 @@ public sealed class ResupplyController : IPacketConsumer
             .Where(x => x.item != null && !string.IsNullOrEmpty(x.item.Name))
             .Select(x => new Offer(x.slot, x.item!)).ToList();
         var sells = new List<Supply>();
-        foreach (Supply s in new[] { Supply.Stim, Supply.Recharger })
+        foreach (Supply s in new[] { Supply.Stim, Supply.Recharger, Supply.Lockpick })
         {
             if (offers.Any(o => Is(o.Item, s)))
             {
@@ -817,7 +821,7 @@ public sealed class ResupplyController : IPacketConsumer
         }
 
         Remember(_machine, sells);
-        _logger.LogInformation($"RESUPPLY: '{_machineName}' stims/rechargers: " +
+        _logger.LogInformation($"RESUPPLY: '{_machineName}' sells: " +
                                (sells.Count == 0
                                    ? "none"
                                    : string.Join(", ", offers.Where(o => sells.Any(s => Is(o.Item, s)))
@@ -827,10 +831,14 @@ public sealed class ResupplyController : IPacketConsumer
         {
             // Fitting = the highest QL whose First Aid / Treatment requirement he meets right now.
             // Bags take no skill check: the cheapest line of the wanted name is the one to buy.
+            // The lockpick gates on its own use req (break/entry), not the heal kit's.
             var fitting = need == Supply.Container
                 ? offers.Where(o => Is(o.Item, need)).OrderBy(o => o.Item.Ql)
-                : offers.Where(o => Is(o.Item, need) && HealItems.MeetsHealReqs(o.Item, me))
-                    .OrderByDescending(o => o.Item.Ql);
+                : need == Supply.Lockpick
+                    ? offers.Where(o => Is(o.Item, need) && o.Item.MeetsUseReqs(me, false))
+                        .OrderBy(o => o.Item.Ql) // any pick he can use opens the door; the cheap one
+                    : offers.Where(o => Is(o.Item, need) && HealItems.MeetsHealReqs(o.Item, me))
+                        .OrderByDescending(o => o.Item.Ql);
             var best = fitting.FirstOrDefault();
             if (best == null)
             {
@@ -1377,6 +1385,7 @@ public sealed class ResupplyController : IPacketConsumer
                {
                    Supply.Stim => _config.ResupplyStimName,
                    Supply.Recharger => _config.ResupplyRechargerName,
+                   Supply.Lockpick => _config.ResupplyLockpickName,
                    _ => _config.ResupplyContainerName,
                }, StringComparison.OrdinalIgnoreCase);
     }
@@ -1394,7 +1403,9 @@ public sealed class ResupplyController : IPacketConsumer
 
         var me = DynelManager.LocalPlayer;
         var items = HealItems.AllInvItems();
-        return items.Where(it => Is(it, s) && HealItems.MeetsHealReqs(it, me))
+        // the lockpick's gate is its own use req (break/entry), not the heal kit's First Aid
+        return items.Where(it => Is(it, s) &&
+                                 (s == Supply.Lockpick ? it.MeetsUseReqs(me, false) : HealItems.MeetsHealReqs(it, me)))
             .Sum(it => Math.Max(1, it.Count));
     }
 
@@ -1405,7 +1416,13 @@ public sealed class ResupplyController : IPacketConsumer
             return _haveAtStart.TryGetValue(Supply.Container, out var had) ? had + _containerBuy : _containerBuy;
         }
 
-        return s == Supply.Stim ? _config.ResupplyStimTarget : _config.ResupplyRechargerTarget;
+        return s switch
+        {
+            Supply.Stim => _config.ResupplyStimTarget,
+            Supply.Recharger => _config.ResupplyRechargerTarget,
+            Supply.Lockpick => _config.ResupplyLockpickTarget,
+            _ => 0,
+        };
     }
 
     // Still to buy this run: what the inventory says is missing, but never more than the run set
@@ -1424,7 +1441,7 @@ public sealed class ResupplyController : IPacketConsumer
 
     private List<Supply> Needs()
     {
-        return new[] { Supply.Stim, Supply.Recharger, Supply.Container }.Where(s => Remaining(s) > 0).ToList();
+        return new[] { Supply.Stim, Supply.Recharger, Supply.Container, Supply.Lockpick }.Where(s => Remaining(s) > 0).ToList();
     }
 
     private static string Plural(Supply s)
@@ -1433,6 +1450,7 @@ public sealed class ResupplyController : IPacketConsumer
         {
             Supply.Stim => "stims",
             Supply.Recharger => "rechargers",
+            Supply.Lockpick => "lockpicks",
             _ => "bags",
         };
     }
