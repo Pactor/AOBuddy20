@@ -109,7 +109,20 @@ public sealed class MovementController : IPacketConsumer
     // wait sent a second tell into a warp already on its way): wait long, ask him twice at most.
     private const double ScottyWait = 45;
     private const int ScottyTells = 2;
-    private const float PadReach = 0.6f;
+    // PADS ARE TIGHT TOO (owner, 2026-10-09 11:16, whompa line to Newland City: stood 0.5 m out
+    // - inside the old 0.6 m arrive - and the server refused the use with "You are too far away;
+    // please move closer!"): the walked-on exits have the same sub-half-metre activation as the
+    // doors. 0.3 m leaves margin on both the walker's stop and the server's check; a refused use
+    // burns the leg's try budget and re-routes round the pad (2026-10-09 09:33, "pad to Old
+    // Athen gave nothing after 3 tries"), so the radius is the difference between zoning and
+    // wandering to the neighbours.
+    private const float PadReach = 0.3f;
+
+    // The head-on pad approach: the standoff this far out on the line from where we stand to the
+    // pad (the exit data carries no facing - our own approach line is the front), walked to this
+    // loosely (any point within the radius straightens the final leg).
+    private const float PadApproach = 4f;
+    private const float PadApproachReach = 1f;
     private const float ObjectReach = 2.5f;
 
     // A proxy playfield's exit door takes the crossing only from inside it: activation radius is
@@ -1804,6 +1817,15 @@ public sealed class MovementController : IPacketConsumer
         t.LegPf = _pf;
         t.LegReachedAt = -1;
         t.AwaitAt = -1;
+        t.LegStage = 1; // every kind but the pad walks its one goal; the Line case below re-stages
+        if (hop.A.X == 0 && hop.A.Y == 0 && hop.A.Z == 0)
+        {
+            // An exit with no position (Scotty: a tell from anywhere) must never become a walk
+            // goal - (0,0,0) is unwalkable and the escape fan is what answers (2026-10-09 11:30,
+            // the Scotty leg's stage advance pointed at LegExit.A = 0,0,0 and the bot fled in
+            // escape legs). Such legs stand where they are.
+            t.LegGoal = CurrentPosition;
+        }
         if (hop.Back)
         {
             // A proxy playfield's exit door: the crossing is taken from inside the doorway only -
@@ -1835,10 +1857,21 @@ public sealed class MovementController : IPacketConsumer
                 _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - stepping into the proxy door at ({hop.A.X:0.0} {hop.A.Z:0.0}).");
                 break;
             case ExitKind.Line:
-                t.LegGoal = hop.A;
-                SetDesiredGoal(hop.A, _pf, ControlPriority.Travel, PadReach);
-                _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - stepping onto the pad at ({hop.A.X:0.0} {hop.A.Z:0.0}).");
+            {
+                // HEAD-ON PADS (owner, 2026-10-09: "don't enter whompas from the side or the
+                // backside"): the exit data carries no facing, so the approach line IS the front -
+                // a standoff a few metres out on the line from where we stand to the pad, then
+                // the final metres straight in (TravelTick advances the stage on the standoff).
+                // A retry re-stages: a fresh head-on walk, not another stand at the same spot.
+                t.LegStage = 0;
+                var dir = hop.A - CurrentPosition;
+                dir.Y = 0;
+                var standoff = dir.Magnitude > 0.5f ? hop.A - dir.Normalize() * PadApproach : hop.A;
+                t.LegGoal = standoff;
+                SetDesiredGoal(standoff, _pf, ControlPriority.Travel, PadApproachReach);
+                _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - the pad at ({hop.A.X:0.0} {hop.A.Z:0.0}), standing off {PadApproach:0} m first for a head-on entry.");
                 break;
+            }
             case ExitKind.Scotty:
                 // A Scotty warp is a TELL from wherever we stand (AOBuddy10: "tell from where we stand" -
                 // it works from any playfield): the leg goal is here, so it reads reached at once and the
@@ -2101,6 +2134,20 @@ public sealed class MovementController : IPacketConsumer
             }
             else
             {
+                // PAD STAGE 0 done: standing off in front - the final approach straight in. Pads
+                // only: every other kind walks its one goal (and a position-less exit's A is
+                // 0,0,0 - never a walk goal; 2026-10-09 11:30, the Scotty leg fled in escapes).
+                if (t.LegStage == 0 && t.LegExit.Kind == ExitKind.Line)
+                {
+                    t.LegStage = 1;
+                    t.LegGoal = t.LegExit.A;
+                    t.LegReachedAt = -1;
+                    t.AwaitAt = -1;
+                    SetDesiredGoal(t.LegExit.A, t.LegPf, ControlPriority.Travel, PadReach);
+                    _logger.LogInformation($"TRAVEL: in front of the pad - the final approach ({t.LegExit.A.X:0.0} {t.LegExit.A.Z:0.0}).");
+                    return;
+                }
+
                 var now = _wetClock.Elapsed.TotalSeconds;
                 if (t.LegReachedAt < 0)
                 {
@@ -2679,6 +2726,7 @@ public sealed class MovementController : IPacketConsumer
         public ZoneExit LegExit; // the exit this leg takes; null between legs
         public Vector3 LegGoal; // where the leg walks: past the line, on the pad, or at the terminal
         public int LegPf; // the playfield the leg walks in
+        public int LegStage; // pads: 0 = the head-on standoff, 1 = the final approach onto the pad
         public double LegReachedAt = -1; // standing on the leg goal since (settle beat starts here)
         public double AwaitAt = -1; // the post-settle window: use sent (terminals) or standing (pads)
         public int Tries; // visits to this leg's goal: uses, stand-ons, walk-throughs
