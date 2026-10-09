@@ -224,6 +224,7 @@ public sealed class MissionController : IPacketConsumer
     private bool _goalSet;
     private double _goalAt = -1;
     private string _goalWhat = "";
+    private Vector3 _goalPos; // where _goalWhat points: a wandering pull moves, its label stays
 
     // The door approach (entering) and the exit push (leaving).
     private Vector3 _baseSide;
@@ -1384,10 +1385,12 @@ public sealed class MissionController : IPacketConsumer
             // and the run stood "arrived" until it timed out, never rolling).
             if (!_goalSet)
             {
-                _movement.SetDesiredGoal(TerminalApproach(me, saved), saved.pf, ControlPriority.Mission, TerminalReach);
+                var stand = TerminalApproach(me, saved);
+                _movement.SetDesiredGoal(stand, saved.pf, ControlPriority.Mission, TerminalReach);
                 _goalSet = true;
                 _goalWhat = "walking the last metres to the terminal";
                 _goalAt = _phaseTime;
+                _goalPos = stand;
             }
 
             if (_phaseTime - _goalAt > TerminalTimeout)
@@ -1957,7 +1960,11 @@ public sealed class MissionController : IPacketConsumer
         // The goal must still EXIST: the walk's yank give-up clears it behind our back, and a
         // matching _goalWhat alone would then no-op every tick forever (owner, 2026-10-03: three
         // mobs held the bot in a Subway mission, the goal was given up, and the run stood still).
-        if (_goalSet && _goalWhat == what && _movement.HasGoal(ControlPriority.Mission))
+        // It must also still POINT at the spot: a wandering pull moves while its label stays the
+        // same, and the stale goal reads reached - the dedup then swallowed every re-issue and
+        // the bot stood still beside a live mob 16 m off (owner, 2026-10-09 11:41, Shade-Y42).
+        if (_goalSet && _goalWhat == what && _movement.HasGoal(ControlPriority.Mission) &&
+            Movement.Flat(_goalPos, to) < 1f)
         {
             return; // already walking there
         }
@@ -1970,6 +1977,7 @@ public sealed class MissionController : IPacketConsumer
         _goalSet = true;
         _goalAt = _phaseTime;
         _goalWhat = what;
+        _goalPos = to;
         _logger.LogInformation($"MISSION: walking to {what} ({to.X:0.0} {to.Z:0.0}), {Movement.Flat(from, to):0} m.");
     }
 

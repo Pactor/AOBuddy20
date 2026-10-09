@@ -17,6 +17,7 @@ using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Serilog.Events;
+using SmokeLounge.AOtomation.Messaging.Messages.N3Messages;
 
 namespace AOBuddy20.Controlling;
 
@@ -122,6 +123,19 @@ public sealed class HealController
     private bool _ourCastInFlight;
     private double _castSentAt;
     private bool _castConfirmed;
+    private int _castNanoId; // the nano in flight - the one a refusal strikes off
+
+    // A nano the server refused (skill reqs, a lock) sits out this long before the pick tries it
+    // again - re-picking the same refusal every 2 s held the decision chain while the body died
+    // (owner, 2026-10-09 11:53). Long enough to outlive a fight; buffs that lift the req re-open
+    // it after.
+    private const double RefusedNanoSeconds = 90.0;
+    private readonly Dictionary<int, double> _refusedUntil = new();
+
+    // The heal-pet command's cadence (the attack order's retry rate): re-asserted while the want
+    // holds, so a pet that missed the order is re-driven, and one that is on it is left alone.
+    private const double HealPetRetrySec = 3.0;
+    private double _healPetSentAt = double.NegativeInfinity;
     private double _castRecharge; // stat 210 of the cast nano, seconds - armed on the land
 
     private double _loggedShortAt = double.NegativeInfinity; // the last "nothing usable" line (ShortLogSeconds gate)
@@ -407,6 +421,26 @@ public sealed class HealController
     /// </summary>
     private bool CombatHealTick(LocalPlayer me, string reason, int stimHealNow)
     {
+        // THE HEAL PET FIRST (owner, 2026-10-09): a heal pet up means the PET heals - command it
+        // (target-based like the attack order: our target on me, then Heal naming the pet) and
+        // stay out of the way; the chain runs on so the fight is driven and the body moves. Our
+        // own casts are for when no pet can do it, and never a summon - that is the pet brain's
+        // business ('Calling of Restite' was picked as a "heal nano" and cast-looped here).
+        var healPet = me.Pets.FirstOrDefault(p => p.Role == PetType.Heal);
+        if (healPet != null)
+        {
+            if (_clock - _healPetSentAt >= HealPetRetrySec)
+            {
+                Targeting.SetTarget(me.Identity);
+                me.CommandPets(PetCommand.Heal, new[] { healPet.Identity });
+                _healPetSentAt = _clock;
+                _loggedShortAt = double.NegativeInfinity;
+                _logger.LogInformation($"HEAL: '{healPet.Name}' commanded to heal me ({reason}).");
+            }
+
+            return false; // the pet is the healer: combat and movement keep their ticks
+        }
+
         var stim = _clock >= _stimLockedUntil ? BestUsable(Kind.Stim, me) : null;
         int nanoHeal = 0, nanoCost = 0;
         var nano = _clock >= _nanoRechargeUntil ? BestHealNano(me, out nanoHeal, out nanoCost) : null;
@@ -447,6 +481,7 @@ public sealed class HealController
         _ourCastInFlight = true;
         _castSentAt = _clock;
         _castConfirmed = false;
+        _castNanoId = nano.NanoId;
         _castRecharge = nano.Stat(210) / 100.0; // hundredths of seconds, per the server's own ×10 ms
         _loggedShortAt = double.NegativeInfinity;
         _logger.LogInformation($"HEAL: casting {NanoLibrary.NameOf(nano.NanoId)} ({reason}; heals {nanoHeal}, " +
@@ -516,6 +551,12 @@ public sealed class HealController
 
         _ourCastInFlight = false;
         _holding = false;
+        if (why.Contains("refused", StringComparison.OrdinalIgnoreCase))
+        {
+            // The strike-off: the pick must not re-choose what the server just refused.
+            _refusedUntil[_castNanoId] = _clock + RefusedNanoSeconds;
+        }
+
         _controlArbiter.ReleaseControl();
         _logger.LogInformation($"HEAL: cast abandoned - {why}.");
     }
@@ -559,6 +600,21 @@ public sealed class HealController
             if (h <= 0 || n.Stat(8) != 0)
             {
                 continue; // flat heals only: a heal amount, no duration
+            }
+
+            if (n.SummonPets.Count > 0)
+            {
+                continue; // A SUMMON IS NOT A HEAL (owner, 2026-10-09): the MP's pet formulas carry
+                          // a heal stat of their own - 'Calling of Restite' was picked as the best
+                          // "heal", refused for its skill reqs, and re-picked forever while the body
+                          // stood in the fire. The heal controller never summons pets - that is the
+                          // pet brain's business, driven by the combat brain.
+            }
+
+            if (_refusedUntil.TryGetValue(n.NanoId, out var ok) && _clock < ok)
+            {
+                continue; // the server refused this one moments ago (skill reqs, a lock) - it sits
+                          // out the window instead of looping refused casts
             }
 
             var c = n.Stat(407);
