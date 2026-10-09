@@ -142,7 +142,11 @@ public sealed class BuffBotController
             return false;
         }
 
-        return _movement.IsGoalReached(ControlPriority.Travel)
+        // The travel plan's own arrival counts ONLY while one is actually in flight - with no goal
+        // out, IsGoalReached read "reached" at session open too, and the whole walk stage was
+        // skipped from a spot 98 m away (owner, 2026-10-09: the nanoreset refill asked the buff
+        // bot from where it stood).
+        return (TravelGoalActive() && _movement.IsGoalReached(ControlPriority.Travel))
                || Vector3.Distance(_movement.CurrentPosition, _catalog.SpotPos) <= _config.BuffSpotArriveMeters;
     }
 
