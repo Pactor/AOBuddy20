@@ -54,7 +54,7 @@ public static class LearnedGround
     // objects, mobs - Newtonsoft maps just this).
     private sealed class NavRoads
     {
-        public List<List<float[]>> Segments;
+        public List<List<float[]>> Segments = null!; // mapped by Newtonsoft
     }
 
     private static readonly object Gate = new();

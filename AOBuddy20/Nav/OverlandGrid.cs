@@ -496,7 +496,7 @@ public sealed class OverlandGrid : IWalkGrid
                             float above = py - FloorH(k, f);
                             if (above >= BodyLow && above <= BodyHigh)
                             {
-                                _blockedFl.Add(((long)k << FloorShift) | f);
+                                _blockedFl.Add(((long)k << FloorShift) | (long)f);
                             }
                         }
                     }
@@ -881,7 +881,7 @@ public sealed class OverlandGrid : IWalkGrid
                     var fi = FloorIndex(kv.Key, all[f]);
                     if (fi >= 0)
                     {
-                        _blockedFl.Add(((long)kv.Key << FloorShift) | fi);
+                        _blockedFl.Add(((long)kv.Key << FloorShift) | (long)fi);
                     }
                 }
             }
@@ -945,7 +945,7 @@ public sealed class OverlandGrid : IWalkGrid
         return -1;
     }
 
-    private bool FloorOpen(int cell, int i) => !_blockedFl.Contains(((long)cell << FloorShift) | i);
+    private bool FloorOpen(int cell, int i) => !_blockedFl.Contains(((long)cell << FloorShift) | (long)i);
 
     /// <summary>Diagnostic: every floor of the cell at (x, z) with its open/blocked state.</summary>
     public string CellInfo(float x, float z)
@@ -1035,7 +1035,7 @@ public sealed class OverlandGrid : IWalkGrid
 
                     for (int f = 0; f < FloorCount(k); f++)
                     {
-                        _blockedFl.Remove(((long)k << FloorShift) | f);
+                        _blockedFl.Remove(((long)k << FloorShift) | (long)f);
                     }
                 }
             }
@@ -1070,7 +1070,7 @@ public sealed class OverlandGrid : IWalkGrid
 
                 for (int f = 0; f < FloorCount(k); f++)
                 {
-                    _blockedFl.Remove(((long)k << FloorShift) | f);
+                    _blockedFl.Remove(((long)k << FloorShift) | (long)f);
                 }
             }
         }
@@ -1307,7 +1307,7 @@ public sealed class OverlandGrid : IWalkGrid
             startCell = f.Value.cell;
         }
 
-        long start = ((long)startCell << FloorShift) | startFloor;
+        long start = ((long)startCell << FloorShift) | (long)startFloor;
         int bx = CellX(b.X), bz = CellZ(b.Z);
         float reachCells = Math.Max(reach, Cell) / Cell;
         // Close enough AND in plain sight of b: "4 m from the terminal" was otherwise the far side of its kiosk
@@ -1423,7 +1423,7 @@ public sealed class OverlandGrid : IWalkGrid
                         }
 
                         float stepCost = gc + len1 * (baseMul + slope) * roadMul;
-                        long nn = ((long)ncell << FloorShift) | j;
+                        long nn = ((long)ncell << FloorShift) | (long)j;
                         if (closed.Contains(nn) || !FloorOpen(ncell, j))
                         {
                             continue;
@@ -1488,7 +1488,7 @@ public sealed class OverlandGrid : IWalkGrid
         if (goalCell != bCell)
         {
             int bf = NearestFloor(bCell, b.Y);
-            if (bf >= 0 && IsOpen(b, extra) && Clear(goal, ((long)bCell << FloorShift) | bf, extra))
+            if (bf >= 0 && IsOpen(b, extra) && Clear(goal, ((long)bCell << FloorShift) | (long)bf, extra))
             {
                 pts[pts.Count - 1] = b;
             }

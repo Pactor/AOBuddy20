@@ -138,7 +138,7 @@ public sealed class BuffCatalog
 
     /// <summary>The wire tell for a buff: "cast &lt;code&gt;" (both bots; guarded against a double "cast").
     /// This is the "pass the buff, get the tell to use" the caller asks for - the server/bot is resolved here.</summary>
-    public string TellFor(BuffEntry buff) => WireTell(buff?.Tell);
+    public string TellFor(BuffEntry buff) => WireTell(buff.Tell);
 
     public static string WireTell(string code) =>
         string.IsNullOrWhiteSpace(code) || code.StartsWith("cast ", StringComparison.OrdinalIgnoreCase)
@@ -506,7 +506,7 @@ public sealed class BuffCatalog
     private List<BuffEntry> SelfBuffCandidates(LocalPlayer me, string myProfession)
     {
         var list = new List<BuffEntry>();
-        var learned = me?.SpellList;
+        var learned = me.SpellList; // SpellList itself may be null; the caller's me is not
         if (learned == null)
         {
             return list;

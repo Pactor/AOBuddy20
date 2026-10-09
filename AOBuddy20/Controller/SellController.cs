@@ -116,7 +116,7 @@ public sealed class SellController
 
     /// <summary>Items the predicate answers true for never sell, wherever they sit (the mission
     /// run's want list keeps what it rolled for, AOBuddy10's Bankable). Null sells everything.</summary>
-    public Func<Item, bool> KeepFromSale;
+    public Func<Item, bool>? KeepFromSale;
 
     public SellController(ILogger<SellController> logger, MovementController movement,
         ControlArbiter controlArbiter, AccountInfo config)

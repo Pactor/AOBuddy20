@@ -213,7 +213,7 @@ public class LocalPlayer : PlayerChar
     ///     identity (1:nanoline) plus duration and remaining, both in seconds. Seed the tracker -
     ///     this is the wire's own view of what is still locked, on our own character only.
     /// </summary>
-    internal void ApplyNanoLineLocks(FullCharacterMessage.UnknownDataType2[]? entries)
+    internal void ApplyNanoLineLocks(FullCharacterMessage.UnknownDataType2[] entries)
     {
         foreach (var e in entries ?? Array.Empty<FullCharacterMessage.UnknownDataType2>())
         {

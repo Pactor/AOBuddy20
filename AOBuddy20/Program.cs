@@ -32,7 +32,7 @@ namespace AOBuddy20;
 
 internal class Program
 {
-    private static ILogger _logger;
+    private static ILogger _logger = null!; // Log.Logger, wired in Main before anything logs
     private static readonly List<ClientDomain> _domains = new List<ClientDomain>();
 
     // The /log ring: created in Main before the logger (it is a sink), handed to the API here.
@@ -113,7 +113,7 @@ internal class Program
             Console.ReadLine();
             return;
         }
-        catch (DirectoryNotFoundException exception)
+        catch (DirectoryNotFoundException)
         {
             // The specified path is invalid (for example, it is on an unmapped drive).
             Log.Fatal($"Config file not found at '{configPath}'.");
@@ -133,7 +133,7 @@ internal class Program
             Console.ReadLine();
             return;
         }
-        catch (FileNotFoundException exception)
+        catch (FileNotFoundException)
         {
             // The file specified in 'path' was not found.
             Log.Fatal($"Config file not found at '{configPath}'.");

@@ -1330,9 +1330,7 @@ public class PetFirstBuffCycle
         private Phase _phase = Phase.Clear;
         private double _phaseAt;
         private BuffBotController.GuidedTurn? _turn;
-        private int _waitLogs;
         private bool _waitingCastEnd;
-        private bool _waitingRest;
 
         public FloorStep(PetFirstBuffCycle c, NcuStep ncu)
         {
@@ -1546,7 +1544,6 @@ public class PetFirstBuffCycle
                     $"PETCYCLE: floor - under 50% (nano {Pct(me, Stat.CurrentNano, Stat.MaxNanoEnergy):0}%, " +
                     $"health {Pct(me, Stat.Health, Stat.MaxHealth):0}%) - sitting for the rechargers.");
                 _c._heal.DemandRecharge("floor buffs");
-                _waitingRest = true;
                 return false;
             }
 

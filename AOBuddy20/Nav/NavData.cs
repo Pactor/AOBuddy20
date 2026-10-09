@@ -432,7 +432,7 @@ public sealed class AOBuddyNav
 
     private sealed class WalkedFile
     {
-        public List<List<float[]>> Segments;
+        public List<List<float[]>> Segments = null!; // mapped by Newtonsoft
     }
 
     // ---- missions ----------------------------------------------------------------------------------------

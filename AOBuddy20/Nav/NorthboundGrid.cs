@@ -33,7 +33,7 @@ public sealed class NorthboundPool
     ///     (a second or two, once per pool) and save it next to the bins. Null on any failure -
     ///     the caller falls back to the per-mission triangle path.
     /// </summary>
-    public static NorthboundPool For(string pluginDir, int poolPf, Action<string> log)
+    public static NorthboundPool? For(string pluginDir, int poolPf, Action<string> log)
     {
         var path = Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "poolgrid.northbound");
         if (File.Exists(path))
@@ -51,9 +51,9 @@ public sealed class NorthboundPool
         try
         {
             var pool = NavDungeon.Read(Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "rooms.json"));
-            List<List<float[]>> ReadBin(string file)
+            List<List<float[]>?> ReadBin(string file) // instances are sparse: a room index may have no chunk
             {
-                var byRoom = new List<List<float[]>>();
+                var byRoom = new List<List<float[]>?>();
                 var bp = Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), file);
                 if (!File.Exists(bp))
                 {
@@ -369,7 +369,7 @@ public static class NorthboundBuilder
     private const int MaxLevels = 8;
     private const float DoorAcross = 1.25f, DoorAlong = 3.5f; // as FloorGrid.StampDoorways
 
-    public static NorthboundRoom Build(int roomIndex, NavDungeon.Room pr, List<float[]> collision, List<float[]> walls, List<AOBuddyNav.Doorway> doorways, NavDungeon pool)
+    public static NorthboundRoom? Build(int roomIndex, NavDungeon.Room pr, List<float[]> collision, List<float[]> walls, List<AOBuddyNav.Doorway> doorways, NavDungeon pool)
     {
         // bounds over everything the room carries
         float minx = float.MaxValue, minz = float.MaxValue, maxx = float.MinValue, maxz = float.MinValue;

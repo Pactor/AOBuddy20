@@ -361,7 +361,7 @@ public sealed class MetaphysicistExternalBuffingBrain : ExternalBuffingBrain
             // ALREADY OUT, EQUAL OR BETTER: the pet the line wears was cast at skills that met
             // this very formula - a want at or below it is the floor's own steady gap.
             if (me.Pets.Any(p => p.Role == role)
-                && _bank.Pet.LastSummonNanoFor(role) is int lastId
+                && _bank.Pet?.LastSummonNanoFor(role) is int lastId
                 && ItemData.Find(lastId, out NanoItem worn) && pet.Ql <= worn.Ql)
             {
                 continue;

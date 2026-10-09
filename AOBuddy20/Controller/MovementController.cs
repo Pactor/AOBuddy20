@@ -248,7 +248,7 @@ public sealed class MovementController : IPacketConsumer
         _nav.Reset();
     }
 
-    private volatile AOBuddyNav _missionNav;
+    private volatile AOBuddyNav? _missionNav;
     private volatile int _missionNavPf = -1;
 
     /// <summary>
@@ -1138,7 +1138,7 @@ public sealed class MovementController : IPacketConsumer
         // border, and its nearest point was open water that never took the bot, owner 2026-09-27).
         if (_wetPf != snap.Playfield)
         {
-            Func<float, float, bool> wet = null;
+            Func<float, float, bool>? wet = null;
             var ground = _nav.Nav?.Ground;
             if (ground != null)
             {
@@ -1972,7 +1972,7 @@ public sealed class MovementController : IPacketConsumer
     // The route ask for travel: requirements against our live stats (TryGetStat is the sanctioned
     // cross-thread read - the ConcurrentDictionary stats), Scotty off until its data lands, an exit
     // we cannot name (no object identity) or that failed on this trip left out.
-    private ZoneRouteOptions TravelOptions(HashSet<ZoneExit> failed)
+    private ZoneRouteOptions TravelOptions(HashSet<ZoneExit>? failed)
     {
         var o = Zoning.RouteOptions(DynelManager.LocalPlayer);
         o.Filter = e =>
@@ -2051,7 +2051,7 @@ public sealed class MovementController : IPacketConsumer
     // stranger's pending request never sits on the answer that matters (owner, 2026-10-04). Outside
     // the window nothing is answered here at all - the owner's own invites stay manual. Runs on the
     // update thread (the packet pump raises Team.TeamRequest), so the DynelManager read is legal here.
-    private void OnTeamRequest(object sender, TeamRequestEventArgs e)
+    private void OnTeamRequest(object? sender, TeamRequestEventArgs e)
     {
         if (!AwaitingScottyWarp())
         {
@@ -2231,9 +2231,9 @@ public sealed class MovementController : IPacketConsumer
         HashSet<ZoneExit> failed;
         lock (_travelLock)
         {
-            if (_travel != t)
+            if (_travel != t || t.LegExit == null)
             {
-                return;
+                return; // not this plan's leg, or no leg to write off (between legs)
             }
 
             _travelFailed.Add(t.LegExit);
@@ -2723,7 +2723,7 @@ public sealed class MovementController : IPacketConsumer
     {
         public int TargetPf;
         public Vector3? TargetPos; // null = just get to the playfield
-        public ZoneExit LegExit; // the exit this leg takes; null between legs
+        public ZoneExit? LegExit; // the exit this leg takes; null between legs
         public Vector3 LegGoal; // where the leg walks: past the line, on the pad, or at the terminal
         public int LegPf; // the playfield the leg walks in
         public int LegStage; // pads: 0 = the head-on standoff, 1 = the final approach onto the pad

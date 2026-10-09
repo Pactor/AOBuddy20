@@ -223,7 +223,7 @@ public class Movement
     }
 
     /// <summary>Diagnostic tap for our own outbound movement packets (see MOVEDBG in Main).</summary>
-    public event Action<CharDCMoveMessage> Sent;
+    public event Action<CharDCMoveMessage>? Sent;
 
     // Movement types worth copying. Postures (sit, sleep, lounge, fly, frozen) are NOT: the bot has its
     // own rest logic and must never be locked into one of those by the owner's keyboard.

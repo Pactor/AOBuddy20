@@ -52,7 +52,6 @@ namespace AOBuddy20.Brains;
 [Brain(BrainKind.Combat)]
 public class GeneralCombatBrain : CombatBrain
 {
-    protected readonly PacketRouter _packetRouter;
     protected readonly OwnerAssist _ownerAssist;
     protected readonly BrainBank _brains;
     protected readonly MissionController _mission;
@@ -64,9 +63,8 @@ public class GeneralCombatBrain : CombatBrain
     public GeneralCombatBrain(ILogger<GeneralCombatBrain> logger, ControlArbiter controlArbiter,
         PacketRouter packetRouter, OwnerAssist ownerAssist, BrainBank brains,
         MissionController mission, Awareness awareness)
-        : base(logger, controlArbiter, packetRouter)
+        : base(logger, controlArbiter, packetRouter) // the router itself lives on CombatBrain
     {
-        _packetRouter = packetRouter;
         _ownerAssist = ownerAssist;
         _brains = brains;
         _mission = mission;

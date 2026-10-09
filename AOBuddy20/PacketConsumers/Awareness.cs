@@ -217,7 +217,7 @@ public sealed class Awareness : IPacketConsumer
         // routing) - the walk re-plans round these the moment the picture changes.
         MobDanger.SetLive(pf, Near
             .Where(s => s.Mob != null && !s.OnBot && !s.OnPets && MobDanger.IsHostile(s.Mob.Name))
-            .Select(s => new MobDanger.LiveMob(s.Mob.Name, s.Level, s.Mob.Transform.Position))
+            .Select(s => new MobDanger.LiveMob(s.Mob!.Name, s.Level, s.Mob!.Transform.Position))
             .ToList());
 
         var now = Summary();

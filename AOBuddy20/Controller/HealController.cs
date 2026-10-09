@@ -477,7 +477,9 @@ public sealed class HealController
         // only there - then release and let the recharge clock gate the next one.
         _holding = true;
         _controlArbiter.TakeControl(ControlPriority.LowHealthNanoEmergency);
-        me.Cast(me.Identity, nano.NanoId);
+        // a heal nano here always exists: the both-null case returned above, and the stim only
+        // wins the tie when it heals at least as much as the nano (nanoHeal > 0 means one was found)
+        me.Cast(me.Identity, nano!.NanoId);
         _ourCastInFlight = true;
         _castSentAt = _clock;
         _castConfirmed = false;
