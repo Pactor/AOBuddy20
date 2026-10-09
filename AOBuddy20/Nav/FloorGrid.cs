@@ -240,7 +240,11 @@ public sealed class FloorGrid : IWalkGrid
                         (northReady ? " northbound" : "") + ", " +
                         $"{mgrid._floors.Count} with floor, {mgrid._noEdge.Count} edges walled, " +
                         $"{mgrid._blocked.Count} blocked, " +
-                        $"{mgrid._doorways.Count} doorway cells bridged, {msw.ElapsedMilliseconds} ms");
+                        $"{mgrid._doorways.Count} doorway cells bridged, " +
+                        (mgrid._wallHug.Count > 0
+                            ? $"{mgrid._wallHug.Count} hug cells (max {mgrid._wallHug.Values.Max():0.##}, avg {mgrid._wallHug.Values.Average():0.##}), "
+                            : "no hug cells, ") +
+                        $"{msw.ElapsedMilliseconds} ms");
             return mgrid;
         }
 
@@ -747,11 +751,16 @@ public sealed class FloorGrid : IWalkGrid
                     if (lat.Hug is { Length: > 0 } && i < lat.W && j < lat.H)
                     {
                         // graded wall-hug: the closer the cell sits to a wall/column, the more a
-                        // step through it costs - routes tend to the centres of rooms/hallways
+                        // step through it costs - routes tend to the centres of rooms/hallways.
+                        // MAX when two rooms claim the same world cell (the chunks' atlas spill
+                        // overlaps the neighbour): a spill cell must never LOWER the penalty the
+                        // owning room wrote - its pool-frame neighbourhood is the ATLAS's, not the
+                        // placement's, and hugging the walls came back the day this wrote over it.
                         var penalty = WallHugPenalty * lat.Hug[j * lat.W + i] / 255f;
                         for (int f = 0; f < fl.Length; f++)
                         {
-                            _wallHug[(long)k * 8 + f] = penalty;
+                            var hugKey = (long)k * 8 + f;
+                            _wallHug[hugKey] = Math.Max(_wallHug.TryGetValue(hugKey, out var prev) ? prev : 0f, penalty);
                         }
                     }
 
@@ -882,7 +891,7 @@ public sealed class FloorGrid : IWalkGrid
     // Routes through the middle of the room: cells whose body band stands within a step of a
     // wall cost extra per step, so the A* only hugs walls when the geometry leaves no choice.
     // Missions only - the wall buckets exist only where UseComposedGeometry ran.
-    private const float WallHugPenalty = 1.5f;
+    private const float WallHugPenalty = 3.5f;
 
     private void BuildWallHugCost()
     {
