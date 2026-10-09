@@ -332,6 +332,24 @@ public sealed class ResupplyController : IPacketConsumer
         var travelLine = "";
         if (candidates.Count == 0)
         {
+            // The machine memory is the only blocker here: every machine in range is remembered
+            // as selling none of what we need - but the memory says what a machine sold WHEN IT
+            // WAS OPENED. A supply-name fix in the conf ("Lockpick" -> "Lock Pick", owner
+            // 2026-10-09) or a restock makes every remembered miss stale, and left alone it ends
+            // every future run before a single machine is opened. Forget the non-matches once
+            // and search afresh - the run re-learns the machines as it opens them.
+            var forgotten = ForgetMachinesWithout(needs);
+            if (forgotten > 0)
+            {
+                _logger.LogInformation(
+                    $"RESUPPLY: no remembered machine sells {string.Join("/", needs.Select(Plural))} - " +
+                    $"forgot {forgotten} stale machine memor(y/ies); searching afresh.");
+                candidates = BuildCandidates(me, needs);
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
             travel = PlanShopTravel(out travelLine);
             if (travel == ShopTravel.Failed)
             {
@@ -1513,6 +1531,28 @@ public sealed class ResupplyController : IPacketConsumer
         var mem = Mem();
         mem.Machines[MachineKey(machine)] = string.Join(",", sells);
         Save(mem);
+    }
+
+    /// <summary>Forget the machine-memory entries that sell none of the needed supplies - the
+    /// stale ones a name fix or a restock leaves behind. Returns how many entries went.</summary>
+    private int ForgetMachinesWithout(List<Supply> needs)
+    {
+        var mem = Mem();
+        var stale = mem.Machines
+            .Where(kv => !needs.Any(n => kv.Value.Split(',').Contains(n.ToString())))
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var key in stale)
+        {
+            mem.Machines.Remove(key);
+        }
+
+        if (stale.Count > 0)
+        {
+            Save(mem);
+        }
+
+        return stale.Count;
     }
 
     // The terminal memory, loaded from resupply.json on first use (JsonStore: a corrupt file is a
