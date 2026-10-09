@@ -312,6 +312,31 @@ public sealed class OwnerChat
     // LOOTBAG: the packs' bags, numbered the way `lootbag list` shows them; add/remove (de)signates
     // by that number. Identities go into the LootBagStore - a designation follows the bag, never
     // its name (renames are client-side).
+    // NANORESET ('nanoreset'): every running buff off the bot, the buffing cycle's own clean-slate
+    // wire (PetFirstBuffCycle.ClearBuffsStep's RemoveFriendlyNano). The external buffing re-fills
+    // by itself afterwards: the outcome ledger reads worn once the buffs are gone, and
+    // MaybeQoLFill re-enters on its decide ticks - floor and comfort set come back without a
+    // command. Tier wants stay gated while the pets are out (the already-out rule).
+    private void NanoResetCommand(Action<string> reply)
+    {
+        var me = DynelManager.LocalPlayer;
+        var buffs = me?.Buffs;
+        if (buffs == null || buffs.Count == 0)
+        {
+            reply("No buffs running - nothing to reset.");
+            return;
+        }
+
+        var ids = buffs.Select(b => b.Id).Distinct().ToList();
+        foreach (var id in ids)
+        {
+            me.RemoveFriendlyNano(me.Identity, id);
+        }
+
+        _logger.LogInformation($"NANORESET: stripping {ids.Count} running buff(s) (owner command).");
+        reply($"Nanoreset: stripping {ids.Count} running buff(s) - the buffing re-fills on its own.");
+    }
+
     private void LootBagCommand(string[] p, Action<string> reply)
     {
         var arg = p.Length > 1 ? p[1].ToLowerInvariant() : "list";
@@ -388,7 +413,7 @@ public sealed class OwnerChat
 
         t["help"] = (reply, p) =>
         {
-            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|clear [on|off]|status|roll|list|accept n|buybags n|want ...] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | buffs [start|pet|stop|status] | pet [attack|follow] | stop | sit | stand | navdata | help." +
+            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|clear [on|off]|status|roll|list|accept n|buybags n|want ...] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | buffs [start|pet|stop|status] | nanoreset | pet [attack|follow] | stop | sit | stand | navdata | help." +
                   " follow stacks me on you and mirrors your movement; goto/come walk at priority Travel and hand me back to follow on arrival;" +
                   " travel crosses playfields by zone lines, doors, whompas and pads (id or name); resupply shops for stims and rechargers by my own skills (bags n buys bags);" +
                   " sell sells the bag contents to a shop terminal (NODROP and main inventory untouched);" +
@@ -405,6 +430,10 @@ public sealed class OwnerChat
         t["hunt"] = (reply, p) => { _hunt.Command(p, reply); };
         // BUFFS: the public-buff-bot handshake (start|stop|status).
         t["buffs"] = (reply, p) => { _buffBot.Command(p, reply); };
+        // NANORESET: strip every buff off the bot (RemoveFriendlyNano - the buffing cycle's own
+        // clean-slate wire). The external buffing re-fills on its own afterwards: with the buffs
+        // gone the outcome ledger reads worn and MaybeQoLFill re-enters on its decide ticks.
+        t["nanoreset"] = (reply, p) => { NanoResetCommand(reply); };
         // PET: point the pets at the owner's target and hold them on it, or stand them down.
         t["pet"] = (reply, p) => { _hunt.CommandPet(p, reply); };
 

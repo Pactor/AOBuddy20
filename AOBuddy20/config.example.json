@@ -23,6 +23,8 @@
   "LowRechargerCount": 10,
   "ResupplyStimName": "Health and Nano Stim",
   "ResupplyRechargerName": "Health and Nano Recharger",
+  "ResupplyLockpickName": "Lockpick",
+  "ResupplyLockpickTarget": 1,
   "ResupplyStimTarget": 2,
   "ResupplyRechargerTarget": 3,
   "ResupplySearchRadius": 40,

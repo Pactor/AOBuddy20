@@ -54,7 +54,7 @@ Key config sections (see `config.example.json` for the full annotated list):
 | --- | --- |
 | Account | `Username`, `Password`, `Character`, `Dimension` (`RubiKa` / `RubiKa2019`), `Owner`, `AutoAcceptOwnerTeamInvite`, `Follow`, `UsePrivateChannel` |
 | Mission | `MissionDifficulty`, the six `MissionSlider*` values (wire range −100..+100, 0 = terminal default), `MissionTerminalRadius`, `MissionZones`, `WantUnseenRolls` |
-| Resupply | `LowStimCount`/`LowRechargerCount`, `ResupplyStimName`, `Resupply*Target`, `ResupplySearchRadius`, `ResupplyCashReserve`, `ResupplyContainerName`, `ResupplyShopPf` |
+| Resupply | `LowStimCount`/`LowRechargerCount`, `ResupplyStimName`, `ResupplyLockpickName`, `Resupply*Target`, `ResupplySearchRadius`, `ResupplyCashReserve`, `ResupplyContainerName`, `ResupplyShopPf` |
 | Heal | `HealNanoCombatPct`, `HealNanoOutOfCombatPct`, `HealRestMaxSeconds` |
 | Hunt | `HuntRadius`, `HuntMaxLevelMargin`, `HuntFactionMode`, `HuntBlacklist` |
 | Buff bots | `BuffBotName`, `BuffRequestTells` (highest-NCU tell first), `BuffHandshakeSeconds`, `BuffTravelToSpot`, `PetAutoBuff`, `PetBuffWaitSeconds`, `BuffIncludeWrangle` |
@@ -123,6 +123,7 @@ Manual orders (`goto`, `come`, `sit`) take the body away from any running travel
 | `buffs pet` | Convenience trigger: the simple pet-summon tells (NCU + the biggest safe nano-skill buff). The *accurate*, land-gated, self-cast-aware path is the automatic one (`PetAutoBuff: true`) — this is the by-hand shortcut. |
 | `buffs stop` | End the running buff session. |
 | `buffs status` | Session stage, landed/already-up/failed counts, bot name and catalog size. |
+| `nanoreset` | Strip every running buff off the bot (the cycle's own clean-slate wire). The external buffing re-fills by itself afterwards: with the buffs gone the outcome ledger reads worn and the floor + comfort fill re-enters on its decide ticks — no `buffs pet` needed. Tier wants stay gated while the pets are out. |
 
 For Metaphysicists with `PetAutoBuff` on, the whole pet-first cycle (strip → NCU → per-line
 buff+summon → pet buffs → obedience floor → comfort) runs on its own whenever a better pet is one
