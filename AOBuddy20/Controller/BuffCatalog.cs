@@ -179,7 +179,7 @@ public sealed class BuffCatalog
                 : new ServerProfile
                 {
                     Is2019 = false, DefaultBot = "Chewysfix", JsonFile = "ChewysBuffs.json",
-                    SpotPf = 655, SpotPos = new Vector3(3260f, 0f, 865f), // ICC
+                    SpotPf = 655, SpotPos = new Vector3(3270f, 0f, 865f), // ICC
                 };
         }
     }
