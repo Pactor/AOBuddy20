@@ -1152,7 +1152,7 @@ internal static class MissionX
                         for (var wx = r.Pos[0] - 8f; wx <= r.Pos[0] + 8f; wx += 0.5f)
                         {
                             int ci = (int)((wx - grid.ProbeX0 * grid.Cell) / grid.Cell);
-                            int cj = grid.ProbeH - 1 - (int)((wz - grid.ProbeZ0 * grid.Cell) / grid.Cell);
+                            int cj = (int)((wz - grid.ProbeZ0 * grid.Cell) / grid.Cell); // the grid row - NOT the y-inverted image row
                             int key = cj * grid.ProbeW + ci;
                             var owner = grid.ProbeRoom.TryGetValue(key, out var o) ? o : -1;
                             if (grid.ProbeBlockedWalk(key))
@@ -1166,6 +1166,177 @@ internal static class MissionX
             }
 
             Console.WriteLine($"leaf pathability: {reachable}/{leaves.Count} reachable");
+            return 0;
+        }
+
+        if (args[4] == "heightmap")
+        {
+            // HEIGHTMAP <out.png> <roomIndex> [span] - the floors around a room coloured by
+            // height (blue low .. red high). Multi-level cells pick the LOWEST level with
+            // 2 m of clear headroom above it (the walk-with-body-height floor - a bridge
+            // shows over the water/ramp under it); void paints black, the 5 m grid grey.
+            var outPath = args[5];
+            var target = int.Parse(args[6], inv);
+            var span = args.Length > 7 ? double.Parse(args[7], inv) : 20.0;
+            var mr = nav.Dungeon.Rooms[target];
+            var w = grid.ProbeW;
+            var h = grid.ProbeH;
+            var png = new CostPng(w * 2, h * 2);
+
+            float? Pick(int key)
+            {
+                var lv = grid.ProbeLevels(key);
+                if (lv.Length == 0)
+                {
+                    return null;
+                }
+
+                // 2 m of clear headroom above, and the level itself at or above y 0 - the
+                // atlas ground plane and deep mine shafts sample below 0 and are not the
+                // walker's floor. No qualifying level: the highest non-negative one.
+                for (var f = 0; f + 1 < lv.Length; f++)
+                {
+                    if (lv[f] >= 0f && lv[f + 1] - lv[f] >= 2.0f)
+                    {
+                        return lv[f];
+                    }
+                }
+
+                for (var f = lv.Length - 1; f >= 0; f--)
+                {
+                    if (lv[f] >= 0f)
+                    {
+                        return lv[f];
+                    }
+                }
+
+                return lv[lv.Length - 1];
+            }
+
+            var cxw = mr.Pos[0];
+            var czw = mr.Pos[2];
+            var hmin = float.MaxValue;
+            var hmax = float.MinValue;
+            var picked = new Dictionary<int, float>();
+            for (var j = 0; j < h; j++)
+            {
+                for (var i = 0; i < w; i++)
+                {
+                    var wx = (grid.ProbeX0 + i + 0.5f) * grid.Cell;
+                    var wz = (grid.ProbeZ0 + j + 0.5f) * grid.Cell;
+                    if (Math.Abs(wx - cxw) > span || Math.Abs(wz - czw) > span)
+                    {
+                        continue;
+                    }
+
+                    var p = Pick(j * w + i);
+                    if (p == null)
+                    {
+                        continue;
+                    }
+
+                    picked[j * w + i] = p.Value;
+                    hmin = Math.Min(hmin, p.Value);
+                    hmax = Math.Max(hmax, p.Value);
+                }
+            }
+
+            (byte, byte, byte) Color(float t)
+            {
+                // blue (low) -> cyan -> green -> yellow -> red (high)
+                if (t < 0.25f) return (0, (byte)(255 * t / 0.25f), 255);
+                if (t < 0.5f) return (0, 255, (byte)(255 * (1 - (t - 0.25f) / 0.25f)));
+                if (t < 0.75f) return ((byte)(255 * (t - 0.5f) / 0.25f), 255, 0);
+                return (255, (byte)(255 * (1 - (t - 0.75f) / 0.25f)), 0);
+            }
+
+            for (var j = 0; j < h; j++)
+            {
+                for (var i = 0; i < w; i++)
+                {
+                    var key = j * w + i;
+                    byte r = 0, g = 0, b = 0;
+                    if (picked.TryGetValue(key, out var v))
+                    {
+                        var t = (hmax - hmin) < 0.01f ? 0f : (v - hmin) / (hmax - hmin);
+                        (r, g, b) = Color(t);
+                    }
+                    else if (i % 25 == 0 || j % 25 == 0) // the 5 m reference grid
+                    {
+                        r = g = b = 96;
+                    }
+
+                    for (var dy = 0; dy < 2; dy++)
+                    {
+                        for (var dx = 0; dx < 2; dx++)
+                        {
+                            // y-inverted, matching PxY and the collision overlay: +z reads upward
+                            png.Set(i * 2 + dx, (h - 1 - j) * 2 + dy, r, g, b);
+                        }
+                    }
+                }
+            }
+
+            // THE PLACED COLLISION, vertex by vertex: the raw truth the lattices were sampled
+            // from (collision.bin, PlaceBin-transformed to world coordinates). A vertex whose
+            // colour disagrees with its cell's fill marks the blit diverging from the real
+            // geometry - the bridge decks, ramps and pits show as vertex streams at their own
+            // height, off-range depths clamp to the extreme colours.
+            var vertsIn = 0;
+            if (nav.Surfaces != null)
+            {
+                for (var i = 0; i + 2 < nav.Surfaces.Length; i += 3)
+                {
+                    var vx = nav.Surfaces[i];
+                    var vz = nav.Surfaces[i + 2];
+                    if (Math.Abs(vx - cxw) > span || Math.Abs(vz - czw) > span)
+                    {
+                        continue;
+                    }
+
+                    vertsIn++;
+                    var vy = nav.Surfaces[i + 1];
+                    var t = (hmax - hmin) < 0.01f ? 0f : Math.Clamp((float)((vy - hmin) / (hmax - hmin)), 0f, 1f);
+                    var (r, g, b) = Color(t);
+                    var pxi = (int)((vx - grid.ProbeX0 * grid.Cell) / grid.Cell) * 2;
+                    var pyi = (int)(h - (vz - grid.ProbeZ0 * grid.Cell) / grid.Cell) * 2;
+                    for (var dy = 0; dy < 2; dy++)
+                    {
+                        for (var dx = 0; dx < 2; dx++)
+                        {
+                            png.Set(pxi + dx, pyi + dy, r, g, b);
+                        }
+                    }
+                }
+            }
+
+            // the TARGET ROOM's own numbers, separate from the region: its picked floors and
+            // the raw level stacks (shafts, ledges - everything ProbeLevels carries)
+            var rmin = float.MaxValue;
+            var rmax = float.MinValue;
+            var rawMin = float.MaxValue;
+            var rawMax = float.MinValue;
+            var rcells = 0;
+            foreach (var kv in picked)
+            {
+                if (!grid.ProbeRoom.TryGetValue(kv.Key, out var o) || o != target)
+                {
+                    continue;
+                }
+
+                rcells++;
+                rmin = Math.Min(rmin, kv.Value);
+                rmax = Math.Max(rmax, kv.Value);
+                foreach (var v in grid.ProbeLevels(kv.Key))
+                {
+                    rawMin = Math.Min(rawMin, v);
+                    rawMax = Math.Max(rawMax, v);
+                }
+            }
+
+            png.Save(outPath);
+            Console.WriteLine($"heightmap: room {target} {mr.Name} centre ({cxw:0.0},{czw:0.0}), span {span:0} m, {picked.Count} cell(s), blit heights {hmin:0.00}..{hmax:0.00}, {vertsIn} collision vertex(es) in region (blue low .. red high) -> {outPath}");
+            Console.WriteLine($"  room {target} own cells: {rcells}, picked floors {rmin:0.00}..{rmax:0.00}, raw levels {rawMin:0.00}..{rawMax:0.00}");
             return 0;
         }
 

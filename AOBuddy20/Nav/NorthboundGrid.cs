@@ -21,7 +21,7 @@ namespace AOBuddy20.Nav;
 public sealed class NorthboundPool
 {
     public const string Magic = "NBGR"; // file signature
-    public const int Version = 4; // bump when the binary layout OR the decode changes (v4: portal mesh-level candidate lists; v3: OmniCell socket decode; Load refuses other versions)
+    public const int Version = 6; // v6: the height layer's surface stamps over untiled water dips (the Mine rooms' bridge crossings); v5: MissionStep surface cutoff; v4: portal mesh-level candidate lists // v5: the surface cutoff derives from MissionStep (76 deg) - the arch bridges' decks walk; v4: portal mesh-level candidate lists; v3: OmniCell socket decode // bump when the binary layout OR the decode changes (v4: portal mesh-level candidate lists; v3: OmniCell socket decode; Load refuses other versions)
 
     public float Cell = 0.2f; // lattice resolution: the 20 cm the whole design hangs on
     public int PoolPf; // the pool playfield the lattices were rasterized from
@@ -214,19 +214,19 @@ public sealed class NorthboundPool
                     Nz = reader.ReadDouble(),
                     MeshLevel = reader.ReadSingle(),
                 };
-                var pc = reader.ReadInt32();
-                for (var q = 0; q < pc; q++)
-                {
-                    portal.Cells.Add((reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle())); // (lattice x, lattice y, level at that cell)
-                }
-
                 if (version >= 4)
                 {
                     var mlc = reader.ReadInt32();
                     for (var q = 0; q < mlc; q++)
                     {
-                        portal.MeshLevels.Add(reader.ReadSingle());
+                        portal.MeshLevels.Add(reader.ReadSingle()); // the sill candidates - Save wrote them right after MeshLevel
                     }
+                }
+
+                var pc = reader.ReadInt32();
+                for (var q = 0; q < pc; q++)
+                {
+                    portal.Cells.Add((reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle())); // (lattice x, lattice y, level at that cell)
                 }
 
                 r.Portals.Add(portal);
@@ -397,8 +397,11 @@ public sealed class NorthboundPortal
 /// </summary>
 public static class NorthboundBuilder
 {
+    private const float MaxStepRise = 0.8f; // = FloorGrid.MissionStep: the rise a walk step climbs
     private const float WalkNy = 0.5f;   // the extractor's own walkable cutoff: flatter than 60 deg
-                                         // is a surface - cave shell floors are 41-60 degree slopes
+                                         // is a surface - cave shell floors are 41-60 degree slopes (the bow
+                                         // bridges' decks at ny 0.40-0.45 are crossed ON THE WATER instead -
+                                         // see FloorGrid.UseNorthbound's water surface)
     private const float BodyLow = 0.3f, BodyHigh = 1.9f;
     private const float MergeLevels = 0.25f;
     private const int MaxLevels = 8;
@@ -625,7 +628,8 @@ public static class NorthboundBuilder
         // passes below share: collision.bin goes through it FREE (every triangle judged by its
         // own normal - the 41-60 degree cave-slope band and the walls hiding in collision.bin
         // come out here), walls.bin FORCED (every triangle a blocker however it is wound -
-        // walls.bin carries no walkable truth by convention).
+        // walls.bin carries no walkable truth by convention; the water crossings walk their
+        // dips ON THE WATER SURFACE instead - FloorGrid.UseNorthbound's water flood).
         void Rasterize(float[] v, bool forceBlocker)
         {
             for (int o = 0; o + 8 < v.Length; o += 9) // flat triangle triplets: 9 floats = A(x,y,z) B(x,y,z) C(x,y,z)
@@ -655,7 +659,7 @@ public static class NorthboundBuilder
                 }
                 else
                 {
-                   Blocker(v, o); // too steep (or walls.bin, forced): a wall
+                    Blocker(v, o); // too steep (or walls.bin, forced): a wall
                 }
             }
         }
@@ -692,18 +696,64 @@ public static class NorthboundBuilder
                 for (int tc = 0; tc < trow.Length; tc++)
                 {
                     var hrow = pr.Height[tr];
-                    if (trow[tc] == 0 || hrow == null || tc >= hrow.Length)
+                    if (hrow == null || tc >= hrow.Length)
                     {
-                        continue; // no tile, or no height for it
+                        continue; // no height for it
                     }
 
-                    // the tile centre in pool world, and its absolute floor height
+                    // the tile centre in pool world, and its absolute surface/floor height
                     double wxp = pr.Pos[0] + (x1 + tc - mx) * pool.Cell;
                     double wzp = pr.Pos[2] + (z1 + tr - mz) * pool.Cell;
                     var th = (float)(pr.Pos[1] + (hrow[tc] - pr.HeightBase) * pool.HeightScale);
                     // the tile (pool.Cell metres square) covers these lattice sub-cells
                     int i0 = XCell((float)(wxp - pool.Cell / 2)), i1 = XCell((float)(wxp + pool.Cell / 2));
                     int j0 = ZCell((float)(wzp - pool.Cell / 2)), j1 = ZCell((float)(wzp + pool.Cell / 2));
+
+                    if (trow[tc] == 0)
+                    {
+                        // THE WATER SURFACE (owner, 2026-10-10): the height layer carries the
+                        // walk/swim surface even where no tile is laid (the Mine rooms' water
+                        // dips: heightfield flat at base 5.0, the collision descending to -0.66
+                        // under it; the recorded walk crossed at constant y 5.0). Stamp the
+                        // surface into the covered lattice cells where the collision proves
+                        // geometry a step or more below the claim - the water signature. Real
+                        // wall interiors (collision at or above the claim) and geometry-free
+                        // cells stay untouched.
+                        for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
+                        {
+                            for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
+                            {
+                                var idx = j * r.W + i;
+                                var m = mesh[idx];
+                                if (m == null || m.Count == 0 || m[^1] > th - MaxStepRise)
+                                {
+                                    continue; // geometry-free, or the sampled floor reaches the claim: no water here
+                                }
+
+                                var l = levels[idx] ??= new List<float>();
+                                if (l.Count > 0 && Math.Abs(l[^1] - th) <= 0.3f)
+                                {
+                                    continue;
+                                }
+
+                                var pos = l.FindLastIndex(x => x < th) + 1;
+                                if (pos > 0 && th - l[pos - 1] <= 0.3f)
+                                {
+                                    continue; // near-duplicate of the level just below
+                                }
+
+                                l.Insert(pos, th);
+                                if (l.Count > MaxLevels)
+                                {
+                                    l.RemoveAt(0);
+                                }
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    // the tile (pool.Cell metres square) covers these lattice sub-cells
                     for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
                     {
                         for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)

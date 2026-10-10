@@ -69,7 +69,10 @@ public sealed class OverlandGrid : IWalkGrid
                                      // threw away the door-sill and mezzanine floors near the ground (2026-09-25).
     private const int FloorShift = 4, FloorMask = 15;
     private const float BodyLow = 0.3f, BodyHigh = 1.9f;
-    private const float MaxRise = 1.2f; // metres of rise per metre of step: ~50 degrees — the climb limit (downhill is unlimited: no fall damage outdoors)
+    private const float MaxRise = 4.0f; // metres of rise per metre of run: ~76 degrees — the climb limit, derived from
+                                        // MissionStep (a 0.2 m cell at 0.8 m rise; owner, 2026-10-10: the arch bridges'
+                                        // decks walked live at 60-63 deg = rise 2.0, comfortably inside). Downhill is
+                                        // unlimited: no fall damage outdoors
 
     // STRUCTURE-TOP SUPPRESSION (Newland City, 2026-10-01: the bot routed along the city wall tops and
     // out of bounds, and the wall faces clipped as phantom ramps). The outdoor heightfield carries the
@@ -99,7 +102,7 @@ public sealed class OverlandGrid : IWalkGrid
     // road. A recorded stretch dropping faster than DropGrade is a jump off something (the owner jumps
     // off ledges by habit): it is not road, and climbing through it costs DropClimbCost extra.
     private const float RoadFactor = 0.5f, SnapWeight = 2f, SnapRadius = 6f;
-    private const float DropGrade = 1.2f, DropClimbCost = 10f; // = MaxRise: only what can't be walked up is a jump
+    private const float DropGrade = MaxRise, DropClimbCost = 10f; // = MaxRise: only what can't be walked up is a jump
 
     // Per cell of ground the server once REFUSED us (PlanRoute's pricey set, the yank marks): a
     // detour of a cell length per unit beats it, but a corridor with no way round is paid and
