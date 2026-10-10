@@ -824,12 +824,13 @@ public sealed class MissionController : IPacketConsumer
             .FirstOrDefault();
     }
 
-    /// <summary>The ENTRANCE door dynel (IdentityType.Door) nearest the mission's door spot - the
-    /// city doors are objects in the facade and want the Use; null when the zone streams none.</summary>
+    /// <summary>The ENTRANCE door dynel nearest the mission's door spot - a city facade door
+    /// streams as IdentityType.Door, the mission entrance itself as ACGEntrance (live 2026-10-09);
+    /// null when neither type streams in range.</summary>
     private Dynel DoorWithin(Vector3 door, float metres)
     {
         return DynelManager.AllDynels
-            .Where(d => d != null && d.Identity.Type == IdentityType.Door &&
+            .Where(d => d != null && (d.Identity.Type == IdentityType.Door || d.Identity.Type == IdentityType.ACGEntrance) &&
                         Movement.Flat(door, d.Transform.Position) <= metres)
             .OrderBy(d => Movement.Flat(door, d.Transform.Position))
             .FirstOrDefault();

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using AOBuddy20.Nav;
 using AOSharp.Common.GameData;
@@ -20,6 +21,8 @@ using AOSharp.Common.GameData;
 //                                                         northbound grid ('classic' opts out), with
 //                                                         synthetic mark discs: block = hard (extra),
 //                                                         pricy = soft cost (the yank marks' semantics)
+//   gridprobe <pluginDir> missionx <poolPf> <layout.txt> cost <out.png>
+//                                                      - the walk grid as PNG, 2x2 px/cell, red = cost
 var pluginDir = args.Length > 0 ? args[0] : "";
 
 if (args.Length > 0 && args[0] == "selftest")
@@ -573,8 +576,20 @@ internal static class MissionSweep
         var northPath = System.IO.Path.Combine(AOBuddyNav.FolderFor(pluginDir, poolPf), "poolgrid.northbound");
         if (System.IO.File.Exists(northPath))
         {
-            north = NorthboundPool.Load(northPath);
-            Console.WriteLine($"northbound pool grid: {north.Rooms.Count} room(s) at {north.Cell:0.0#} m");
+            try
+            {
+                north = NorthboundPool.Load(northPath); // refuses a stale version - rebuild below
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"northbound pool grid unreadable ({ex.Message}) - rebuilding.");
+            }
+
+            north ??= NorthboundPool.For(pluginDir, poolPf, s => Console.WriteLine("  " + s));
+            if (north != null)
+            {
+                Console.WriteLine($"northbound pool grid: {north.Rooms.Count} room(s) at {north.Cell:0.0#} m");
+            }
         }
 
         var grid = FloorGrid.Build(pluginDir, m.Instance, nav, s => Console.WriteLine("  [grid] " + s), north);
@@ -1040,6 +1055,37 @@ internal static class MissionX
         }
 
         var nav = AOBuddyNav.ComposeMission(args[0], m);
+
+        // live parity: the dump's server-door rows hang the rooms exactly as MissionController
+        // does, so the PNG answers for the building the bot walks - not the bare slot placement
+        // (2026-10-10: the cost map used to render pre-chain rooms)
+        var sdLine = System.Text.RegularExpressions.Regex.Match(
+            string.Join("\n", System.IO.File.ReadAllLines(args[3])), @"^server doors: (.+)$",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        var sdoors = new List<(short room, short adjoining, Vector3 pos)>();
+        if (sdLine.Success && !sdLine.Groups[1].Value.StartsWith("none"))
+        {
+            foreach (var part in sdLine.Groups[1].Value.Split('|'))
+            {
+                var dm = System.Text.RegularExpressions.Regex.Match(part.Trim(), @"Room=(-?\d+) Adj=(-?\d+) \(([\d,]+)\)");
+                if (!dm.Success) continue;
+                double D(string s) => double.Parse(s.Replace(',', '.'), inv);
+                var pp = dm.Groups[3].Value.Split(',');
+                var y = pp.Length >= 6 ? D(pp[2] + "." + pp[3]) : float.NaN;
+                sdoors.Add(((short)int.Parse(dm.Groups[1].Value), (short)int.Parse(dm.Groups[2].Value),
+                            new Vector3((float)D(pp[0] + "." + pp[1]), (float)y, (float)D(pp[^2] + "." + pp[^1]))));
+            }
+
+            if (sdoors.Count > 0)
+            {
+                Console.WriteLine($"server-door correction on {sdoors.Count} door(s):");
+                foreach (var line in AOBuddyNav.CorrectWithServerDoors(args[0], nav, sdoors, out _, apply: true))
+                {
+                    Console.WriteLine("  " + line);
+                }
+            }
+        }
+
         FloorGrid.DebugSkipRoomTiles = args.Any(a => a == "notiles");
         // live parity: NavGridCache hands every mission build the pool's precalculated lattices;
         // 'classic' opts out so the two grids answer the same query side by side
@@ -1050,6 +1096,378 @@ internal static class MissionX
         if (nav == null || grid == null) { Console.WriteLine("compose/build failed"); return 1; }
         Console.WriteLine("doorway meeting: " + AOBuddyNav.DoorCheck);
         Console.WriteLine($"suppressor: {FloorGrid.DebugBuriedCells} tile floor(s) buried");
+
+        if (args[4] == "leafs")
+        {
+            // LEAF-ROOM PATHABILITY (owner, 2026-10-10): every room with exactly ONE server-door
+            // connection must be walkable from the entrance room's centre - the goal is the leaf
+            // room's own centre, approach radius 1 m. The server rows name the tree; b.Y = NaN
+            // accepts the centre at any floor level.
+            var neighbours = new Dictionary<int, HashSet<int>>();
+            foreach (var (room, adjoining, _) in sdoors)
+            {
+                if (room < 0 || adjoining < 0 || room >= nav.Dungeon.Rooms.Count || adjoining >= nav.Dungeon.Rooms.Count)
+                {
+                    continue;
+                }
+
+                if (!neighbours.TryGetValue(room, out var s1)) neighbours[room] = s1 = new HashSet<int>();
+                if (!neighbours.TryGetValue(adjoining, out var s2)) neighbours[adjoining] = s2 = new HashSet<int>();
+                s1.Add(adjoining);
+                s2.Add(room);
+            }
+
+            var startRoom = nav.Dungeon.Rooms[0];
+            var from = new Vector3(startRoom.Pos[0], startRoom.Pos[1], startRoom.Pos[2]);
+            var leaves = nav.Dungeon.Rooms
+                .Where(r => r.Index != 0 && neighbours.TryGetValue(r.Index, out var n) && n.Count == 1)
+                .ToList();
+            Console.WriteLine($"leaf rooms (1 connection): {leaves.Count} of {nav.Dungeon.Rooms.Count} room(s); start room 0 {startRoom.Name}");
+            var reachable = 0;
+            foreach (var r in leaves)
+            {
+                var goal = new Vector3(r.Pos[0], float.NaN, r.Pos[2]);
+                var path = grid.FindPath(from, goal, null, 2f, 1.0f, out var why);
+                if (path != null)
+                {
+                    reachable++;
+                    double len = 0;
+                    for (var i = 1; i < path.Count; i++)
+                    {
+                        var ddx = path[i].X - path[i - 1].X;
+                        var ddz = path[i].Z - path[i - 1].Z;
+                        len += Math.Sqrt(ddx * ddx + ddz * ddz);
+                    }
+
+                    var end = path[path.Count - 1];
+                    Console.WriteLine($"  room {r.Index,2} {r.Name}: PATH, {path.Count} pts, {len:0.0} m, ends ({end.X:0.0},{end.Y:0.0},{end.Z:0.0})");
+                }
+                else
+                {
+                    Console.WriteLine($"  room {r.Index,2} {r.Name} centre ({r.Pos[0]:0.0},{r.Pos[2]:0.0}): NO PATH - {why}");
+                    // TEMP: name the blockers around the leaf's centre - which room's blit owns
+                    // each sealed cell, and what levels it carries
+                    for (var wz = r.Pos[2] - 8f; wz <= r.Pos[2] + 8f; wz += 0.5f)
+                    {
+                        for (var wx = r.Pos[0] - 8f; wx <= r.Pos[0] + 8f; wx += 0.5f)
+                        {
+                            int ci = (int)((wx - grid.ProbeX0 * grid.Cell) / grid.Cell);
+                            int cj = grid.ProbeH - 1 - (int)((wz - grid.ProbeZ0 * grid.Cell) / grid.Cell);
+                            int key = cj * grid.ProbeW + ci;
+                            var owner = grid.ProbeRoom.TryGetValue(key, out var o) ? o : -1;
+                            if (grid.ProbeBlockedWalk(key))
+                            {
+                                var lv = string.Join(",", grid.ProbeLevels(key).Select(v => v.ToString("0.00")));
+                                Console.WriteLine($"    BLOCKED ({wx:0.0},{wz:0.0}) owner room {owner} levels [{lv}]");
+                            }
+                        }
+                    }
+                }
+            }
+
+            Console.WriteLine($"leaf pathability: {reachable}/{leaves.Count} reachable");
+            return 0;
+        }
+
+        if (args[4] == "cost")
+        {
+            // cost <out.png> - the walk grid as a PNG, 2x2 px per cell, Y-INVERTED so +z reads
+            // upward. RED = the cell's walk cost at 64 per unit (plain floor 64, the max hug 3.5
+            // lands at 255); a light-grey 5 m reference grid UNDERNEATH (it shows on the void);
+            // doorways painted green across their leaf line.
+            var w = grid.ProbeW;
+            var h = grid.ProbeH;
+            var cellPx = 2;
+            var png = new CostPng(w * cellPx, h * cellPx);
+
+            int PxX(float wx) => (int)((wx - grid.ProbeX0 * grid.Cell) / grid.Cell) * cellPx;
+            int PxY(float wz) => (int)(h - (wz - grid.ProbeZ0 * grid.Cell) / grid.Cell) * cellPx;
+
+            void Px(CostPng t, float wx, float wz, byte r, byte g, byte b)
+            {
+                var px = PxX(wx);
+                var py = PxY(wz);
+                for (var dy = 0; dy < cellPx; dy++)
+                {
+                    for (var dx = 0; dx < cellPx; dx++)
+                    {
+                        t.Set(px + dx, py + dy, r, g, b);
+                    }
+                }
+            }
+
+            // the paint passes, so the full map and every per-room map render identically
+            void PaintGrid(CostPng t)
+            {
+                // the 5 m reference grid: 5 m / 0.2 m cell = every 25th cell - it stays visible
+                // wherever the cost map has nothing to say (the void)
+                for (var j = 0; j < h; j += 25)
+                {
+                    for (var i = 0; i < w; i++)
+                    {
+                        Px(t, grid.ProbeX0 * grid.Cell + (i + 0.5f) * grid.Cell,
+                           grid.ProbeZ0 * grid.Cell + (j + 0.5f) * grid.Cell, 96, 96, 96);
+                    }
+                }
+
+                for (var i = 0; i < w; i += 25)
+                {
+                    for (var j = 0; j < h; j++)
+                    {
+                        Px(t, grid.ProbeX0 * grid.Cell + (i + 0.5f) * grid.Cell,
+                           grid.ProbeZ0 * grid.Cell + (j + 0.5f) * grid.Cell, 96, 96, 96);
+                    }
+                }
+            }
+
+            void PaintDoors(CostPng t)
+            {
+                // the doorways' STEL EXTENTS, green: the measured frame+leaf footprint of each
+                // door (the same box the grid keeps open), cell by cell
+                for (var di = 0; di < nav.MissionDoorways.Count && di < grid.ProbeDoorExtents.Count; di++)
+                {
+                    var (mnx, mxx, mnz, mxz, _, _) = grid.ProbeDoorExtents[di];
+                    if (float.IsNaN(mnx))
+                    {
+                        continue;
+                    }
+
+                    for (var wx = mnx; wx <= mxx; wx += grid.Cell)
+                    {
+                        for (var wz = mnz; wz <= mxz; wz += grid.Cell)
+                        {
+                            Px(t, wx, wz, 0, 200, 0);
+                        }
+                    }
+                }
+            }
+
+            void PaintLabels(CostPng t)
+            {
+                // the rotation label: each placed room's turn count at its slot centre (white
+                // 3x5 glyph, scaled with the resolution)
+                var gs = cellPx * 3; // font pixel scale
+                foreach (var mr in nav.Dungeon.Rooms)
+                {
+                    var glyph = RotGlyphs.RotGlyph(mr.Rot);
+                    if (glyph == null)
+                    {
+                        continue;
+                    }
+
+                    var px0 = PxX(mr.Pos[0]);
+                    var py0 = PxY(mr.Pos[2]);
+                    for (var rr = 0; rr < 5; rr++)
+                    {
+                        for (var cc = 0; cc < 3; cc++)
+                        {
+                            if (glyph[rr * 3 + cc] == 0)
+                            {
+                                continue;
+                            }
+
+                            for (var dy = 0; dy < gs; dy++)
+                            {
+                                for (var dx = 0; dx < gs; dx++)
+                                {
+                                    t.Set(px0 + cc * gs + dx - gs * 3 / 2, py0 + rr * gs + dy - gs * 5 / 2, 255, 255, 255);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            void PaintRoomRects(CostPng t)
+            {
+                // THE ROOM RECTANGLES, drawn LAST so nothing overwrites them: the placed tile
+                // footprint per room (where floor tiles exist, walkable or not) as a thin cyan
+                // outline - the slot box the compose puts each room's tiles in.
+                const double slot = 10.0;
+                const int line = 2;
+                foreach (var mr in nav.Dungeon.Rooms)
+                {
+                    var src = pool.Dungeon.Rooms[mr.PoolIndex];
+                    int tw = mr.Rot % 2 == 0 ? src.Rect[2] - src.Rect[0] + 1 : src.Rect[3] - src.Rect[1] + 1;
+                    int th = mr.Rot % 2 == 0 ? src.Rect[3] - src.Rect[1] + 1 : src.Rect[2] - src.Rect[0] + 1;
+                    double ox = mr.Slot[0] * slot, oz = (m.Height - mr.Slot[1]) * slot - th * pool.Dungeon.Cell;
+                    var rx0 = PxX((float)ox);
+                    var ry0 = PxY((float)(oz + th * pool.Dungeon.Cell));
+                    var rx1 = PxX((float)(ox + tw * pool.Dungeon.Cell));
+                    var ry1 = PxY((float)oz);
+                    for (var x = rx0; x <= rx1; x++)
+                    {
+                        for (var d = 0; d < line; d++)
+                        {
+                            t.Set(x, ry0 + d, 0, 200, 255);
+                            t.Set(x, ry1 - d, 0, 200, 255);
+                        }
+                    }
+
+                    for (var y = ry0; y <= ry1; y++)
+                    {
+                        for (var d = 0; d < line; d++)
+                        {
+                            t.Set(rx0 + d, y, 0, 200, 255);
+                            t.Set(rx1 - d, y, 0, 200, 255);
+                        }
+                    }
+                }
+            }
+
+            // the cost map - every room's cells (the full map)
+            var max = 0f;
+            for (var j = 0; j < h; j++)
+            {
+                for (var i = 0; i < w; i++)
+                {
+                    var c = grid.ProbeCost(j * w + i);
+                    if (c <= 0f)
+                    {
+                        continue;
+                    }
+
+                    if (c > max)
+                    {
+                        max = c;
+                    }
+
+                    // unwalkable statels (a column blocking the walkable floor) paint BLUE
+                    var blockedWalk = grid.ProbeBlockedWalk(j * w + i);
+                    Px(png, grid.ProbeX0 * grid.Cell + (i + 0.5f) * grid.Cell,
+                       grid.ProbeZ0 * grid.Cell + (j + 0.5f) * grid.Cell,
+                       blockedWalk ? (byte)0 : (byte)Math.Clamp(c * 64f, 0f, 255f),
+                       0, blockedWalk ? (byte)255 : (byte)0);
+                }
+            }
+
+            PaintDoors(png);
+            PaintLabels(png);
+            PaintRoomRects(png); // last: nothing overwrites the room outlines
+            png.Save(args[5]);
+            Console.WriteLine($"cost map: {w}x{h} cells -> {w * 2}x{h * 2} px at {args[5]} (y-inverted, 5 m grid, doors green); cost 1 (plain floor) .. {max:0.##} (worst), red = cost x 64");
+
+            // THE PER-ROOM MAPS (owner, 2026-10-09: "which room has a doorstep"): one full-canvas
+            // image per room with ONLY that room's blit cells - red = cost, GREEN = the cell's
+            // lowest floor over the room's dominant level (0.5 m -> full green): a doorstep at a
+            // door shows as a yellow-green band, a flat room stays pure red.
+            foreach (var mr in nav.Dungeon.Rooms)
+            {
+                var lowest = new Dictionary<int, float>();
+                var freq = new Dictionary<int, int>();
+                for (var kk = 0; kk < grid.ProbeW * grid.ProbeH; kk++)
+                {
+                    if (grid.ProbeRoom.TryGetValue(kk, out var ri) && ri != mr.Index)
+                    {
+                        continue;
+                    }
+
+                    var lv = grid.ProbeLevels(kk);
+                    if (lv.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    lowest[kk] = lv[0];
+                    var key = (int)Math.Round(lv[0] / 0.1f);
+                    freq[key] = freq.TryGetValue(key, out var n) ? n + 1 : 1;
+                }
+
+                if (lowest.Count == 0)
+                {
+                    continue;
+                }
+
+                var baseKey = freq.OrderByDescending(kv => kv.Value).First().Key;
+                var baseLevel = baseKey * 0.1f;
+                var rp = new CostPng(w * cellPx, h * cellPx);
+                PaintGrid(rp);
+                foreach (var kv in lowest)
+                {
+                    var i = kv.Key % w;
+                    var j = kv.Key / w;
+                    var c = grid.ProbeCost(kv.Key);
+                    // the heightfield quantizes in heightScale steps (0.2 m) and gentle slopes
+                    // flip between two quanta - in-game that renders as a smooth, flat floor
+                    // (bilinear, owner-checked: "goes flat through the door"). A doorstep only
+                    // counts when it exceeds the walker's step height (0.8 m).
+                    var step = (byte)Math.Clamp((kv.Value - baseLevel - 0.8f) * 512f, 0f, 255f);
+                    // BLUE = unwalkable statel: the walkable floor itself is blocked (a column)
+                    var blockedWalk = grid.ProbeBlockedWalk(kv.Key);
+                    Px(rp, grid.ProbeX0 * grid.Cell + (i + 0.5f) * grid.Cell,
+                       grid.ProbeZ0 * grid.Cell + (j + 0.5f) * grid.Cell,
+                       blockedWalk ? (byte)0 : (byte)Math.Clamp(c * 64f, 0f, 255f),
+                       0, blockedWalk ? (byte)255 : (byte)0);
+                }
+
+                PaintDoors(rp);
+                PaintLabels(rp);
+                PaintRoomRects(rp); // last: nothing overwrites the room outlines
+                var roomPath = args[5].Replace(".png", $"-r{mr.Index:00}rot{mr.Rot}.png");
+                rp.Save(roomPath);
+                Console.WriteLine($"  room map: {roomPath} (base level {baseLevel:0.0}; green = floor over base, 0.5 m = full)");
+            }
+
+            // THE DOOR TABLE: per doorway, how the placed floor lies along the door's normal -
+            // floor presence at the centre and at ±1..4 m on both sides, plus the room's blitted
+            // AABB. The placement error in numbers: a correct door has floor on BOTH sides at the
+            // centre; an offset shows as one side starting a step or more late.
+            foreach (var mr in nav.Dungeon.Rooms)
+            {
+                float minX = float.MaxValue, minZ = float.MaxValue, maxX = float.MinValue, maxZ = float.MinValue;
+                var cells = 0;
+                for (var kk = 0; kk < grid.ProbeW * grid.ProbeH; kk++)
+                {
+                    if (grid.ProbeCost(kk) <= 0)
+                    {
+                        continue;
+                    }
+
+                    // attribution is approximate (spill); the room whose GeomPos is nearest wins
+                    int ci = kk % grid.ProbeW, cj = kk / grid.ProbeW;
+                    float wx = (ci + grid.ProbeX0 + 0.5f) * grid.Cell, wz = (cj + grid.ProbeZ0 + 0.5f) * grid.Cell;
+                    if (Math.Abs(wx - mr.Pos[0]) < 12f && Math.Abs(wz - mr.Pos[2]) < 12f)
+                    {
+                        minX = Math.Min(minX, wx); maxX = Math.Max(maxX, wx);
+                        minZ = Math.Min(minZ, wz); maxZ = Math.Max(maxZ, wz);
+                        cells++;
+                    }
+                }
+
+                Console.WriteLine($"room {mr.Index} '{mr.PoolName}' rot {mr.Rot}: blit AABB ({minX:0.0}..{maxX:0.0}, {minZ:0.0}..{maxZ:0.0}) {cells} cells");
+                foreach (var dw in nav.MissionDoorways.Where(d => d.Room == mr.Index))
+                {
+                    var along = "";
+                    for (var d = -4; d <= 4; d++)
+                    {
+                        var fx = (float)(dw.X + dw.Nx * d);
+                        var fz = (float)(dw.Z + dw.Nz * d);
+                        along += grid.ProbeCostAt(fx, fz) > 0 ? (Math.Abs(d) < 0.5f ? "C" : d < 0 ? "-" : "+") : ".";
+                    }
+
+                    Console.WriteLine($"  door ({dw.X:0.0},{dw.Z:0.0}) n({dw.Nx:0.#},{dw.Nz:0.#}) floor along normal [-4m..+4m]: {along}");
+
+                    // the statel's 3D extent, as the grid measured it for the keep-open
+                    var di = nav.MissionDoorways.IndexOf(dw);
+                    if (di >= 0 && di < grid.ProbeDoorExtents.Count)
+                    {
+                        var (mnx, mxx, mnz, mxz, mny, mxy) = grid.ProbeDoorExtents[di];
+                        if (!float.IsNaN(mnx))
+                        {
+                            Console.WriteLine($"    statel extent x[{mnx:0.00}..{mxx:0.00}] y[{mny:0.00}..{mxy:0.00}] z[{mnz:0.00}..{mxz:0.00}] " +
+                                              $"({mxx - mnx:0.00} x {mxy - mny:0.00} x {mxz - mnz:0.00} m); " +
+                                              $"door point at ({(dw.X - mnx) / (mxx - mnx) * 100:0}% x, {(dw.Z - mnz) / (mxz - mnz) * 100:0}% z of the XZ box)");
+                        }
+                        else
+                        {
+                            Console.WriteLine("    statel extent: no geometry within 1.6 m (constant box fallback)");
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
 
         if (args[4] == "floors")
         {
@@ -1155,7 +1573,203 @@ internal static class MissionX
             return 0;
         }
 
+        if (args[4] == "map")
+        {
+            // map <roomIndex> - the placed room's blit cells as ASCII, one char per cell:
+            // T = tile levels only, M = mesh levels only, B = both, H = none (a hole - hug seed),
+            // lower-case = the cell also carries hug cost. The dual-frame seam map.
+            var idx = int.Parse(args[5], inv);
+            var mr = nav.Dungeon.Rooms[idx];
+            var cx0 = (int)((mr.Pos[0] - grid.ProbeX0 * grid.Cell) / grid.Cell);
+            var cy0 = (int)((mr.Pos[2] - grid.ProbeZ0 * grid.Cell) / grid.Cell);
+            Console.WriteLine($"cells of room {idx} '{mr.PoolName}' rot {mr.Rot}: window center cell ({cx0},{cy0}) = world ({mr.Pos[0]:0.0},{mr.Pos[2]:0.0}); cell (px,py) = cell ({cx0},{cy0}) + ((px-622)/2, (py-693)/2) from the label position");
+            Console.WriteLine($"window world: x {(grid.ProbeX0 + (cx0 - 40)) * grid.Cell:0.0}..{(grid.ProbeX0 + (cx0 + 40)) * grid.Cell:0.0}, z {(grid.ProbeZ0 + (cy0 - 40)) * grid.Cell:0.0}..{(grid.ProbeZ0 + (cy0 + 40)) * grid.Cell:0.0}");
+            var x0 = (int)((mr.Pos[0] - grid.ProbeX0 * grid.Cell) / grid.Cell);
+            var y0 = (int)((mr.Pos[2] - grid.ProbeZ0 * grid.Cell) / grid.Cell);
+            for (var j = -40; j <= 40; j++)
+            {
+                var row = "";
+                for (var i = -40; i <= 40; i++)
+                {
+                    var k = (y0 + j) * grid.ProbeW + (x0 + i);
+                    var inGrid = x0 + i >= 0 && x0 + i < grid.ProbeW && y0 + j >= 0 && y0 + j < grid.ProbeH;
+                    if (!inGrid || !grid.ProbeCellKind.TryGetValue(k, out var kind))
+                    {
+                        row += " ";
+                        continue;
+                    }
+
+                    var hugged = grid.ProbeCost(k) > 1.01f;
+                    var ch = kind switch { 1 => 'T', 2 => 'M', 3 => 'B', _ => 'H' };
+                    row += hugged ? char.ToLowerInvariant(ch) : ch;
+                }
+
+                Console.WriteLine(row);
+            }
+
+            return 0;
+        }
+
+        if (args[4] == "probecell")
+        {
+            // probecell <x> <z> - one cell's full probe state: cost, levels, walk-blocked, layers
+            float F(string s) => float.Parse(s, inv);
+            var wx = F(args[5]);
+            var wz = F(args[6]);
+            var k = (int)((wz - grid.ProbeZ0 * grid.Cell) / grid.Cell) * grid.ProbeW
+                  + (int)((wx - grid.ProbeX0 * grid.Cell) / grid.Cell);
+            var lv = grid.ProbeLevels(k);
+            var lvText = lv.Length == 0 ? "none" : string.Join(", ", lv.Select(v => v.ToString("0.00")));
+            grid.ProbeCellKind.TryGetValue(k, out var kind);
+            Console.WriteLine($"cell ({wx:0.00},{wz:0.00}): cost {grid.ProbeCost(k):0.00}, " +
+                              $"blockedWalk {grid.ProbeBlockedWalk(k)}, layers {kind}, " +
+                              $"levels [{lvText}]");
+            return 0;
+        }
+
         Console.WriteLine("unknown missionx verb: " + args[4]);
         return 2;
+    }
+}
+
+// The rotation label's 3x5 glyphs, rows top-down (one byte per font pixel).
+internal static class RotGlyphs
+{
+    public static byte[] RotGlyph(int rot)
+    {
+        return rot switch
+        {
+            0 => new byte[] { 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1 },
+            1 => new byte[] { 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1 },
+            2 => new byte[] { 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1 },
+            3 => new byte[] { 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1 },
+            _ => null,
+        };
+    }
+}
+
+// A minimal PNG writer for the cost map: 8-bit truecolour, no per-scanline filter, zlib via the
+// tree's Ionic.Zlib and a table-less CRC32 - no imaging dependency for one diagnostic render.
+internal sealed class CostPng
+{
+    private readonly int _w;
+    private readonly int _h;
+    private readonly byte[] _raw;
+
+    public CostPng(int w, int h)
+    {
+        _w = w;
+        _h = h;
+        _raw = new byte[h * (1 + w * 3)];
+    }
+
+    public void Set(int x, int y, byte r, byte g, byte b)
+    {
+        if (x < 0 || y < 0 || x >= _w || y >= _h)
+        {
+            return; // clip: the rot-glyph labels reach 9-15 px past a room centre, and the
+                    // canvas edge sits as little as 4 px out - an unchecked write lands in
+                    // another row's filter byte or past the buffer
+        }
+
+        var o = y * (1 + _w * 3) + 1 + x * 3;
+        _raw[o] = r;
+        _raw[o + 1] = g;
+        _raw[o + 2] = b;
+    }
+
+    /// <summary>A sub-rectangle of the image as a new PNG buffer (clamped reads skip out-of-range rows).</summary>
+    public CostPng Crop(int x0, int y0, int w, int h)
+    {
+        var c = new CostPng(w, h);
+        for (var y = 0; y < h; y++)
+        {
+            var sy = y0 + y;
+            if (sy < 0 || sy >= _h)
+            {
+                continue;
+            }
+
+            for (var x = 0; x < w; x++)
+            {
+                var sx = x0 + x;
+                if (sx < 0 || sx >= _w)
+                {
+                    continue;
+                }
+
+                var so = sy * (1 + _w * 3) + 1 + sx * 3;
+                var to = y * (1 + w * 3) + 1 + x * 3;
+                c._raw[to] = _raw[so];
+                c._raw[to + 1] = _raw[so + 1];
+                c._raw[to + 2] = _raw[so + 2];
+            }
+        }
+
+        return c;
+    }
+
+    public void Save(string path)
+    {
+        using var f = File.Create(path);
+        f.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+
+        var ihdr = new byte[13];
+        Be(ihdr, 0, _w);
+        Be(ihdr, 4, _h);
+        ihdr[8] = 8; // bit depth
+        ihdr[9] = 2; // colour type: truecolour RGB
+        Chunk(f, "IHDR", ihdr);
+
+        byte[] idat;
+        using (var ms = new MemoryStream())
+        {
+            using (var z = new Ionic.Zlib.ZlibStream(ms, Ionic.Zlib.CompressionMode.Compress, true))
+            {
+                z.Write(_raw, 0, _raw.Length);
+            }
+
+            idat = ms.ToArray();
+        }
+
+        Chunk(f, "IDAT", idat);
+        Chunk(f, "IEND", Array.Empty<byte>());
+    }
+
+    private static void Chunk(Stream f, string type, byte[] data)
+    {
+        var body = new byte[4 + data.Length];
+        System.Text.Encoding.ASCII.GetBytes(type, 0, 4, body, 0);
+        data.CopyTo(body, 4);
+        var len = new byte[4];
+        Be(len, 0, data.Length);
+        f.Write(len);
+        f.Write(body);
+        var crc = new byte[4];
+        Be(crc, 0, (int)Crc32(body));
+        f.Write(crc);
+    }
+
+    private static void Be(byte[] b, int o, int v)
+    {
+        b[o] = (byte)(v >> 24);
+        b[o + 1] = (byte)(v >> 16);
+        b[o + 2] = (byte)(v >> 8);
+        b[o + 3] = (byte)v;
+    }
+
+    private static uint Crc32(byte[] data)
+    {
+        uint crc = 0xFFFFFFFF;
+        foreach (var t in data)
+        {
+            crc ^= t;
+            for (var i = 0; i < 8; i++)
+            {
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+            }
+        }
+
+        return ~crc;
     }
 }

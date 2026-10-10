@@ -42,21 +42,22 @@ public sealed class FloorGrid : IWalkGrid
                                             // too - the wall-edge test still refuses every real wall
                                             // (owner, 2026-10-03: the item stood on Grey Caves' rock at
                                             // y 7.2 and the route died at the 5.0 floor world's rim)
-    private const float BodyLow = 0.3f, BodyHigh = 1.9f;
-    private const int MaxFloors = 8;
-    private const int MaxExpand = 1_000_000;
-    private float _maxStep = StaticStep; // missions raise this in UseComposedGeometry
+    private const float BodyLow = 0.3f, BodyHigh = 1.9f; // the body band above a floor: knee to head. A wall triangle crossing it blocks the cell/level; a lintel above 1.9 m is walked under
+    private const int MaxFloors = 8; // cap on stacked floor levels per cell (decks above decks); the lowest are dropped first when full
+    private const int MaxExpand = 1_000_000; // A* fail-safe: give up after expanding this many nodes (the map cannot be walked end to end)
+    private float _maxStep = StaticStep; // the rise a single neighbouring-cell step may climb; missions raise it to MissionStep (UseComposedGeometry / UseNorthbound)
 
     private readonly Dictionary<int, float[]> _floors = new Dictionary<int, float[]>(); // cell -> floor heights, ascending
     private readonly HashSet<(int k, float h)> _tileStamp = new HashSet<(int, float)>(); // mission grids: floors the
     // room-tile stamp laid down, so SuppressBuriedTiles can tell them from the placed mesh's own floors
     private readonly HashSet<(int k, float h)> _meshStamp = new HashSet<(int, float)>(); // mission grids: floors the
     // placed mesh sampled in (SampleSurface -> AddLevel)
-    private readonly HashSet<long> _blocked = new HashSet<long>(); // cell * 8 + floor index
-    private readonly int _x0, _z0, _w, _h;
+    private readonly HashSet<long> _blocked = new HashSet<long>(); // packed key (cell * 8 + floor index): this level of this cell cannot be stood on (wall through the body band, no headroom)
+    private readonly int _x0, _z0, _w, _h; // grid frame: world position of cell (0,0) and size in cells; cell (i,j) covers world x in [(_x0+i)*Cell, (_x0+i+1)*Cell)
     private NavCollision _walls; // static dungeons: the zone's walls.bin, for GeometryLine (missions use _wallTris)
     private string _pluginDir; // set by Build only: where walls.bin lives, for GeometryLine's lazy load
 
+    // Private: grids are born through Build (from zone files) or Read (from the GridCache) only.
     private FloorGrid(int pf, int x0, int z0, int w, int h)
     {
         Pf = pf;
@@ -66,16 +67,19 @@ public sealed class FloorGrid : IWalkGrid
         _h = h;
     }
 
+    /// <summary>The playfield this grid belongs to.</summary>
     public int Pf { get; }
 
     // ---- GridCache persistence (deterministic from the zone's files; see GridCache) ----------------------
 
     internal void Write(BinaryWriter bw)
     {
+        // grid frame first: everything else is keyed against it
         bw.Write(_x0);
         bw.Write(_z0);
         bw.Write(_w);
         bw.Write(_h);
+        // the floor map: cell key, then level count (fits a byte - MaxFloors cap), then heights ascending
         bw.Write(_floors.Count);
         foreach (var kv in _floors)
         {
@@ -87,24 +91,28 @@ public sealed class FloorGrid : IWalkGrid
             }
         }
 
+        // blocked verdicts as their packed (cell*8 + floor) keys
         bw.Write(_blocked.Count);
         foreach (long b in _blocked)
         {
             bw.Write(b);
         }
 
+        // walled edges as their packed ((cell*8 + floor)*32 + dir*8 + nf) keys (missions)
         bw.Write(_noEdge.Count);
         foreach (long e in _noEdge)
         {
             bw.Write(e);
         }
 
+        // doorway cell indices (the keep-open set)
         bw.Write(_doorways.Count);
         foreach (int d in _doorways)
         {
             bw.Write(d);
         }
 
+        // doorway world centres + outward normals: the pathfinder's crossing waypoints
         bw.Write(_doorwayList.Count);
         foreach (var dw in _doorwayList)
         {
@@ -115,6 +123,7 @@ public sealed class FloorGrid : IWalkGrid
 
     internal static FloorGrid Read(BinaryReader br, int pf)
     {
+        // mirror of Write, field for field - a cache-loaded grid is byte-identical to the built one
         int x0 = br.ReadInt32(), z0 = br.ReadInt32(), w = br.ReadInt32(), h = br.ReadInt32();
         var g = new FloorGrid(pf, x0, z0, w, h);
         int n = br.ReadInt32();
@@ -160,6 +169,8 @@ public sealed class FloorGrid : IWalkGrid
             g._doorwayList.Add(dw);
         }
 
+        // NOTE: _tileStamp/_meshStamp/_wallTris/_wallHug are NOT persisted - they are mission-build
+        // state, and a cache load is only for static dungeons. _walls loads lazily (LazyWalls).
         return g;
     }
 
@@ -173,6 +184,7 @@ public sealed class FloorGrid : IWalkGrid
 
     public static FloorGrid Build(string pluginDir, int pf, AOBuddyNav nav, Action<string> log, NorthboundPool north = null)
     {
+        // no nav data, or the zone HAS a ground heightfield (OverlandGrid's domain): not for us
         if (nav == null || nav.Ground != null)
         {
             return null;
@@ -189,8 +201,8 @@ public sealed class FloorGrid : IWalkGrid
             // precalculated offline per pool room, rotated/translated here as an index remap -
             // no triangle sampling, milliseconds. Rotation comes from the live placement, never
             // from the file, so OmniCell-style compositions work without a recache.
-            var northReady = north != null && nav.Dungeon.Rooms.All(r => r.PoolIndex < 0 || north.Rooms.ContainsKey(r.PoolIndex));
-            var mgrid = BoundsFromRooms(nav.Dungeon, pf, northReady ? 0.2f : DefaultCell, out var mx0, out var mz0, out var mw, out var mh);
+            var northReady = north != null && nav.Dungeon.Rooms.All(r => r.PoolIndex < 0 || north.Rooms.ContainsKey(r.PoolIndex)); // every placed room has a precalculated lattice
+            var mgrid = BoundsFromRooms(nav.Dungeon, pf, northReady ? 0.2f : DefaultCell, out var mx0, out var mz0, out var mw, out var mh); // empty grid frame from the rooms' tile extents
             if (mgrid == null)
             {
                 log?.Invoke($"FLOORGRID: mission pf {pf} has no rooms to walk");
@@ -202,15 +214,15 @@ public sealed class FloorGrid : IWalkGrid
             if (northReady)
             {
                 mgrid.Cell = 0.2f;
-                // The slot seams between rooms carry no pool geometry (it ended at the atlas
-                // neighbours) - the doorway stamp fills them at the doors' own mesh-sampled
-                // level, and the doors are walkable by default (a locked door is runtime state).
-                mgrid.StampDoorways(nav.MissionDoorways);
-                mgrid.UseNorthbound(north, nav);
+                // The doorway cells are marked keep-open (the doors' own frame triangles must not
+                // block the threshold; doors are walkable by default - a locked door is runtime
+                // state) - but no floor is stamped: rooms stand or connect on their real floors.
+                mgrid.MarkDoorways(nav.MissionDoorways, nav.Walls, nav.Surfaces);
+                mgrid.UseNorthbound(north, nav); // blit the precalculated lattices in, milliseconds
             }
             else
             {
-                mgrid.StampDoorways(nav.MissionDoorways);
+                mgrid.MarkDoorways(nav.MissionDoorways, nav.Walls, nav.Surfaces);
                 if (nav.Walls != null && nav.Walls.Length >= 9)
                 {
                     // REAL 3D (owner, 2026-10-03: "the whole geometry, not flattened stuff - rooms
@@ -232,7 +244,7 @@ public sealed class FloorGrid : IWalkGrid
                 }
                 else if (!DebugSkipRoomTiles)
                 {
-                    mgrid.StampRoomFloors(nav.Dungeon);
+                    mgrid.StampRoomFloors(nav.Dungeon); // no wall file: tiles alone lay the floors
                 }
             }
 
@@ -240,7 +252,7 @@ public sealed class FloorGrid : IWalkGrid
                         (northReady ? " northbound" : "") + ", " +
                         $"{mgrid._floors.Count} with floor, {mgrid._noEdge.Count} edges walled, " +
                         $"{mgrid._blocked.Count} blocked, " +
-                        $"{mgrid._doorways.Count} doorway cells bridged, " +
+                        $"{mgrid._doorways.Count} doorway cells kept open, " +
                         (mgrid._wallHug.Count > 0
                             ? $"{mgrid._wallHug.Count} hug cells (max {mgrid._wallHug.Values.Max():0.##}, avg {mgrid._wallHug.Values.Average():0.##}), "
                             : "no hug cells, ") +
@@ -248,16 +260,19 @@ public sealed class FloorGrid : IWalkGrid
             return mgrid;
         }
 
+        // STATIC DUNGEON / INDOOR ZONE: collision.bin exists, no mission layout. Build the grid
+        // straight from the zone's own files.
         if (nav.Collision == null)
         {
             return null;
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        // the grid frame: bounding box over every collision triangle's XZ footprint
         float minX = float.MaxValue, minZ = float.MaxValue, maxX = float.MinValue, maxZ = float.MinValue;
         foreach (var c in nav.Collision.Chunks)
         {
-            for (int i = 0; i + 2 < c.Verts.Length; i += 3)
+            for (int i = 0; i + 2 < c.Verts.Length; i += 3) // flat triplets: x, y, z per vertex
             {
                 minX = Math.Min(minX, c.Verts[i]);
                 maxX = Math.Max(maxX, c.Verts[i]);
@@ -268,9 +283,10 @@ public sealed class FloorGrid : IWalkGrid
 
         if (minX > maxX)
         {
-            return null;
+            return null; // no triangles at all
         }
 
+        // cell (0,0) one row/column of padding beyond the bounding box; same 16M-cell safety cap as BoundsFromRooms
         int x0 = (int)Math.Floor(minX / DefaultCell) - 2, z0 = (int)Math.Floor(minZ / DefaultCell) - 2;
         int w = (int)Math.Ceiling(maxX / DefaultCell) + 2 - x0, h = (int)Math.Ceiling(maxZ / DefaultCell) + 2 - z0;
         if ((long)w * h > 16_000_000)
@@ -281,8 +297,8 @@ public sealed class FloorGrid : IWalkGrid
 
         var grid = new FloorGrid(pf, x0, z0, w, h);
         grid._pluginDir = pluginDir;
-        grid.StampFloors(nav.Collision);
-        grid.StampRoomFloors(nav.Dungeon);
+        grid.StampFloors(nav.Collision); // sample the collision triangles into floor levels
+        grid.StampRoomFloors(nav.Dungeon); // add the rooms' own tile floors (collision only carries the extras)
         string wp = Path.Combine(AOBuddyNav.FolderFor(pluginDir, pf), "walls.bin");
         var walls = File.Exists(wp);
         if (walls)
@@ -291,12 +307,12 @@ public sealed class FloorGrid : IWalkGrid
             // nothing in the data says a doorway is a passage - without the keep-open cells the
             // shop's section doors walled the bot into the entrance room (Neutral Supermarket 1187,
             // 2026-10-02: half the room-to-room connections had no path across their doors).
-            grid.StampDoorways(AOBuddyNav.StaticDoorways(nav.Dungeon));
+            grid.MarkDoorways(AOBuddyNav.StaticDoorways(nav.Dungeon)); // BEFORE StampWalls: the keep-open cells must exist when the wall stamp runs
             grid._walls = NavCollision.Read(wp); // retained: GeometryLine judges straight lines against it
-            grid.StampWalls(grid._walls);
+            grid.StampWalls(grid._walls); // wall triangles inside a floor's body band block that level
         }
 
-        grid.StampHeadroom();
+        grid.StampHeadroom(); // last: a floor with another floor just above it is unstandable
         log?.Invoke($"FLOORGRID: floor grid for pf {pf}: {w}x{h} cells of {grid.Cell:0.0#} m, {grid._floors.Count} with floor, {grid._blocked.Count} floor cells blocked, walls {(walls ? "yes" : "NONE")} ({grid._doorways.Count} doorway cells kept open), {sw.ElapsedMilliseconds} ms");
         return grid;
     }
@@ -320,6 +336,8 @@ public sealed class FloorGrid : IWalkGrid
                 continue;
             }
 
+            // the room's tile area as a half-extent about Pos (tile rect is in tile units, x d.Cell metres);
+            // generous either way it is turned, so the box covers every floor cell the room can lay
             float ex = (rm.Rect[2] - rm.Rect[0] + 1) * d.Cell, ez = (rm.Rect[3] - rm.Rect[1] + 1) * d.Cell;
             minX = Math.Min(minX, rm.Pos[0] - ex);
             maxX = Math.Max(maxX, rm.Pos[0] + ex);
@@ -329,9 +347,10 @@ public sealed class FloorGrid : IWalkGrid
 
         if (minX > maxX)
         {
-            return null;
+            return null; // no usable rooms
         }
 
+        // same frame + padding + cap as the static path
         x0 = (int)Math.Floor(minX / cell) - 2;
         z0 = (int)Math.Floor(minZ / cell) - 2;
         w = (int)Math.Ceiling(maxX / cell) + 2 - x0;
@@ -351,16 +370,18 @@ public sealed class FloorGrid : IWalkGrid
         // floor map came out Swiss-cheese, routes threaded the holes and the walk crossed real
         // walls (Neutral Supermarket 1187, 2026-10-02: three yanks inside the shop door). Sampling
         // the surface at 0.25 m stamps every cell the triangle touches, seams included.
-        var raw = new Dictionary<int, List<float>>();
+        var raw = new Dictionary<int, List<float>>(); // cell -> every sampled height that fell in it
         foreach (var ch in col.Chunks)
         {
             float[] v = ch.Verts;
-            for (int o = 0; o + 8 < v.Length; o += 9)
+            for (int o = 0; o + 8 < v.Length; o += 9) // flat triangle triplets: 9 floats = 3 vertices
             {
                 float ax = v[o], ay = v[o + 1], az = v[o + 2], bx = v[o + 3], by = v[o + 4], bz = v[o + 5], cx = v[o + 6], cy = v[o + 7], cz = v[o + 8];
+                // sample density from the longest edge: a step about every 0.25 m
                 var longest = Math.Max(Len(bx - ax, by - ay, bz - az),
                     Math.Max(Len(cx - ax, cy - ay, cz - az), Len(cx - bx, cy - by, cz - bz)));
                 int n = Math.Min(400, Math.Max(1, (int)Math.Ceiling(longest / 0.25f)));
+                // barycentric lattice over the triangle (s + t <= 1): the two inner loops walk it
                 for (int i = 0; i <= n; i++)
                 {
                     for (int j = 0; j <= n - i; j++)
@@ -381,12 +402,13 @@ public sealed class FloorGrid : IWalkGrid
                             raw[k] = l = new List<float>();
                         }
 
-                        l.Add(py);
+                        l.Add(py); // the sample's height lands in its cell - duplicated heights are fine here
                     }
                 }
             }
         }
 
+        // fold each cell's sample pile into sorted, deduped floor levels
         foreach (var kv in raw)
         {
             kv.Value.Sort();
@@ -399,13 +421,13 @@ public sealed class FloorGrid : IWalkGrid
                 }
                 else
                 {
-                    merged.Add(y);
+                    merged.Add(y); // a genuinely separate surface
                 }
             }
 
             if (merged.Count > MaxFloors)
             {
-                merged.RemoveRange(0, merged.Count - MaxFloors);
+                merged.RemoveRange(0, merged.Count - MaxFloors); // keep the topmost levels
             }
 
             _floors[kv.Key] = merged.ToArray();
@@ -432,8 +454,8 @@ public sealed class FloorGrid : IWalkGrid
             }
 
             int x1 = rm.Rect[0], z1 = rm.Rect[1], x2 = rm.Rect[2], z2 = rm.Rect[3];
-            double mx = (x1 + x2 + 1) / 2.0, mz = (z1 + z2 + 1) / 2.0;
-            var turns = ((-rm.Rot) % 4 + 4) % 4;
+            double mx = (x1 + x2 + 1) / 2.0, mz = (z1 + z2 + 1) / 2.0; // the tile grid's centre, for the pivot below
+            var turns = ((-rm.Rot) % 4 + 4) % 4; // the room placement's quarter turns
             for (int r = 0; r < rm.Tile.Length; r++)
             {
                 for (int c = 0; c < rm.Tile[r].Length; c++)
@@ -448,11 +470,11 @@ public sealed class FloorGrid : IWalkGrid
                     double dz = (z1 + r - mz) * dungeon.Cell;
                     for (int i = 0; i < turns; i++)
                     {
-                        (dx, dz) = (-dz, dx);
+                        (dx, dz) = (-dz, dx); // one quarter turn about the pivot, (-z, x)
                     }
 
                     double wx = rm.Pos[0] + dx, wz = rm.Pos[2] + dz;
-                    float h = rm.Pos[1] + (rm.Height[r][c] - rm.HeightBase) * dungeon.HeightScale;
+                    float h = rm.Pos[1] + (rm.Height[r][c] - rm.HeightBase) * dungeon.HeightScale; // the tile's absolute floor height
 
                     // the tile is dungeon.Cell (2 m) square centred there: stamp its sub-cells
                     int i0 = CellX((float)(wx - dungeon.Cell / 2)), i1 = CellX((float)(wx + dungeon.Cell / 2));
@@ -467,13 +489,14 @@ public sealed class FloorGrid : IWalkGrid
                             }
 
                             int k = j * _w + i;
-                            _tileStamp.Add((k, h));
+                            _tileStamp.Add((k, h)); // provenance: this floor came from the room tiles
                             if (!_floors.TryGetValue(k, out var fl))
                             {
                                 _floors[k] = new[] { h };
                                 continue;
                             }
 
+                            // fold into the existing stack: same height (within Merge) = the same floor
                             var folded = false;
                             foreach (var f in fl)
                             {
@@ -502,67 +525,129 @@ public sealed class FloorGrid : IWalkGrid
     // Cells a room doorway covers: walls there are door leaves and frames, not walls - StampWalls
     // leaves them open. Across the door: the ~2 m passage (the frame lands the centre line true, the
     // jambs at ±1.25 m stay blocked, so the opening threads like a doorway, not a hole in a wall).
-    // ALONG the door's normal: the threshold strip is untiled in BOTH rooms' data (it belongs to the
-    // wall - 1187's section doors had a ~2.5 m void where the floor should be), so the doorway also
-    // BRIDGES floor at the door's height across that strip; the long reach along the normal never
-    // approaches the jambs. Verified cell-by-cell against 1187 Neutral Supermarket Advanced.
+    // The keep-open box around a doorway: ACROSS the door's normal is the doorway's width, ALONG
+    // it the threshold strip (untiled in BOTH rooms' data - it belongs to the wall). Cells in the
+    // box are exempt from the door frame's own triangles (SuppressBuriedTiles, the edge builder)
+    // - the doors are walkable by default. The doorway's MIDDLE/MIDDLE cell is stamped walkable
+    // at the door's own height (owner, 2026-10-09, verified against the live client) - nothing
+    // wider: rooms connect to the door tile when their floors are placed right, and a misaligned
+    // room shows as an honest gap instead of a papered-over seam.
     private const float DoorwayAcross = 1.25f;
     private const float DoorwayAlong = 3.5f;
 
     private readonly HashSet<int> _doorways = new HashSet<int>();
+    private readonly Dictionary<int, double> _doorwaySill = new Dictionary<int, double>(); // per keep-open cell: the door sill Y - the blit stamps it into cells the threshold strip left void
 
     // The doorway world centres and normals (static rooms): the pathfinder walks a crossing route
     // through the doorway's exact centre (InsertDoorWaypoints).
     private List<AOBuddyNav.Doorway> _doorwayList = new List<AOBuddyNav.Doorway>();
 
-    private void StampDoorways(List<AOBuddyNav.Doorway> doorways)
+    /// <summary>Per doorway (index-aligned with nav.MissionDoorways / _doorwayList), the statel's
+    /// measured 3D extent (probe: the green door boxes). NaNs when no geometry was found.</summary>
+    public readonly List<(float minX, float maxX, float minZ, float maxZ, float minY, float maxY)> ProbeDoorExtents = new();
+
+    private void MarkDoorways(List<AOBuddyNav.Doorway> doorways, float[] walls = null, float[] surfaces = null)
     {
         _doorwayList = doorways;
         foreach (var dw in doorways)
         {
-            double ax = Math.Abs(dw.Nx) > 0.5 ? DoorwayAlong : DoorwayAcross;
-            double az = Math.Abs(dw.Nz) > 0.5 ? DoorwayAlong : DoorwayAcross;
-            int i0 = CellX((float)(dw.X - ax)), i1 = CellX((float)(dw.X + ax));
-            int j0 = CellZ((float)(dw.Z - az)), j1 = CellZ((float)(dw.Z + az));
-            for (int j = j0; j <= j1; j++)
+            // THE DOOR'S OWN 3D EXTENT, not constants (owner, 2026-10-09): the statel's geometry
+            // is the truth - vertices within 1.6 m of the doorway centre (the frame+leaf cluster,
+            // ~2.2 x 2.2 m) give the XZ keep-open box and the Y band; overlaps between neighbours
+            // are fine, the set absorbs them. No geometry found: fall back to the constant box.
+            float mnx = float.MaxValue, mxx = float.MinValue, mnz = float.MaxValue, mxz = float.MinValue;
+            float mny = float.MaxValue, mxy = float.MinValue;
+            var verts = 0;
+            void Measure(float[] v)
             {
-                for (int i = i0; i <= i1; i++)
+                // collect the extent of every triangle vertex near the doorway centre (XZ box ±1.6 m)
+                for (var i = 0; i + 2 < v.Length; i += 3)
                 {
-                    if (!In(i, j))
+                    if (Math.Abs(v[i] - dw.X) > 1.6f || Math.Abs(v[i + 2] - dw.Z) > 1.6f)
                     {
                         continue;
                     }
 
-                    int k = j * _w + i;
-                    _doorways.Add(k);
+                    mnx = Math.Min(mnx, v[i]); mxx = Math.Max(mxx, v[i]);
+                    mnz = Math.Min(mnz, v[i + 2]); mxz = Math.Max(mxz, v[i + 2]);
+                    mny = Math.Min(mny, v[i + 1]); mxy = Math.Max(mxy, v[i + 1]);
+                    verts++;
+                }
+            }
 
-                    // the threshold bridge: floor at the door's height where neither room has tiles
-                    if (!_floors.TryGetValue(k, out var fl))
-                    {
-                        _floors[k] = new[] { (float)dw.Y };
-                    }
-                    else
-                    {
-                        var folded = false;
-                        foreach (var f in fl)
-                        {
-                            if (Math.Abs(f - dw.Y) <= Merge)
-                            {
-                                folded = true;
-                                break;
-                            }
-                        }
+            if (walls != null)
+            {
+                Measure(walls);
+            }
 
-                        if (!folded && fl.Length < MaxFloors)
+            if (surfaces != null)
+            {
+                Measure(surfaces);
+            }
+
+            if (verts > 0)
+            {
+                // geometry found: the keep-open box is the door's own measured footprint
+                int i0 = CellX(mnx), i1 = CellX(mxx);
+                int j0 = CellZ(mnz), j1 = CellZ(mxz);
+                for (int j = j0; j <= j1; j++)
+                {
+                    for (int i = i0; i <= i1; i++)
+                    {
+                        if (In(i, j))
                         {
-                            var merged = new float[fl.Length + 1];
-                            Array.Copy(fl, merged, fl.Length);
-                            merged[fl.Length] = (float)dw.Y;
-                            Array.Sort(merged);
-                            _floors[k] = merged;
+                            _doorways.Add(j * _w + i);
                         }
                     }
                 }
+            }
+
+            // THE CONSTANT PASSAGE, always kept open too (owner, 2026-10-10: "blue left and
+            // right of the marker"): the measured extent can come out SMALLER than the real
+            // passage when the door's placed geometry is sparse - the flank cells then keep
+            // their wall-band block and the doorway reads sealed beside its own marker. The
+            // +-DoorwayAcross box is the passage's own width; the measurement may only add
+            // to it, never subtract. Every box cell also records the door sill as its base
+            // floor: threshold strips between rooms are untiled in both and the collision may
+            // not reach - the blit stamps void box cells with the sill (UseNorthbound).
+            {
+                int i0 = CellX((float)(dw.X - DoorwayAcross)), i1 = CellX((float)(dw.X + DoorwayAcross));
+                int j0 = CellZ((float)(dw.Z - DoorwayAcross)), j1 = CellZ((float)(dw.Z + DoorwayAcross));
+                for (int j = j0; j <= j1; j++)
+                {
+                    for (int i = i0; i <= i1; i++)
+                    {
+                        if (In(i, j))
+                        {
+                            _doorways.Add(j * _w + i);
+                            _doorwaySill[j * _w + i] = dw.Y;
+                        }
+                    }
+                }
+            }
+
+            ProbeDoorExtents.Add((mnx, mxx, mnz, mxz, mny, mxy)); // probe render: NaNs when nothing measured
+
+            // THE DOOR ITSELF IS GROUND (owner, 2026-10-09, checked against the live client): the
+            // doorway's middle/middle is walkable at the door's own height. Stamp exactly that
+            // threshold cell - nothing wider: rooms connect to it when their floors are placed
+            // right, and a misaligned room shows as an honest gap instead of a papered-over seam.
+            int ci = CellX((float)dw.X), cj = CellZ((float)dw.Z);
+            if (!In(ci, cj))
+            {
+                continue; // doorway outside the grid frame (misplaced room): skip its floor stamp
+            }
+
+            int kc = cj * _w + ci;
+            _doorways.Add(kc);
+            var cfl = _floors.TryGetValue(kc, out var ex) ? ex : Array.Empty<float>();
+            if (cfl.All(f => Math.Abs(f - dw.Y) > Merge) && cfl.Length < MaxFloors) // no floor at door height yet
+            {
+                var merged = new float[cfl.Length + 1];
+                Array.Copy(cfl, merged, cfl.Length);
+                merged[cfl.Length] = (float)dw.Y; // the door sill itself is a standable floor
+                Array.Sort(merged);
+                _floors[kc] = merged;
             }
         }
     }
@@ -597,17 +682,17 @@ public sealed class FloorGrid : IWalkGrid
 
     public void UseNorthbound(NorthboundPool north, AOBuddyNav nav)
     {
-        _maxStep = MissionStep;
-        var blitted = 0;
-        var pf = nav.Layout.TemplatePlayfield;
-        NavDungeon pool;
+        _maxStep = MissionStep; // the lattices were built for the mission walk's +0.8 climbs
+        var blitted = 0; // probe counter: lattice cells remapped into this grid
+        var pf = nav.Layout.TemplatePlayfield; // the pool playfield the lattices were built from
+        NavDungeon pool; // the pool's own rooms.json: room positions + tile data in pool frame
         try
         {
             pool = NavDungeon.Read(Path.Combine(AOBuddyNav.FolderFor(_pluginDir, pf), "rooms.json"));
         }
         catch
         {
-            return;
+            return; // no pool data: the grid stays empty, the mission is unwalkable this session
         }
 
         if (pool?.Rooms == null)
@@ -615,54 +700,87 @@ public sealed class FloorGrid : IWalkGrid
             return;
         }
 
-        var cellBlocked = new List<(int k, int count)>();
+        var cellBlocked = new List<(int k, int count)>(); // world cells to block AFTER all rooms are in (which levels)
+        var nbTileLevels = new Dictionary<int, List<double>>(); // per world cell: the TILE (heightfield) levels blitted into it - the datum fold below needs them
 
-        // ONE mesh shift for the whole pool: the atlas mesh is a single coherent frame (all its
-        // rooms sit in it together), so every room's mesh moves by the same vector - the average
-        // of its rooms' (door Y − portal mesh level). A per-room shift would tear the mesh
-        // structures apart at the seams.
-        var shiftSamples = new List<double>();
-        foreach (var mr in nav.Dungeon.Rooms)
-        {
-            if (mr.PoolIndex < 0 || !north.Rooms.TryGetValue(mr.PoolIndex, out var lat0))
-            {
-                continue;
-            }
-
-            var myDoors = nav.MissionDoorways.Where(d => d.Room == mr.Index).ToList();
-            var anchors = lat0.Portals.Where(p => !float.IsNaN(p.MeshLevel)).ToList();
-            if (myDoors.Count > 0 && anchors.Count > 0)
-            {
-                shiftSamples.Add(myDoors.Average(d => d.Y) - anchors.Average(p => (double)p.MeshLevel));
-            }
-        }
-
-        var poolMeshShift = shiftSamples.Count > 0 ? shiftSamples.Average() : 0.0;
+        // THE RIGID ROOM (owner, 2026-10-10): every room's content moves as ONE body hung off
+        // the server's doors - its tiles ride Pos (the pivot transform below) plus the chain's
+        // vertical move (nav.ServerRoomShift), its mesh rides the same displacement anchored on
+        // a door: the placed doorway's Y minus its portal's pool-mesh level. The shift is
+        // computed per room in the loop below; there is no pool-wide constant and no average.
 
         foreach (var mr in nav.Dungeon.Rooms)
         {
             if (mr.PoolIndex < 0 || mr.Pos == null || mr.PoolIndex >= pool.Rooms.Count)
             {
-                continue;
+                continue; // not a pool room, unplaced, or index outside the pool's rooms.json
             }
 
             var pr = pool.Rooms[mr.PoolIndex];
             if (pr?.Pos == null || !north.Rooms.TryGetValue(mr.PoolIndex, out var lat))
             {
-                continue;
+                continue; // pool room missing its anchor or its lattice
             }
 
-            var g = mr.GeomPos ?? mr.Pos;
-
-            // Tile levels absolute; mesh levels carry the POOL-WIDE door-anchored shift.
-            var meshShift = poolMeshShift;
-
-            int turns = ((((-pr.Rot) % 4 + 4) % 4) - (((-mr.Rot) % 4 + 4) % 4) + 4) % 4;
-            void Turn(ref double x, ref double z)
+            // THE MESH ANCHOR, per room: the placed doorway's Y minus its portal's pool-mesh
+            // level. The datum offset is one rigid body's, so ANY door of the room measures it -
+            // the first door with a mesh level is the anchor, nothing is averaged. Door order =
+            // portal order (PlaceDoors walks DoorwaysFromField; the builder built Portals from
+            // the same list). The portal carries EVERY mesh level its cells sampled - a cave
+            // socket has the sill AND ledges above it, and nearest-first ordering anchored some
+            // portals on a ledge metres above the sill (grey_mh7: 8.10 over 5.01), sinking the
+            // whole room's mesh against its tiles into the headroom band - the vertical blue
+            // stripes on the cost map. The server's own door level names the sill: the candidate
+            // nearest it. No anchored door: shift 0, the mesh rides its raw pool datum.
+            var meshShift = 0.0;
+            var roomDoors = nav.MissionDoorways.Where(dd => dd.Room == mr.Index).ToList();
+            for (var di = 0; di < roomDoors.Count && di < lat.Portals.Count; di++)
             {
-                for (int t = 0; t < turns; t++)
+                var portal = lat.Portals[di];
+                var doorY = roomDoors[di].Y;
+                float best = float.NaN;
+                if (portal.MeshLevels is { Count: > 0 })
                 {
-                    (x, z) = (z, -x);
+                    best = portal.MeshLevels[0];
+                    foreach (var c in portal.MeshLevels)
+                    {
+                        if (Math.Abs(c - doorY) < Math.Abs(best - doorY))
+                        {
+                            best = c;
+                        }
+                    }
+                }
+                else if (!float.IsNaN(portal.MeshLevel))
+                {
+                    best = portal.MeshLevel;
+                }
+
+                if (float.IsNaN(best))
+                {
+                    continue;
+                }
+
+                meshShift = doorY - best;
+                break;
+            }
+
+            // and the tiles: the heightfield carries the SLOT placement's heights (absolute, the
+            // verified data fact), so the server-door chain's vertical move rides on top. XZ
+            // needs no record - the tiles pivot on Pos, which moved with the chain.
+            var tileDy = nav.ServerRoomShift.TryGetValue(mr.Index, out var roomShift) ? roomShift[1] : 0.0;
+
+            // THE PLACEMENT (owner, 2026-10-09, "keep the positioning, revert to the old
+            // content"): ONE transform for tiles and mesh alike - pivot on the pool room's Pos
+            // (the tile-rect centre in pool world), the PLACED rot's quarter turns in the
+            // (-z, x) direction, landed on Pos - the monitor's proven placement. The split-blit
+            // experiment (each data layer in its own frame) tore jagged 20 cm gaps into every
+            // rotated wall; merged content at this transform is the state that verified.
+            int turnsT = ((-mr.Rot) % 4 + 4) % 4; // the PLACED rotation as quarter turns
+            void TurnT(ref double x, ref double z)
+            {
+                for (int t = 0; t < turnsT; t++)
+                {
+                    (x, z) = (-z, x); // one quarter turn about the pivot, (-z, x)
                 }
             }
 
@@ -674,106 +792,221 @@ public sealed class FloorGrid : IWalkGrid
             {
                 foreach (var (pcx, pcy, _) in p.Cells)
                 {
-                    portalCells.Add(pcy * lat.W + pcx);
+                    portalCells.Add(pcy * lat.W + pcx); // lattice indices of this room's door cells
                 }
+            }
+
+            // the merge helper: incoming levels folded into a world cell, deduped, capped; the
+            // graded hug penalty applied to every level (MAX - spill must never lower a wall cell)
+            float[] MergeInto(int k, List<float> incoming, float hugPenalty)
+            {
+                // fold the lattice's levels into the world cell: sort, drop near-duplicates (two
+                // layers agreeing on a floor), cap at MaxFloors keeping the highest
+                if (!_floors.TryGetValue(k, out var fl))
+                {
+                    fl = incoming.ToArray();
+                }
+                else
+                {
+                    var mergedList = new List<float>(fl);
+                    mergedList.AddRange(incoming);
+                    mergedList.Sort();
+                    for (var x = mergedList.Count - 1; x > 0; x--)
+                    {
+                        if (mergedList[x] - mergedList[x - 1] < 0.25f)
+                        {
+                            mergedList.RemoveAt(x); // same floor seen by both layers
+                        }
+                    }
+
+                    if (mergedList.Count > MaxFloors)
+                    {
+                        mergedList.RemoveRange(0, mergedList.Count - MaxFloors);
+                    }
+
+                    fl = mergedList.ToArray();
+                }
+
+                _floors[k] = fl;
+                if (hugPenalty > 0f)
+                {
+                    for (int f = 0; f < fl.Length; f++)
+                    {
+                        var hugKey = (long)k * 8 + f;
+                        _wallHug[hugKey] = Math.Max(_wallHug.TryGetValue(hugKey, out var prev) ? prev : 0f, hugPenalty); // MAX: spill must never lower a wall cell
+                    }
+                }
+
+                return fl;
             }
 
             for (int j = 0; j < lat.H; j++)
             {
                 for (int i = 0; i < lat.W; i++)
                 {
-                    var levels = lat.Levels[j * lat.W + i];
-                    if (levels == null || levels.Count == 0)
+                    var levels = lat.Levels[j * lat.W + i]; // tile-sourced levels (absolute heights)
+                    var ml = lat.MeshLevels[j * lat.W + i]; // mesh-sourced levels (pool-mesh datum)
+                    if ((levels == null || levels.Count == 0) && ml == null)
                     {
-                        continue;
+                        continue; // the lattice has nothing in this cell
                     }
 
-                    double cx = lat.Ox + (i + 0.5f) * north.Cell, cz = lat.Oz + (j + 0.5f) * north.Cell;
+                    double cx = lat.Ox + (i + 0.5f) * north.Cell, cz = lat.Oz + (j + 0.5f) * north.Cell; // the lattice cell's centre in POOL world
                     var isPortal = portalCells.Contains(j * lat.W + i);
-                    if (!isPortal && double.IsNaN(pool.FloorHeight(pr, cx, cz)))
+
+                    // ONE transform for both layers, the monitor's placement (owner, 2026-10-09:
+                    // "keep the positioning, revert to the old content" - the split blit hung the
+                    // mesh a frame apart from the tiles and tore jagged 20 cm gaps into every
+                    // rotated wall): tiles and mesh merge into the SAME cell, at the tile-rect
+                    // centre pivot, the placed rot's turns, landed on Pos.
+                    var owned = isPortal || !double.IsNaN(pool.FloorHeight(pr, cx, cz));
+                    if (!owned)
                     {
-                        continue; // atlas spill: not this room's floor
+                        continue; // atlas spill: a cell the pool's tiles don't claim is not this room
                     }
 
+                    // pool world -> placed world: subtract the pool room's Pos, turn, land on the placed Pos
                     double dx = cx - pr.Pos[0], dz = cz - pr.Pos[2];
-                    Turn(ref dx, ref dz);
-                    var k = Key((float)(g[0] + dx), (float)(g[2] + dz));
+                    TurnT(ref dx, ref dz);
+                    var k = Key((float)(mr.Pos[0] + dx), (float)(mr.Pos[2] + dz));
                     if (k < 0)
                     {
-                        continue;
+                        continue; // landed outside this grid's frame
                     }
 
-                    // MERGE into what earlier rooms left - spill must not clobber a neighbour.
-                    // Tile levels stay absolute; mesh levels carry the door-anchored shift.
-                    var incoming = new List<float>(levels.Count + (lat.MeshLevels[j * lat.W + i]?.Count ?? 0));
-                    foreach (var v in levels)
+                    var incoming = new List<float>((levels?.Count ?? 0) + (ml?.Count ?? 0));
+                    if (levels != null)
                     {
-                        incoming.Add(v);
+                        foreach (var v in levels)
+                        {
+                            incoming.Add((float)(v + tileDy)); // slot-placement height + the chain's vertical move
+                            if (!nbTileLevels.TryGetValue(k, out var tl))
+                            {
+                                nbTileLevels[k] = tl = new List<double>();
+                            }
+
+                            tl.Add(v + tileDy);
+                        }
                     }
 
-                    var ml = lat.MeshLevels[j * lat.W + i];
                     if (ml != null)
                     {
                         foreach (var v in ml)
                         {
-                            incoming.Add((float)(v + meshShift));
+                            incoming.Add((float)(v + meshShift)); // pool mesh datum -> placed door level
                         }
                     }
 
-                    incoming.Sort();
-                    if (!_floors.TryGetValue(k, out var fl))
-                    {
-                        fl = incoming.ToArray();
-                    }
-                    else
-                    {
-                        var mergedList = new List<float>(fl);
-                        mergedList.AddRange(incoming);
-                        mergedList.Sort();
-                        for (var x = mergedList.Count - 1; x > 0; x--)
-                        {
-                            if (mergedList[x] - mergedList[x - 1] < 0.25f)
-                            {
-                                mergedList.RemoveAt(x);
-                            }
-                        }
-
-                        if (mergedList.Count > MaxFloors)
-                        {
-                            mergedList.RemoveRange(0, mergedList.Count - MaxFloors);
-                        }
-
-                        fl = mergedList.ToArray();
-                    }
-
-                    _floors[k] = fl;
+                    var fl = MergeInto(k, incoming, 0f);
+                    ProbeRoom[k] = mr.Index; // probe provenance: which placed room wrote this cell
+                    ProbeCellKind[k] = (levels is { Count: > 0 } ? 1 : 0) | (ml is { Count: > 0 } ? 2 : 0); // probe: 1 tiles, 2 mesh, 3 both
                     blitted++;
-                    if (lat.Hug is { Length: > 0 } && i < lat.W && j < lat.H)
-                    {
-                        // graded wall-hug: the closer the cell sits to a wall/column, the more a
-                        // step through it costs - routes tend to the centres of rooms/hallways.
-                        // MAX when two rooms claim the same world cell (the chunks' atlas spill
-                        // overlaps the neighbour): a spill cell must never LOWER the penalty the
-                        // owning room wrote - its pool-frame neighbourhood is the ATLAS's, not the
-                        // placement's, and hugging the walls came back the day this wrote over it.
-                        var penalty = WallHugPenalty * lat.Hug[j * lat.W + i] / 255f;
-                        for (int f = 0; f < fl.Length; f++)
-                        {
-                            var hugKey = (long)k * 8 + f;
-                            _wallHug[hugKey] = Math.Max(_wallHug.TryGetValue(hugKey, out var prev) ? prev : 0f, penalty);
-                        }
-                    }
-
                     if (lat.Blocked[j * lat.W + i])
                     {
-                        cellBlocked.Add((k, fl.Length));
+                        cellBlocked.Add((k, fl.Length)); // deferred: block all merged levels once the merge settles
                     }
                 }
             }
         }
 
-        StampHeadroom();
+        // THE DATUM FOLD: the heightfield tile floor and the collision-sampled floor are the
+        // same physical plane measured twice - the heightfield's 2 m averaging sits up to ~0.8
+        // m off the exact sill (grey caves: tile 5.8 over sill 5.01 in the same cell). Left
+        // alone the pair survives the 0.25 merge and trips the headroom rule, and the cell's
+        // floor reads blocked over clean, obstacle-free floor (owner, 2026-10-10, dump
+        // 14678613/14678642: the crossed hallways' clean 4 m centre came out blue). Fold every
+        // non-tile level within 1.0 m of the cell's tile level into it - a genuine low slab
+        // would be STEEP geometry and never became a mesh level (the Blocker band took it),
+        // so nothing walkable-but-real is lost; the tile height is the server's own floor data.
+        foreach (var kv in nbTileLevels)
+        {
+            if (!_floors.TryGetValue(kv.Key, out var fl))
+            {
+                continue;
+            }
+
+            var kept = new List<float>(fl.Length);
+            float folded = 0f;
+            var haveFolded = false;
+            foreach (var v in fl)
+            {
+                var isTile = false;
+                var nearTile = false;
+                foreach (var t in kv.Value)
+                {
+                    if (Math.Abs(t - v) <= 0.005f)
+                    {
+                        isTile = true;
+                        break;
+                    }
+
+                    if (Math.Abs(t - v) <= 1.0f)
+                    {
+                        nearTile = true;
+                    }
+                }
+
+                if (!isTile && nearTile)
+                {
+                    // folded - but remembered: the MaxFloors cap can have dropped the tile
+                    // level itself from a dense stack, and a cell must never fold empty
+                    if (!haveFolded || Math.Abs(v - kv.Value[0]) < Math.Abs(folded - kv.Value[0]))
+                    {
+                        folded = v;
+                        haveFolded = true;
+                    }
+
+                    continue;
+                }
+
+                kept.Add(v);
+            }
+
+            if (kept.Count == 0 && haveFolded)
+            {
+                kept.Add(folded); // everything folded: keep the survivor nearest the tile level
+            }
+
+            if (kept.Count != fl.Length)
+            {
+                _floors[kv.Key] = kept.ToArray();
+            }
+        }
+
+        // THE THRESHOLD FOLD: doorway flanks are untiled in BOTH rooms' data ("it belongs to
+        // the wall"), so their cells carry only collision-sampled levels - the same floor at
+        // two sampling heights (sill 5.0, tile-side 5.8). With no tile level to anchor the
+        // datum fold above, the pair survives and the headroom rule seals the doorway's flank
+        // cells (dump 14678613: room 17 unreachable from anywhere). Tile-less cells fold close
+        // neighbours into the higher sample; tiled cells were handled by the datum fold.
+        foreach (var kv in _floors)
+        {
+            if (nbTileLevels.ContainsKey(kv.Key) || kv.Value.Length < 2)
+            {
+                continue;
+            }
+
+            var kept = new List<float>(kv.Value.Length);
+            for (var f = 0; f < kv.Value.Length; f++)
+            {
+                var isLowerOfPair = f + 1 < kv.Value.Length && kv.Value[f + 1] - kv.Value[f] <= 1.0f;
+                if (isLowerOfPair && kept.Count > 0)
+                {
+                    continue; // the lower of a close pair: folded into the sample above it
+                }
+
+                kept.Add(kv.Value[f]);
+            }
+
+            if (kept.Count != kv.Value.Length)
+            {
+                _floors[kv.Key] = kept.ToArray();
+            }
+        }
+
+        StampHeadroom(); // the table-top rule over the folded stacks
         DebugNorthCells = blitted;
+        // deferred blocking: every level each lattice-blocked cell ended up with
         foreach (var (k, count) in cellBlocked)
         {
             for (int f = 0; f < count && f < MaxFloors; f++)
@@ -782,6 +1015,7 @@ public sealed class FloorGrid : IWalkGrid
             }
         }
 
+        // doorway cells unblocked again (MarkDoorways ran first): the door frames must never seal the threshold
         foreach (var k in _doorways)
         {
             if (!_floors.TryGetValue(k, out var fl))
@@ -792,6 +1026,131 @@ public sealed class FloorGrid : IWalkGrid
             for (int f = 0; f < fl.Length; f++)
             {
                 _blocked.Remove((long)k * 8 + f);
+            }
+        }
+
+        // THE SILL RULE (owner, 2026-10-10): a keep-open box's floor IS the server's door
+        // level. Two failures it cures: (1) a keep-open cell NO blit gave a floor - the
+        // threshold strip between rooms is untiled in both and the collision may not reach
+        // (dump 14678613: room 17 sealed behind a void seam across its door line) - it gets
+        // the sill stamped in. (2) a PURE THRESHOLD cell whose every level sits within 1.0 m
+        // of the sill - the same floor measured twice (the sill 5.0 and the tile-side 5.85;
+        // MissionStep 0.8 refused the 0.85 climb and sealed the doorway to one walking
+        // direction) - it walks flat at the sill. Cells with levels beyond the sill +1.0 keep
+        // their stack: that is real interior relief, not noise.
+        foreach (var kv in _doorwaySill)
+        {
+            var sill = (float)kv.Value;
+            if (!_floors.TryGetValue(kv.Key, out var fl) || fl.Length == 0)
+            {
+                _floors[kv.Key] = new[] { sill };
+                for (var f = 0; f < 8; f++)
+                {
+                    _blocked.Remove(kv.Key * 8 + f);
+                }
+
+                continue;
+            }
+
+            var allNear = true;
+            foreach (var v in fl)
+            {
+                if (Math.Abs(v - sill) > 1.0f)
+                {
+                    allNear = false;
+                    break;
+                }
+            }
+
+            if (allNear && (fl.Length > 1 || Math.Abs(fl[0] - sill) > 0.005f))
+            {
+                _floors[kv.Key] = new[] { sill };
+                for (var f = 0; f < 8; f++)
+                {
+                    _blocked.Remove(kv.Key * 8 + f); // doorway cells are fully open by rule
+                }
+            }
+        }
+
+        // THE WORLD-SPACE WALL HUG (owner, 2026-10-09): hug belongs to the PLACED building, not
+        // to single rooms - a corridor's north wall can live in the NEIGHBOUR's lattice, and a
+        // per-room brushfire never crosses the room boundary (that corridor's edge showed flat
+        // where the neighbour's wall stood). One brushfire over the stitched grid: seeds are
+        // every wall cell (blocked floors, and the void around them), distance in metres with
+        // diagonal steps, hug per floor level from full at the wall down to 0 at HugRadius.
+        // Doorway cells stay cheap (exempt below).
+        const float hugRadius = 1.2f;
+        var cellsN = _w * _h;
+        var wdist = new float[cellsN]; // per cell: metres to the nearest wall seed
+        Array.Fill(wdist, float.MaxValue);
+        var wq = new Queue<int>();
+        for (var c = 0; c < cellsN; c++)
+        {
+            if (!_floors.TryGetValue(c, out var flw) || flw.Length == 0)
+            {
+                wdist[c] = 0; // the wall body itself: no floor here
+                wq.Enqueue(c);
+                continue;
+            }
+
+            // a cell seeds only when its WALKABLE floor (the lowest level) is blocked - an
+            // overhead level being blocked (a beam at 2.8 m) is walked under, not hugged
+            if (_blocked.Contains((long)c * 8))
+            {
+                wdist[c] = 0;
+                wq.Enqueue(c);
+            }
+        }
+
+        // Dijkstra brushfire: distance to the nearest seed, diagonal steps cost sqrt(2) of the cell
+        while (wq.Count > 0)
+        {
+            var c = wq.Dequeue();
+            int ci = c % _w, cj = c / _w;
+            for (var dj = -1; dj <= 1; dj++)
+            {
+                for (var di = -1; di <= 1; di++)
+                {
+                    if (di == 0 && dj == 0 || !In(ci + di, cj + dj))
+                    {
+                        continue;
+                    }
+
+                    var n = (cj + dj) * _w + ci + di;
+                    var step = di != 0 && dj != 0 ? Cell * 1.4142f : Cell;
+                    if (wdist[c] + step < wdist[n] - 1e-3f)
+                    {
+                        wdist[n] = wdist[c] + step;
+                        wq.Enqueue(n); // re-relax: plain queue, not a priority queue
+                    }
+                }
+            }
+        }
+
+        // turn distance into cost: full penalty at the wall, linearly to 0 at hugRadius
+        foreach (var kv in _floors)
+        {
+            if (_doorways.Contains(kv.Key))
+            {
+                continue; // the doorways' middle stays cheap
+            }
+
+            var d = wdist[kv.Key];
+            if (d >= hugRadius)
+            {
+                continue; // not near any wall: no penalty
+            }
+
+            var penalty = WallHugPenalty * (hugRadius - d) / hugRadius;
+            var walkY = kv.Value[0];
+            for (int f = 0; f < kv.Value.Length; f++)
+            {
+                if (kv.Value[f] - walkY > 1.0f)
+                {
+                    break; // overhead levels (beams, wall tops) are walked under: no hug
+                }
+
+                _wallHug[(long)kv.Key * 8 + f] = penalty;
             }
         }
     }
@@ -805,16 +1164,16 @@ public sealed class FloorGrid : IWalkGrid
         // then the walls are bucketed, the buried tile floors go, and the edge verdicts run on the
         // final floor arrays.
         _maxStep = MissionStep;
-        Classify(surfaces);
+        Classify(surfaces); // 1. walkable collision triangles in: ramps keep their true slope heights
         if (!DebugSkipRoomTiles)
         {
-            StampRoomFloors(rooms);
+            StampRoomFloors(rooms); // 2. tile floors fold INTO the mesh's heights (the ramp footing must survive)
         }
 
-        Classify(walls);
-        SuppressBuriedTiles();
-        BuildEdges();
-        BuildWallHugCost();
+        Classify(walls); // 3. walls.bin: steep triangles into the buckets (never floors)
+        SuppressBuriedTiles(); // 4. tile floors the mesh built a stairway over are not floors at all
+        BuildEdges(); // 5. judge every neighbouring step against the wall buckets
+        BuildWallHugCost(); // 6. cells whose body band stands near a wall cost extra
     }
 
     // The room-tile stamp lays its flat floor into EVERY tiled cell - including the cells the placed
@@ -833,7 +1192,7 @@ public sealed class FloorGrid : IWalkGrid
     {
         if (_tileStamp.Count == 0)
         {
-            return;
+            return; // nothing tile-stamped: nothing can be buried
         }
 
         var buried = new List<(int k, float h)>();
@@ -845,14 +1204,16 @@ public sealed class FloorGrid : IWalkGrid
                 continue; // a doorway cell: the frame triangles over its floor are the door, not a wall
             }
 
-            float cx = (k % _w + _x0 + 0.5f) * Cell, cz = (k / _w + _z0 + 0.5f) * Cell;
+            float cx = (k % _w + _x0 + 0.5f) * Cell, cz = (k / _w + _z0 + 0.5f) * Cell; // the cell centre in world
             foreach (float f in kv.Value)
             {
                 if (!_tileStamp.Contains((k, f)))
                 {
-                    continue;
+                    continue; // only TILE floors can die (mesh floors and doorway bridges never)
                 }
 
+                // the tight half-cell cross through the centre, at the floor's own height: does the
+                // mesh's steep geometry cross the body band right above this tile floor?
                 if (LineHitsWall(cx - 0.25f, cz, cx + 0.25f, cz, _ => f) ||
                     LineHitsWall(cx, cz - 0.25f, cx, cz + 0.25f, _ => f))
                 {
@@ -872,14 +1233,14 @@ public sealed class FloorGrid : IWalkGrid
             }
         }
 
-        DebugBuriedCells = buried.Count;
+        DebugBuriedCells = buried.Count; // probe counter, printed by missionx after Build
         foreach (var (k, f) in buried)
         {
             _tileStamp.Remove((k, f));
-            var kept = _floors[k].Where(v => v != f).ToArray(); // exact float: the stored value
+            var kept = _floors[k].Where(v => v != f).ToArray(); // exact float compare: the stored value
             if (kept.Length == 0)
             {
-                _floors.Remove(k);
+                _floors.Remove(k); // the cell loses its last floor: back to void
             }
             else
             {
@@ -904,13 +1265,14 @@ public sealed class FloorGrid : IWalkGrid
         foreach (var kv in _floors)
         {
             int k = kv.Key;
-            float x = (k % _w + _x0 + 0.5f) * Cell, z = (k / _w + _z0 + 0.5f) * Cell;
+            float x = (k % _w + _x0 + 0.5f) * Cell, z = (k / _w + _z0 + 0.5f) * Cell; // cell centre
+            // centre plus four 0.6 m offsets: does a wall cross any of them at body height?
             foreach (var probe in new[] { (0f, 0f), (0.6f, 0f), (-0.6f, 0f), (0f, 0.6f), (0f, -0.6f) })
             {
                 for (int f = 0; f < kv.Value.Length; f++)
                 {
                     var h = kv.Value[f];
-                    if (WallHits(x + probe.Item1, z + probe.Item2, h + 0.3f, h + 1.9f))
+                    if (WallHits(x + probe.Item1, z + probe.Item2, h + 0.3f, h + 1.9f)) // the body band over this level
                     {
                         _wallHug[(long)k * 8 + f] = WallHugPenalty;
                     }
@@ -926,24 +1288,25 @@ public sealed class FloorGrid : IWalkGrid
             return;
         }
 
-        for (int o = 0; o + 8 < v.Length; o += 9)
+        for (int o = 0; o + 8 < v.Length; o += 9) // flat triangle triplets: 9 floats = 3 vertices
         {
+            // the triangle's normal from its two edge vectors (u = B-A, w = C-A)
             float ux = v[o + 3] - v[o], uy = v[o + 4] - v[o + 1], uz = v[o + 5] - v[o + 2];
             float wx = v[o + 6] - v[o], wy = v[o + 7] - v[o + 1], wz = v[o + 8] - v[o + 2];
             float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
             float len = (float)Math.Sqrt(nx * nx + ny * ny + nz * nz);
             if (len < 1e-9f)
             {
-                continue;
+                continue; // degenerate (zero-area) triangle
             }
 
             if (ny / len >= WalkSlopeNy)
             {
-                SampleSurface(v, o);
+                SampleSurface(v, o); // flat enough: walkable ground, lay floor levels
             }
             else
             {
-                BucketWall(v, o);
+                BucketWall(v, o); // too steep: a wall, into the buckets for the edge tests
             }
         }
     }
@@ -956,6 +1319,7 @@ public sealed class FloorGrid : IWalkGrid
     // "explored 11535 cells" - and ~100 from above).
     private void SampleSurface(float[] v, int o)
     {
+        // the triangle's XZ bounding box: only its cells need testing
         float x0 = Math.Min(v[o], Math.Min(v[o + 3], v[o + 6])), x1 = Math.Max(v[o], Math.Max(v[o + 3], v[o + 6]));
         float z0 = Math.Min(v[o + 2], Math.Min(v[o + 5], v[o + 8])), z1 = Math.Max(v[o + 2], Math.Max(v[o + 5], v[o + 8]));
         for (int j = CellZ(z0); j <= CellZ(z1); j++)
@@ -967,7 +1331,9 @@ public sealed class FloorGrid : IWalkGrid
                     continue;
                 }
 
-                float cx = (i + _x0 + 0.5f) * Cell, cz = (j + _z0 + 0.5f) * Cell;
+                float cx = (i + _x0 + 0.5f) * Cell, cz = (j + _z0 + 0.5f) * Cell; // this cell's centre
+                // closest point of the triangle's projection to the cell centre; reject when it
+                // lands outside the cell (the triangle passes near, not through)
                 if (!TriClosest(v, o, cx, cz, out var px, out var pz) ||
                     px < (i + _x0) * Cell || px >= (i + 1 + _x0) * Cell ||
                     pz < (j + _z0) * Cell || pz >= (j + 1 + _z0) * Cell)
@@ -977,7 +1343,7 @@ public sealed class FloorGrid : IWalkGrid
 
                 if (TriContains(v, o, px, pz, out var h))
                 {
-                    AddLevel(j * _w + i, h);
+                    AddLevel(j * _w + i, h); // the surface's own height AT that point
                 }
             }
         }
@@ -988,11 +1354,12 @@ public sealed class FloorGrid : IWalkGrid
     {
         if (TriContains(v, o, px, pz, out _))
         {
-            qx = px;
+            qx = px; // the point is inside the projection: it is its own closest point
             qz = pz;
             return true;
         }
 
+        // outside: the closest point is on one of the three edges
         float ax = v[o], az = v[o + 2], bx = v[o + 3], bz = v[o + 5], cx = v[o + 6], cz = v[o + 8];
         qx = qz = 0f;
         var best = float.MaxValue;
@@ -1002,11 +1369,12 @@ public sealed class FloorGrid : IWalkGrid
         return best < float.MaxValue;
     }
 
+    // Closest point on segment (s -> e) to p; keeps it in (qx, qz) when nearer than `best`.
     private static void ClosestOnEdge(float sx, float sz, float ex, float ez, float px, float pz,
         ref float qx, ref float qz, ref float best)
     {
         float dx = ex - sx, dz = ez - sz, len2 = dx * dx + dz * dz;
-        float t = len2 < 1e-12f ? 0f : Math.Clamp(((px - sx) * dx + (pz - sz) * dz) / len2, 0f, 1f);
+        float t = len2 < 1e-12f ? 0f : Math.Clamp(((px - sx) * dx + (pz - sz) * dz) / len2, 0f, 1f); // projection clamped to the segment
         float x = sx + dx * t, z = sz + dz * t;
         float d = (px - x) * (px - x) + (pz - z) * (pz - z);
         if (d < best)
@@ -1019,8 +1387,11 @@ public sealed class FloorGrid : IWalkGrid
 
     private void BucketWall(float[] v, int o)
     {
+        // copy the triangle out of the big array: buckets own their triangles
         var tri = new float[9];
         Array.Copy(v, o, tri, 0, 9);
+        // file it into every 4 m bucket its XZ bounding box touches (the +4096 bias keeps the
+        // packed key positive for negative coordinates)
         float x0 = Math.Min(tri[0], Math.Min(tri[3], tri[6])), x1 = Math.Max(tri[0], Math.Max(tri[3], tri[6]));
         float z0 = Math.Min(tri[2], Math.Min(tri[5], tri[8])), z1 = Math.Max(tri[2], Math.Max(tri[5], tri[8]));
         int bx0 = (int)Math.Floor(x0 / WallBucket), bx1 = (int)Math.Floor(x1 / WallBucket);
@@ -1040,12 +1411,14 @@ public sealed class FloorGrid : IWalkGrid
         }
     }
 
+    // One more floor level in cell k: deduped against the existing stack (within Merge = same
+    // floor), capped at MaxFloors, kept ascending. Records mesh provenance first.
     private void AddLevel(int k, float h)
     {
-        _meshStamp.Add((k, h));
+        _meshStamp.Add((k, h)); // provenance: the placed mesh sampled this floor in
         if (!_floors.TryGetValue(k, out var fl))
         {
-            _floors[k] = new[] { h };
+            _floors[k] = new[] { h }; // first floor in a void cell
             return;
         }
 
@@ -1053,19 +1426,19 @@ public sealed class FloorGrid : IWalkGrid
         {
             if (Math.Abs(f - h) <= Merge)
             {
-                return;
+                return; // same surface, already recorded
             }
         }
 
         if (fl.Length >= MaxFloors)
         {
-            return;
+            return; // stack full: drop nothing, take nothing new
         }
 
         var merged = new float[fl.Length + 1];
         Array.Copy(fl, merged, fl.Length);
         merged[fl.Length] = h;
-        Array.Sort(merged);
+        Array.Sort(merged); // floors stay ascending
         _floors[k] = merged;
     }
 
@@ -1073,7 +1446,7 @@ public sealed class FloorGrid : IWalkGrid
     // step heights, sampled along the step, against the steep triangles.
     private void BuildEdges()
     {
-        int[][] dirs = { new[] { 1, 0 }, new[] { -1, 0 }, new[] { 0, 1 }, new[] { 0, -1 } };
+        int[][] dirs = { new[] { 1, 0 }, new[] { -1, 0 }, new[] { 0, 1 }, new[] { 0, -1 } }; // E, W, S(z+), N(z-): the EdgeBlocked dir encoding
         foreach (var kv in _floors)
         {
             int k = kv.Key, i = k % _w, j = k / _w;
@@ -1082,22 +1455,23 @@ public sealed class FloorGrid : IWalkGrid
                 int ni = i + dirs[d][0], nj = j + dirs[d][1];
                 if (!In(ni, nj) || !_floors.TryGetValue(nj * _w + ni, out var nfl))
                 {
-                    continue;
+                    continue; // off-grid or void neighbour: nothing to judge
                 }
 
                 int nk = nj * _w + ni;
+                // every (level here, level there) pair the step rule allows: is the body band clear?
                 for (int f = 0; f < kv.Value.Length; f++)
                 {
                     for (int nf = 0; nf < nfl.Length; nf++)
                     {
                         if (Math.Abs(nfl[nf] - kv.Value[f]) > _maxStep)
                         {
-                            continue;
+                            continue; // a climb/drop beyond one step: never an edge anyway
                         }
 
                         if (!EdgeClear(i, j, kv.Value[f], ni, nj, nfl[nf]))
                         {
-                            _noEdge.Add(((long)k * 8 + f) * 32 + d * 8 + nf);
+                            _noEdge.Add(((long)k * 8 + f) * 32 + d * 8 + nf); // the wall physically crosses this step
                         }
                     }
                 }
@@ -1105,6 +1479,8 @@ public sealed class FloorGrid : IWalkGrid
         }
     }
 
+    // Does a wall cross the straight cell-centre-to-cell-centre line, the floor height
+    // interpolating ha -> hb along it?
     private bool EdgeClear(int i, int j, float ha, int ni, int nj, float hb)
     {
         double x0 = (i + 0.5f + _x0) * Cell, z0 = (j + 0.5f + _z0) * Cell;
@@ -1122,20 +1498,22 @@ public sealed class FloorGrid : IWalkGrid
     {
         if (_wallTris.Count == 0)
         {
-            return false;
+            return false; // no wall data loaded (static path keeps its own): nothing to hit
         }
 
         double len = Math.Sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
         if (len < 1e-6)
         {
-            return false;
+            return false; // degenerate line
         }
 
-        var seen = new HashSet<float[]>();
-        int steps = Math.Max(1, (int)Math.Ceiling(len / (WallBucket / 2)));
+        var seen = new HashSet<float[]>(); // buckets overlap: test each triangle once
+        int steps = Math.Max(1, (int)Math.Ceiling(len / (WallBucket / 2))); // a bucket-adjacent stop every 2 m
         for (var s = 0; s <= steps; s++)
         {
             double t = (double)s / steps;
+            // the bucket under this point of the line, plus its 8 neighbours (a triangle filed in
+            // a bucket the line only clips)
             int bx = (int)Math.Floor((x0 + (x1 - x0) * t) / WallBucket), bz = (int)Math.Floor((z0 + (z1 - z0) * t) / WallBucket);
             for (var dz = -1; dz <= 1; dz++)
             {
@@ -1150,7 +1528,7 @@ public sealed class FloorGrid : IWalkGrid
                     {
                         if (seen.Add(tri) && NavCollision.TriBlocksLine(tri, 0, x0, z0, x1, z1, h, BodyLow, BodyHigh))
                         {
-                            return true;
+                            return true; // a crossing at body height IS the wall
                         }
                     }
                 }
@@ -1161,19 +1539,22 @@ public sealed class FloorGrid : IWalkGrid
     }
 
     // Piecewise-linear floor height at line parameter t over the caller's even samples.
+    // Piecewise-linear floor height at line parameter t over the caller's even samples.
     private static double Profile(List<float> ys, double t)
     {
-        double s = t * (ys.Count - 1);
+        double s = t * (ys.Count - 1); // map t in [0,1] onto the sample list
         int i = (int)s;
         if (i >= ys.Count - 1)
         {
-            return ys[ys.Count - 1];
+            return ys[ys.Count - 1]; // at or past the end
         }
 
         double f = s - i;
-        return ys[i] * (1 - f) + ys[i + 1] * f;
+        return ys[i] * (1 - f) + ys[i + 1] * f; // lerp between the bracketing samples
     }
 
+    // Point test (for the hug cost, NOT for edge verdicts): does a wall triangle's projection
+    // contain (x, z) at a height inside [low, high]?
     private bool WallHits(float x, float z, float low, float high)
     {
         int bx = (int)Math.Floor(x / WallBucket), bz = (int)Math.Floor(z / WallBucket);
@@ -1190,7 +1571,7 @@ public sealed class FloorGrid : IWalkGrid
                 {
                     if (TriContains(tri, 0, x, z, out var hT) && hT >= low && hT <= high)
                     {
-                        return true;
+                        return true; // wall surface right at this spot, at body height
                     }
                 }
             }
@@ -1199,14 +1580,16 @@ public sealed class FloorGrid : IWalkGrid
         return false;
     }
 
+    // Is (x, z) inside the triangle's XZ projection? Barycentric test; h is the plane height
+    // there. A sliver of negative tolerance absorbs edge-sharing neighbours.
     private static bool TriContains(float[] v, int o, float x, float z, out float h)
     {
         h = 0f;
         float ax = v[o], az = v[o + 2], bx = v[o + 3], bz = v[o + 5], cx = v[o + 6], cz = v[o + 8];
-        float d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        float d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz); // the 2D cross product (twice the signed area)
         if (Math.Abs(d) < 1e-9f)
         {
-            return false;
+            return false; // degenerate: no area
         }
 
         float l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
@@ -1214,13 +1597,15 @@ public sealed class FloorGrid : IWalkGrid
         float l3 = 1 - l1 - l2;
         if (l1 < -0.001f || l2 < -0.001f || l3 < -0.001f)
         {
-            return false;
+            return false; // outside the projection
         }
 
-        h = l1 * v[o + 1] + l2 * v[o + 4] + l3 * v[o + 7];
+        h = l1 * v[o + 1] + l2 * v[o + 4] + l3 * v[o + 7]; // barycentric interpolation of the plane
         return true;
     }
 
+    // The A*'s edge verdict: was the step (cell k level f, direction (di, dj), landing level nf)
+    // marked walled by BuildEdges? d must match BuildEdges' dirs order.
     private bool EdgeBlocked(int k, int f, int di, int dj, int nf)
     {
         int d = dj == 0 ? (di > 0 ? 0 : 1) : (dj > 0 ? 2 : 3);
@@ -1232,19 +1617,19 @@ public sealed class FloorGrid : IWalkGrid
         foreach (var ch in walls.Chunks)
         {
             float[] v = ch.Verts;
-            for (int o = 0; o + 8 < v.Length; o += 9)
+            for (int o = 0; o + 8 < v.Length; o += 9) // flat triangle triplets
             {
                 float ax = v[o], ay = v[o + 1], az = v[o + 2];
                 float ux = v[o + 3] - ax, uy = v[o + 4] - ay, uz = v[o + 5] - az;
                 float wx = v[o + 6] - ax, wy = v[o + 7] - ay, wz = v[o + 8] - az;
                 float longest = Math.Max(Len(ux, uy, uz), Math.Max(Len(wx, wy, wz), Len(wx - ux, wy - uy, wz - uz)));
-                int n = Math.Min(400, Math.Max(1, (int)Math.Ceiling(longest / 0.25f)));
+                int n = Math.Min(400, Math.Max(1, (int)Math.Ceiling(longest / 0.25f))); // a sample about every 0.25 m of edge
                 for (int i = 0; i <= n; i++)
                 {
                     for (int j = 0; j <= n - i; j++)
                     {
                         float s = i / (float)n, t = j / (float)n;
-                        float px = ax + ux * s + wx * t, py = ay + uy * s + wy * t, pz = az + uz * s + wz * t;
+                        float px = ax + ux * s + wx * t, py = ay + uy * s + wy * t, pz = az + uz * s + wz * t; // a point ON the wall
                         int k = Key(px, pz);
                         if (k < 0 || !_floors.TryGetValue(k, out var fl) || _doorways.Contains(k))
                         {
@@ -1253,10 +1638,10 @@ public sealed class FloorGrid : IWalkGrid
 
                         for (int f = 0; f < fl.Length; f++)
                         {
-                            float above = py - fl[f];
+                            float above = py - fl[f]; // wall height above this floor level
                             if (above >= BodyLow && above <= BodyHigh)
                             {
-                                _blocked.Add((long)k * 8 + f);
+                                _blocked.Add((long)k * 8 + f); // the wall crosses the body band: level unstandable
                             }
                         }
                     }
@@ -1274,7 +1659,7 @@ public sealed class FloorGrid : IWalkGrid
             {
                 if (kv.Value[f + 1] - kv.Value[f] < BodyHigh)
                 {
-                    _blocked.Add((long)kv.Key * 8 + f);
+                    _blocked.Add((long)kv.Key * 8 + f); // the ceiling is too close: block the lower level
                 }
             }
         }
@@ -1284,15 +1669,19 @@ public sealed class FloorGrid : IWalkGrid
 
     // ---- queries ------------------------------------------------------------------------------------------
 
+    // world coordinate -> grid cell index (relative to the frame origin)
     private int CellX(float x) => (int)Math.Floor(x / Cell) - _x0;
     private int CellZ(float z) => (int)Math.Floor(z / Cell) - _z0;
-    private bool In(int i, int j) => i >= 0 && j >= 0 && i < _w && j < _h;
+    private bool In(int i, int j) => i >= 0 && j >= 0 && i < _w && j < _h; // inside the frame?
+
+    // cell indices -> the packed row-major cell key; -1 outside the frame
     private int Key(float x, float z)
     {
         int i = CellX(x), j = CellZ(z);
         return In(i, j) ? j * _w + i : -1;
     }
 
+    // cell key -> the world position of the cell's centre, at the given floor height
     private Vector3 Centre(int k, float y) => new((k % _w + _x0 + 0.5f) * Cell, y, (k / _w + _z0 + 0.5f) * Cell);
 
     // The standable floor in cell k nearest height y, within tol; -1 when none.
@@ -1300,7 +1689,7 @@ public sealed class FloorGrid : IWalkGrid
     {
         if (k < 0 || (extra != null && extra.Contains(k)) || !_floors.TryGetValue(k, out var fl))
         {
-            return -1;
+            return -1; // void cell, an extra-excluded cell, or off the grid
         }
 
         int best = -1;
@@ -1308,7 +1697,7 @@ public sealed class FloorGrid : IWalkGrid
         for (int f = 0; f < fl.Length; f++)
         {
             float d = Math.Abs(fl[f] - y);
-            if (d <= bd && !_blocked.Contains((long)k * 8 + f))
+            if (d <= bd && !_blocked.Contains((long)k * 8 + f)) // closest UNBLOCKED level wins
             {
                 bd = d;
                 best = f;
@@ -1318,6 +1707,7 @@ public sealed class FloorGrid : IWalkGrid
         return best;
     }
 
+    // A* node (packed cell*8 + floor) -> its floor height
     private float Height(long node) => _floors[(int)(node / 8)][(int)(node % 8)];
 
     /// <summary>Standable ground at p (a floor within 3 m of p.Y) — the front-ray test for doorway exits.</summary>
@@ -1334,6 +1724,8 @@ public sealed class FloorGrid : IWalkGrid
             return -1;
         }
 
+        // floors ascend: scan from the top, the first unblocked surface below the step band is
+        // where a fall from y lands
         for (int f = fl.Length - 1; f >= 0; f--)
         {
             if (fl[f] < y - _maxStep && !_blocked.Contains((long)k * 8 + f))
@@ -1342,7 +1734,7 @@ public sealed class FloorGrid : IWalkGrid
             }
         }
 
-        return -1;
+        return -1; // open air beneath (or only the level we are leaving)
     }
 
     // The floor a walker takes in cell k from height y: the nearest step, or, none being within
@@ -1368,7 +1760,62 @@ public sealed class FloorGrid : IWalkGrid
     public float[] FloorsAt(float x, float z)
     {
         int k = Key(x, z);
-        return k >= 0 && _floors.TryGetValue(k, out var fl) ? fl : Array.Empty<float>();
+        return k >= 0 && _floors.TryGetValue(k, out var fl) ? fl : Array.Empty<float>(); // empty = void cell
+    }
+
+    // PROBE (tools/gridprobe 'missionx cost'): the grid's frame and the per-cell walk cost - 1 for
+    // the step itself plus the LEAST hug penalty over the cell's floors, 0 when the cell is void.
+    public int ProbeX0 => _x0;
+    public int ProbeZ0 => _z0;
+    public int ProbeW => _w;
+    public int ProbeH => _h;
+
+    /// <summary>Per cell, the mission room whose lattice blit wrote it (probe: per-room renders).
+    /// Last writer wins where rooms' spill overlaps.</summary>
+    public readonly Dictionary<int, int> ProbeRoom = new();
+
+    /// <summary>Per cell, what the lattice carried: 1 = tile levels, 2 = mesh levels, 3 = both.
+    /// A cell with neither never blits - a void seed for the hug brushfire (probe: the seam map).</summary>
+    public readonly Dictionary<int, int> ProbeCellKind = new();
+
+    public float ProbeCost(int k)
+    {
+        if (!_floors.TryGetValue(k, out var fl) || fl.Length == 0)
+        {
+            return 0f; // void cell: the probe draws nothing
+        }
+
+        var best = float.MaxValue;
+        for (var f = 0; f < fl.Length; f++)
+        {
+            var hug = _wallHug.TryGetValue((long)k * 8 + f, out var v) ? v : 0f;
+            if (hug < best)
+            {
+                best = hug; // the LEAST hug penalty over the cell's floors (the walker picks it)
+            }
+        }
+
+        return 1f + best; // 1 = the step itself, plus the hug surcharge
+    }
+
+    public float ProbeCostAt(float x, float z)
+    {
+        var k = Key(x, z);
+        return k < 0 ? 0f : ProbeCost(k); // 0 off the grid
+    }
+
+    /// <summary>The cell's raw floor levels (ascending) - the doorstep detector reads the lowest.</summary>
+    public float[] ProbeLevels(int k)
+    {
+        return _floors.TryGetValue(k, out var fl) ? fl : Array.Empty<float>();
+    }
+
+    /// <summary>True when the cell's WALKABLE floor (its lowest level) is blocked - an obstruction
+    /// crossing the floor itself (a column, a crate): the blue "unwalkable statel" marker. An
+    /// overhead-only blocker (a beam at 2.8 m) is walked under and does not count.</summary>
+    public bool ProbeBlockedWalk(int k)
+    {
+        return _blocked.Contains((long)k * 8); // floor index 0 = the lowest level
     }
 
     // Probe-only provenance of one cell's floor stack: for every floor height, where it came from
@@ -1379,9 +1826,10 @@ public sealed class FloorGrid : IWalkGrid
         int k = Key(x, z);
         if (k < 0 || !_floors.TryGetValue(k, out var fl))
         {
-            return "void";
+            return "void"; // off the grid or no floor at all
         }
 
+        // per floor: its height tagged with where it came from
         var parts = new List<string>();
         foreach (float f in fl)
         {
@@ -1389,6 +1837,7 @@ public sealed class FloorGrid : IWalkGrid
             parts.Add($"{f:0.###}{kind}");
         }
 
+        // the full stamp lists (a floor can appear in a stamp but no longer in _floors - buried)
         var tiles = _tileStamp.Where(t => t.k == k).Select(t => t.h.ToString("0.###")).ToList();
         var mesh = _meshStamp.Where(t => t.k == k).Select(t => t.h.ToString("0.###")).ToList();
         return $"cell ({(k % _w + _x0) * Cell:0.##},{(k / _w + _z0) * Cell:0.##}): floors [{string.Join(" ", parts)}]" +
@@ -1427,7 +1876,7 @@ public sealed class FloorGrid : IWalkGrid
         }
 
         int startK = Key(a.X, a.Z);
-        int start = FloorAt(startK, a.Y, 2.5f, null);
+        int start = FloorAt(startK, a.Y, 2.5f, null); // which floor am I standing on?
         if (start < 0)
         {
             why = $"no floor within 2.5 m of me at height {a.Y:0}";
@@ -1438,9 +1887,10 @@ public sealed class FloorGrid : IWalkGrid
         double len = Math.Sqrt(dx * dx + dz * dz);
         if (len < 0.01)
         {
-            return true;
+            return true; // a point, not a line
         }
 
+        // walk the line a sample every 0.25 m, following the floor it stands on
         int n = Math.Max(1, (int)Math.Ceiling(len / 0.25));
         var floors = new List<float>(n + 1) { _floors[startK][start] };
         float y = floors[0];
@@ -1448,14 +1898,14 @@ public sealed class FloorGrid : IWalkGrid
         {
             double t = (double)s / n;
             int k = Key((float)(a.X + dx * t), (float)(a.Z + dz * t));
-            int f = StandFloor(k, y, null);
+            int f = StandFloor(k, y, null); // the step, or the landing below an edge
             if (f < 0)
             {
                 why = $"no floor {t * len:0.0} m along the line (a hole or a level change)";
                 return false;
             }
 
-            y = _floors[k][f];
+            y = _floors[k][f]; // the floor carries over to the next sample
             floors.Add(y);
         }
 
@@ -1478,7 +1928,7 @@ public sealed class FloorGrid : IWalkGrid
     {
         if (_pluginDir == null)
         {
-            return null;
+            return null; // built without a plugin dir (probe-only): nowhere to look
         }
 
         var wp = Path.Combine(AOBuddyNav.FolderFor(_pluginDir, Pf), "walls.bin");
@@ -1497,6 +1947,7 @@ public sealed class FloorGrid : IWalkGrid
         Vector3? best = null;
         var bestScore = float.MaxValue;
         var clear = 0;
+        // 24 rays, one every 15 degrees, each EscapeReach long
         for (var deg = 0; deg < 360; deg += 15)
         {
             var rad = deg * Math.PI / 180.0;
@@ -1504,12 +1955,12 @@ public sealed class FloorGrid : IWalkGrid
                 from.Z + (float)Math.Sin(rad) * EscapeReach);
             if (!GeometryLine(from, p, out _))
             {
-                continue;
+                continue; // a wall within reach that way
             }
 
             clear++;
             double dx = p.X - goal.X, dz = p.Z - goal.Z;
-            var score = (float)Math.Sqrt(dx * dx + dz * dz);
+            var score = (float)Math.Sqrt(dx * dx + dz * dz); // the clear ray that ends closest to the goal wins
             if (score < bestScore)
             {
                 bestScore = score;
@@ -1531,8 +1982,8 @@ public sealed class FloorGrid : IWalkGrid
     {
         into ??= new HashSet<int>();
         float len = (float)Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Z - a.Z) * (b.Z - a.Z));
-        int n = Math.Max(1, (int)Math.Ceiling(len / (Cell / 2)));
-        int r = (int)Math.Ceiling(radius / Cell);
+        int n = Math.Max(1, (int)Math.Ceiling(len / (Cell / 2))); // a stop every half-cell along the line
+        int r = (int)Math.Ceiling(radius / Cell); // the disc radius in cells
         for (int s = 0; s <= n; s++)
         {
             float t = s / (float)n;
@@ -1541,7 +1992,7 @@ public sealed class FloorGrid : IWalkGrid
             {
                 for (int di = -r; di <= r; di++)
                 {
-                    if (In(ci + di, cj + dj) && di * di + dj * dj <= r * r)
+                    if (In(ci + di, cj + dj) && di * di + dj * dj <= r * r) // inside the disc
                     {
                         into.Add((cj + dj) * _w + ci + di);
                     }
@@ -1575,40 +2026,43 @@ public sealed class FloorGrid : IWalkGrid
         // 4; the skip set keeps a handled doorway from splitting again).
         if (depth < 4 && _doorwayList.Count > 0 && a != default)
         {
-            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var inv = System.Globalization.CultureInfo.InvariantCulture; // (unused leftover)
             var candidates = new List<(AOBuddyNav.Doorway dw, Vector3 before, Vector3 after, double fromA)>();
             foreach (var dw in _doorwayList)
             {
                 if (skip != null && skip.Contains(dw))
                 {
-                    continue;
+                    continue; // already handled by a shallower leg
                 }
 
+                // signed distance to the doorway plane, for a and for b
                 double s0 = (a.X - dw.X) * dw.Nx + (a.Z - dw.Z) * dw.Nz;
                 double s1 = (b.X - dw.X) * dw.Nx + (b.Z - dw.Z) * dw.Nz;
                 if ((s0 > 0) == (s1 > 0) || Math.Abs(s0 - s1) < 1e-9)
                 {
-                    continue;
+                    continue; // both on the same side, or the line runs parallel in the plane
                 }
 
+                // where the a->b line pierces the doorway plane
                 double t = s0 / (s0 - s1);
                 double cx = a.X + (b.X - a.X) * t, cz = a.Z + (b.Z - a.Z) * t;
                 double dist = Math.Sqrt((cx - dw.X) * (cx - dw.X) + (cz - dw.Z) * (cz - dw.Z));
                 if (dist > 3.0)
                 {
-                    continue;
+                    continue; // crosses the plane far from the door: not THIS doorway's crossing
                 }
 
-                var sign = s0 > 0 ? 1 : -1;
-                var before = new Vector3((float)(dw.X + dw.Nx * 1.5 * sign), (float)dw.Y, (float)(dw.Z + dw.Nz * 1.5 * sign));
-                var after = new Vector3((float)(dw.X - dw.Nx * 1.5 * sign), (float)dw.Y, (float)(dw.Z - dw.Nz * 1.5 * sign));
+                var sign = s0 > 0 ? 1 : -1; // which side a is on
+                var before = new Vector3((float)(dw.X + dw.Nx * 1.5 * sign), (float)dw.Y, (float)(dw.Z + dw.Nz * 1.5 * sign)); // approach standoff, a's side
+                var after = new Vector3((float)(dw.X - dw.Nx * 1.5 * sign), (float)dw.Y, (float)(dw.Z - dw.Nz * 1.5 * sign)); // exit standoff, b's side
                 candidates.Add((dw, before, after, Math.Sqrt((a.X - dw.X) * (a.X - dw.X) + (a.Z - dw.Z) * (a.Z - dw.Z))));
             }
 
+            // nearest crossed doorway first; each try splits the route in two fresh searches
             foreach (var (dw, before, after, _) in candidates.OrderBy(c => c.fromA))
             {
                 skip ??= new HashSet<AOBuddyNav.Doorway>();
-                skip.Add(dw);
+                skip.Add(dw); // a handled doorway never splits again (deeper or later tries)
                 var leg1 = FindPathCore(a, before, extra, snap, reach, skip, depth + 1, out _, pricey);
                 if (leg1 == null)
                 {
@@ -1622,23 +2076,24 @@ public sealed class FloorGrid : IWalkGrid
                 }
 
                 why = "";
-                var full = new List<Vector3>(leg1) { new Vector3((float)dw.X, (float)dw.Y, (float)dw.Z) };
-                full.AddRange(leg2.Skip(1));
+                var full = new List<Vector3>(leg1) { new Vector3((float)dw.X, (float)dw.Y, (float)dw.Z) }; // the door's exact centre, between the legs
+                full.AddRange(leg2.Skip(1)); // leg2's first point IS the exit standoff: drop the duplicate
                 return full;
             }
             // no doorway split worked: the plain through-route below still walks
         }
 
         why = "";
-        long start = NearestNode(a, snap, extra);
+        long start = NearestNode(a, snap, extra); // (cell, floor) node nearest the start point
         if (start < 0)
         {
             why = $"no floor within {snap:0} m of me at height {a.Y:0}";
             return null;
         }
 
+        // the goal test, hoisted: in cells within `reach` of b, and (unless b.Y is NaN) on b's level
         int bi = CellX(b.X), bj = CellZ(b.Z);
-        float rc = Math.Max(reach, Cell) / Cell;
+        float rc = Math.Max(reach, Cell) / Cell; // reach in cells, at least one
         bool anyLevel = float.IsNaN(b.Y);
         bool AtGoal(long node)
         {
@@ -1647,12 +2102,14 @@ public sealed class FloorGrid : IWalkGrid
             return di * di + dj * dj <= rc * rc && (anyLevel || Math.Abs(Height(node) - b.Y) <= 1.5f);
         }
 
+        // A* over (cell, floor) nodes; gScore/parent grow with the frontier, closed settles nodes
         var gScore = new Dictionary<long, float> { [start] = 0 };
         var parent = new Dictionary<long, long>();
         var closed = new HashSet<long>();
         var open = new PriorityQueue<long, float>();
         float H(int k)
         {
+            // octile distance to the goal minus the reach ring, inflated 1.2x (admissible-ish, fast)
             int di = Math.Abs(k % _w - bi), dj = Math.Abs(k / _w - bj);
             return 1.2f * Math.Max(0f, Math.Max(di, dj) + 0.4142f * Math.Min(di, dj) - rc);
         }
@@ -1663,7 +2120,7 @@ public sealed class FloorGrid : IWalkGrid
         {
             if (!closed.Add(cur))
             {
-                continue;
+                continue; // a stale queue entry: already settled at a better score
             }
 
             if (AtGoal(cur))
@@ -1687,14 +2144,14 @@ public sealed class FloorGrid : IWalkGrid
                 {
                     if (di == 0 && dj == 0 || !In(i + di, j + dj))
                     {
-                        continue;
+                        continue; // not a step, or off the grid
                     }
 
                     int nk = (j + dj) * _w + i + di;
-                    int f = StandFloor(nk, y, extra);
+                    int f = StandFloor(nk, y, extra); // the floor we would stand on there
                     if (f < 0)
                     {
-                        continue;
+                        continue; // void, or nothing within a step and no landing below
                     }
 
                     if (di != 0 && dj != 0)
@@ -1727,7 +2184,7 @@ public sealed class FloorGrid : IWalkGrid
                     float ng = gc + (di != 0 && dj != 0 ? 1.4142f : 1f) + hug + refused;
                     if (gScore.TryGetValue(nn, out float old) && old <= ng)
                     {
-                        continue;
+                        continue; // already reachable at least this cheaply
                     }
 
                     gScore[nn] = ng;
@@ -1745,6 +2202,7 @@ public sealed class FloorGrid : IWalkGrid
             return null;
         }
 
+        // walk parents back to the start, then flip
         var nodes = new List<long>();
         for (long c = goal; ; c = parent[c])
         {
@@ -1757,6 +2215,7 @@ public sealed class FloorGrid : IWalkGrid
 
         nodes.Reverse();
 
+        // string-pulling: greedily skip ahead to the farthest node the line stays clear on
         var pts = new List<Vector3> { a };
         int i0 = 0;
         while (i0 < nodes.Count - 1)
@@ -1764,13 +2223,14 @@ public sealed class FloorGrid : IWalkGrid
             int j = nodes.Count - 1;
             while (j > i0 + 1 && !Clear(nodes[i0], nodes[j], extra))
             {
-                j--;
+                j--; // this shortcut would leave the platform or cut a wall: try the node before
             }
 
             pts.Add(Centre((int)(nodes[j] / 8), Height(nodes[j])));
             i0 = j;
         }
 
+        // the goal cell was reached exactly: end the path ON b, not on its cell centre
         int bk = Key(b.X, b.Z);
         if (bk >= 0 && goal / 8 == bk)
         {
@@ -1780,6 +2240,8 @@ public sealed class FloorGrid : IWalkGrid
         return pts;
     }
 
+    // The (cell, floor) node nearest p: concentric square rings out to maxR, first ring with any
+    // standable floor wins (closest in that ring, height difference breaking ties).
     private long NearestNode(Vector3 p, float maxR, HashSet<int> extra)
     {
         int ci = CellX(p.X), cj = CellZ(p.Z);
@@ -1794,17 +2256,17 @@ public sealed class FloorGrid : IWalkGrid
                 {
                     if (Math.Max(Math.Abs(di), Math.Abs(dj)) != r || !In(ci + di, cj + dj))
                     {
-                        continue;
+                        continue; // ring r only: the perimeter of the square
                     }
 
                     int k = (cj + dj) * _w + ci + di;
                     int f = FloorAt(k, p.Y, 2.5f, extra);
                     if (f < 0)
                     {
-                        continue;
+                        continue; // nothing standable at a sane height here
                     }
 
-                    float d = di * di + dj * dj + Math.Abs(_floors[k][f] - p.Y);
+                    float d = di * di + dj * dj + Math.Abs(_floors[k][f] - p.Y); // flat distance plus height mismatch
                     if (d < bd)
                     {
                         bd = d;
@@ -1815,7 +2277,7 @@ public sealed class FloorGrid : IWalkGrid
 
             if (best >= 0)
             {
-                return best;
+                return best; // the first (innermost) ring with a candidate wins
             }
         }
 
@@ -1828,15 +2290,15 @@ public sealed class FloorGrid : IWalkGrid
     private bool Clear(long n0, long n1, HashSet<int> extra)
     {
         int k0 = (int)(n0 / 8), k1 = (int)(n1 / 8);
-        float x0 = k0 % _w + 0.5f, z0 = k0 / _w + 0.5f, x1 = k1 % _w + 0.5f, z1 = k1 / _w + 0.5f;
+        float x0 = k0 % _w + 0.5f, z0 = k0 / _w + 0.5f, x1 = k1 % _w + 0.5f, z1 = k1 / _w + 0.5f; // cell-centre coordinates
         float len = (float)Math.Sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
         if (len < 1e-3f)
         {
-            return true;
+            return true; // same cell: trivially clear
         }
 
         float px = -(z1 - z0) / len * 0.6f, pz = (x1 - x0) / len * 0.6f; // 0.3 m either side, in cells
-        int n = Math.Max(1, (int)Math.Ceiling(len * 3));
+        int n = Math.Max(1, (int)Math.Ceiling(len * 3)); // a sample every third of a cell
         float y = Height(n0);
         var floors = new List<float>(n + 1) { y }; // the floor profile, for the exact wall test below
         for (int s = 1; s <= n; s++)
@@ -1845,14 +2307,14 @@ public sealed class FloorGrid : IWalkGrid
             int f = StandFloor(Idx(x, z), y, extra);
             if (f < 0)
             {
-                return false;
+                return false; // the line leaves the platform (a hole, or a climb it may not take)
             }
 
             y = _floors[Idx(x, z)][f];
             floors.Add(y);
             if (StandFloor(Idx(x + px, z + pz), y, extra) < 0 || StandFloor(Idx(x - px, z - pz), y, extra) < 0)
             {
-                return false;
+                return false; // no floor a body's width either side: the line grazes an edge
             }
         }
 
@@ -1870,6 +2332,7 @@ public sealed class FloorGrid : IWalkGrid
         return true;
     }
 
+    // fractional cell coordinates -> packed cell key (-1 off the grid)
     private int Idx(float ci, float cj)
     {
         int i = (int)Math.Floor(ci), j = (int)Math.Floor(cj);
