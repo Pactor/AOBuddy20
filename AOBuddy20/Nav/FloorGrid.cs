@@ -859,10 +859,20 @@ public sealed class FloorGrid : IWalkGrid
                     // mesh a frame apart from the tiles and tore jagged 20 cm gaps into every
                     // rotated wall): tiles and mesh merge into the SAME cell, at the tile-rect
                     // centre pivot, the placed rot's turns, landed on Pos.
-                    var owned = isPortal || !double.IsNaN(pool.FloorHeight(pr, cx, cz));
+                    // OWNERSHIP: the room's tiles claim, the portals claim - and the room's OWN
+                    // chunks claim wherever they sampled a surface (the arch bridges over the
+                    // water dips: the deck's lattice cell carries its levels, but the tile
+                    // grid has no claim on water and the portal box doesn't reach - the old
+                    // test dropped the decks as atlas spill and sealed the far rooms, dump
+                    // 14678642 room 10). Mesh levels exist only where the room's own chunks
+                    // sampled flat-enough geometry, so the claim stays inside the room's
+                    // own structures.
+                    var owned = isPortal || !double.IsNaN(pool.FloorHeight(pr, cx, cz))
+                                || (ml is { Count: > 0 });
                     if (!owned)
                     {
-                        continue; // atlas spill: a cell the pool's tiles don't claim is not this room
+                        continue; // atlas spill: a cell neither the pool's tiles nor this room's
+                                  // own sampled chunks claim is not this room
                     }
 
                     // pool world -> placed world: subtract the pool room's Pos, turn, land on the placed Pos
