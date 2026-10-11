@@ -2984,7 +2984,7 @@ public sealed class MissionController : IPacketConsumer
     private (short room, short adjoining, Vector3 pos, uint flags)? LockedDoorNearMob(Vector3 mob)
     {
         return _serverDoors
-            .Where(d => d.pf == _missionPf && (d.flags & 0x40) != 0 && (d.flags & 0x80) == 0)
+            .Where(d => d.pf == _missionPf && (d.flags & 0x40) != 0)
             .OrderBy(d => Movement.Flat(d.pos, mob))
             .Select(d => (d.room, d.adjoining, d.pos, d.flags))
             .FirstOrDefault(d => Movement.Flat(d.pos, mob) <= 6f);
