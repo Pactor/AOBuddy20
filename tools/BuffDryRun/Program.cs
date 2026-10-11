@@ -357,7 +357,7 @@ internal static class Program
             {
                 var me = BuildStub(new CharReq { profession = "Engineer", level = lvl }, out _);
                 var pick = _catalog.BestNcuBuff(me, paid);
-                var key = pick == null ? "none" : $"{pick.Name}|{pick.MaxNcuAdded}|{pick.CasterLevel}";
+                var key = pick == null ? "none" : $"{pick.Name}|{pick.MaxNcuAdded}|{pick.ReceiverLevel}";
                 if (key != prevKey)
                 {
                     rows.Add(new
@@ -366,7 +366,7 @@ internal static class Program
                         fromLevel = lvl,
                         tier = pick?.Name,
                         maxNcuAdded = pick?.MaxNcuAdded ?? 0,
-                        casterLevel = pick?.CasterLevel ?? 0,
+                        casterLevel = pick?.ReceiverLevel ?? 0,
                         needsTeam = pick?.NeedsTeam ?? false,
                         landId = pick?.LandId ?? 0
                     });

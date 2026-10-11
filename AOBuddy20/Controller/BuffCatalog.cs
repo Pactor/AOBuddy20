@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: BuffCatalog.cs
 //
-// Last modified: 2026-10-11
+// Last modified: 2026-10-05
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -48,7 +48,7 @@ public sealed class BuffCatalog
         public int? NanoId;
         public string Tell = "";
 
-        // The ids the caster gate / modifiers actually live on. A plain buff lands as its own
+        // The ids the receiver gate / modifiers actually live on. A plain buff lands as its own
         // nano, so this is just { NanoId }; a team-cast buff (NCU line, Umbral) lands via separate
         // "landIds", and the receiver requirement + the stat it adds live on THOSE (owner, 2026-10-05).
         public List<int> LandIds = new();
@@ -57,9 +57,7 @@ public sealed class BuffCatalog
         // never a parsed effect string. 0 / empty when the nano is not in the pack.
         public int Strain; // NanoStrain (stat 75): the OVERWRITE group - two buffs sharing a strain do
         // not stack (the higher StackingOrder wins), so the planner never requests two of one strain.
-        public int CasterLevel; // the CASTER's own use-requirement gate (Level> on the formula's actions); 0 = none.
-        // Use requirements gate the CASTER - a target-level restriction would be marked TARGET in the
-        // requirements (owner, 2026-10-11: "use requirements are for the caster, not the target").
+        public int ReceiverLevel; // minimum RECEIVER level (target=18 Level> gate, +1); 0 = no level gate.
         public bool NeedsSl; // receiver must own Shadowlands (target=18 Expansion 389 BitAnd 2).
         public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>(); // stat -> flat amount added.
 
@@ -263,9 +261,9 @@ public sealed class BuffCatalog
         return entry;
     }
 
-    // Fold the pack-verified facts (strain / caster gate / flat modifiers) onto each entry, so every
-    // equation reads from nanos.ocp rather than a parsed effect string. The caster gate is read per
-    // nano by <see cref="CasterGate" /> (the Level> use-gate of the formula).
+    // Fold the pack-verified facts (strain / receiver gate / flat modifiers) onto each entry, so every
+    // equation reads from nanos.ocp rather than a parsed effect string. The receiver gate is read per
+    // nano by <see cref="ReceiverGate" /> (it auto-detects whose level a Level> gate belongs to).
     private void Enrich()
     {
         if (!NanoLibrary.Loaded)
@@ -322,8 +320,8 @@ public sealed class BuffCatalog
 
             b.Strain = rep.Stat(75);
             b.RepNanoId = rep.NanoId;
-            var (level, sl) = CasterGate(rep);
-            b.CasterLevel = level;
+            var (level, sl) = ReceiverGate(rep);
+            b.ReceiverLevel = level;
             b.NeedsSl = sl;
             b.Modifies = rep.Modifies;
 
@@ -338,12 +336,12 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = casts.Any(c => c.Func == FuncTeamCastNano);
                 b.CanCastOnOthers = casts.Any(c => c.Func is FuncTeamCastNano or FuncAreaCastNano);
-                b.CasterLevel = casts.Max(x =>
+                b.ReceiverLevel = casts.Max(x =>
                 {
                     var nn = NanoLibrary.Find(x.NanoId);
                     if (nn != null)
                     {
-                        return CasterGate(nn).Level;
+                        return ReceiverGate(nn).Level;
                     }
 
                     throw new KeyNotFoundException($"Nano {x.NanoId} not found???");
@@ -353,9 +351,10 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = false;
                 b.CanCastOnOthers = rep.TargetsOthers;
-                // CasterLevel stays the REP nano's own caster gate (set above from
-                // CasterGate(rep)): the formula's Level> use-requirement gates the CASTER -
-                // the target's level is irrelevant to it (owner, 2026-10-11).
+                // ReceiverLevel stays the REP nano's own receiver gate (set above from
+                // ReceiverGate(rep)): a single-target buff's target-level restriction lives on
+                // the landed nano (Improved Essence of Behemoth: Level > 215 - wiping it made
+                // the comfort fill request buffs that can never land on a low-level receiver).
             }
 
             
@@ -434,9 +433,7 @@ public sealed class BuffCatalog
     // structurally; the receiver requirement is the LOWEST Level> gate (owner, 2026-10-05: Composite Mochams
     // 8h reads caster 219 / receiver 209 this way). A single-gate nano (every NCU tier, most buffs) is
     // unchanged. SL is read from any Expansion BitAnd-2 gate (caster or target).
-    // The CASTER's Level> use-gate of a nano formula: the lowest of its actions' Level
-    // requirements (the actions normally carry the formula's one gate identically).
-    private static (int Level, bool NeedsSl) CasterGate(NanoProfile nano)
+    private static (int Level, bool NeedsSl) ReceiverGate(NanoProfile nano)
     {
         var level = 0;
         var needsSl = false;
@@ -452,7 +449,7 @@ public sealed class BuffCatalog
                 if (req.Stat == StatLevel && req.Operator == OpGreaterThan)
                 {
                     var lv = req.Value + 1; // GreaterThan N is inclusive of N+1
-                    level = level == 0 ? lv : Math.Min(level, lv); // the caster gate: the lowest of the actions' requirements
+                    level = level == 0 ? lv : Math.Min(level, lv); // the receiver gate is the LOWER of caster/receiver
                 }
                 else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0)
                 {
@@ -466,7 +463,7 @@ public sealed class BuffCatalog
 
     /// <summary>Can THIS receiver take this buff: its level clears the gate and it owns SL if required.</summary>
     public static bool Castable(BuffEntry b, int myLevel, bool paid) =>
-        b.CasterLevel <= myLevel && (!b.NeedsSl || paid);
+        b.ReceiverLevel <= myLevel && (!b.NeedsSl || paid);
 
     /// <summary>
     ///     The cheapest single-skill rung that adds at least <paramref name="need" /> to a nano skill
@@ -1211,15 +1208,13 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
-    ///     THE COMFORT FILL (owner, 2026-10-07; HoT-first, owner 2026-10-11), after the obedience
-    ///     floor is established. ONE priority walk: the budget is spent strictly in category
-    ///     order, each category taking the biggest receivable tier that fits what is left - what
-    ///     a higher category leaves behind is all a lower one ever gets. THE HO TS STAND FIRST
-    ///     and are never shrunk to make room ("you want as much as possible HoT, even if you
-    ///     can't fit in something else because of that"); a lower must's own smaller tiers are
-    ///     its downgrade:
-    ///      1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
-    ///      4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
+    ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established. The
+    ///     MUSTS are planned TOGETHER, each taking its biggest tier with tiers downgrading -
+    ///     largest consumer first - until ALL of them fit the remaining NCU (a smaller Fixer HoT
+    ///     beats a missing Doctor health/HoT; owner's "take a smaller essence" rule, applied to
+    ///     the musts themselves). Then the OPTIONALS fill what is left, biggest that fits:
+    ///      musts: 1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
+    ///      optionals: 4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
     ///      6. damage buffs, 7. XP buffs, 8. evasion (self-cast counts when learned - owner,
     ///      2026-10-07). One buff per strain, receiver-gated. The caller routes each pick
     ///      (RouteFor): a learned self-cast becomes me.Cast, the rest go as bot tells.
@@ -1277,7 +1272,7 @@ public sealed class BuffCatalog
 
                 string why;
                 if (!Obtainable(b)) why = "not obtainable (self-only and not learned, or no tell)";
-                else if (b.CasterLevel > myLevel) why = $"caster level {b.CasterLevel} > our {myLevel}";
+                else if (b.ReceiverLevel > myLevel) why = $"receiver level {b.ReceiverLevel} > our {myLevel}";
                 else if (b.NeedsSl && !paid) why = "needs Shadowlands";
                 else
                 {
@@ -1297,35 +1292,105 @@ public sealed class BuffCatalog
             return ok.OrderByDescending(b => b.Ncu).ToList(); // the biggest tier first - downgrade until it fits
         }
 
-        // THE PRIORITY WALK (owner, 2026-10-11: "you want as much as possible HoT, even if you
-        // can't fit in something else because of that"): the budget is spent strictly in category
-        // order - each category takes the biggest receivable tier that fits the NCU left, and
-        // what a higher category leaves behind is all a lower one ever sees. The HoTs stand
-        // first, so nothing can shrink them; a lower must's own smaller tiers are its downgrade
-        // (the old all-at-once dance bought them by shrinking the HoTs). The optionals trail the
-        // musts - nice to have, by no means necessary.
         var budget = ncuBudget;
         var usedStrains = new HashSet<int>();
-        foreach (var (must, name, match) in categories)
+
+        // THE MUSTS IN IMPORTANCE ORDER (owner, 2026-10-07: "a Heal over time is way more
+        // important than the XP buff"): start with every must at its biggest tier; when even the
+        // smallest tiers overflow the budget, the LEAST important must is dropped first; within
+        // what remains, the least important consumers downgrade first. The optionals (XP,
+        // evasion included) only get what is left - nice to have, by no means necessary.
+        var kept = categories.Where(c => c.Must)
+            .Select(c => (Name: c.Name, Cands: Candidates(c.Name, c.Match)))
+            .ToList();
+
+        int MinSum() => kept.Sum(k => k.Cands.Count > 0 ? k.Cands[^1].Ncu : 0);
+        while (kept.Count > 0 && MinSum() > budget)
         {
-            var cands = Candidates(name, match);
-            var pick = cands.FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
-            if (pick == null)
+            _logger.LogInformation(
+                $"COMFORT: must '{kept[^1].Name}' - the budget cannot hold every must; dropping it (least important first).");
+            kept.RemoveAt(kept.Count - 1);
+        }
+
+        var picks = kept.Select(k => k.Cands.Count > 0 ? k.Cands[0] : null).ToList(); // the biggest tier each
+        while (picks.Sum(p => p?.Ncu ?? 0) > budget)
+        {
+            // downgrade the LEAST important pick that still has a smaller tier
+            var victim = -1;
+            for (var i = picks.Count - 1; i >= 0; i--)
             {
-                if (cands.Count > 0)
+                if (picks[i] == null)
                 {
-                    _logger.LogInformation(
-                        $"COMFORT: {(must ? "must" : "optional")} '{name}' - nothing fits the {budget} NCU left - skipped.");
+                    continue;
                 }
 
-                continue; // nothing castable (logged in Candidates) or nothing fits: the next category tries
+                if (kept[i].Cands.Any(c => c.Ncu < picks[i]!.Ncu))
+                {
+                    victim = i;
+                    break;
+                }
+            }
+
+            if (victim < 0)
+            {
+                break; // everything is at its smallest tier
+            }
+
+            picks[victim] = kept[victim].Cands.First(c => c.Ncu < picks[victim]!.Ncu);
+        }
+
+        // still overflowing at the smallest tiers: drop from the LEAST important end
+        while (picks.Sum(p => p?.Ncu ?? 0) > budget && picks.Any(p => p != null))
+        {
+            var i = picks.FindLastIndex(p => p != null);
+            _logger.LogWarning(
+                $"COMFORT: must '{kept[i].Name}' - even at its smallest tier it does not fit - dropped (least important first).");
+            picks[i] = null;
+        }
+
+        for (var i = 0; i < picks.Count; i++)
+        {
+            var pick = picks[i];
+            if (pick == null)
+            {
+                if (kept[i].Cands.Count > 0)
+                {
+                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - dropped for budget (least important first).");
+                }
+                else
+                {
+                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - nothing learned/castable - skipped.");
+                }
+
+                continue;
+            }
+
+            if (usedStrains.Contains(pick.Strain))
+            {
+                continue; // a same-strain pick earlier in the fill already covers it
             }
 
             plan.Add(pick);
             usedStrains.Add(pick.Strain);
             budget -= pick.Ncu;
             _logger.LogInformation(
-                $"COMFORT: {(must ? "must" : "optional")} '{name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
+                $"COMFORT: must '{kept[i].Name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
+        }
+
+        // THE OPTIONALS: the biggest tier that fits the remainder, in the owner's order.
+        foreach (var (_, name, match) in categories.Where(c => !c.Must))
+        {
+            var pick = Candidates(name, match).FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
+            if (pick == null)
+            {
+                continue;
+            }
+
+            plan.Add(pick);
+            usedStrains.Add(pick.Strain);
+            budget -= pick.Ncu;
+            _logger.LogInformation(
+                $"COMFORT: optional '{name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
         }
 
         return plan;
@@ -1456,7 +1521,7 @@ public sealed class BuffCatalog
         public string Tell = "";
         public int MaxNcuAdded; // +Max NCU the selected tier grants (e.g. +60 at L50)
         public int LandId; // the landed nano actually running on the receiver
-        public int CasterLevel; // the caster level that tier needs
+        public int ReceiverLevel; // the level that tier needs
         public bool NeedsTeam; // the tier is team-cast - we must be teamed with the caster to receive it
         public string Name = ""; // the tier's catalog name (for the dry-run trace)
     }
@@ -1472,7 +1537,7 @@ public sealed class BuffCatalog
     ///     catalog (Codedoc lists each tier as its own entry, Chewy as one laddered entry - either way every
     ///     +Max NCU buff is considered, not just the first), keeps only tiers that CAST ON OTHERS (a bot
     ///     cannot give us a self-only buff - this is what kept the +500 Firewalled Sync Compressor, a Fixer
-    ///     SELF buff, out), whose caster level/SL gate we meet, and picks the largest +Max NCU. Requested
+    ///     SELF buff, out), whose receiver level/SL gate we meet, and picks the largest +Max NCU. Requested
     ///     FIRST (it expands Max NCU so the rest of the stack fits). Null when none qualifies.
     /// </summary>
     public NcuPick? BestNcuBuff(LocalPlayer me, bool paid)
@@ -1488,7 +1553,7 @@ public sealed class BuffCatalog
         foreach (var b in _buffs)
         {
             var added = b.Adds(StatMaxNcu);
-            if (added <= 0 || !b.CanCastOnOthers || b.CasterLevel > myLevel || (b.NeedsSl && !paid))
+            if (added <= 0 || !b.CanCastOnOthers || b.ReceiverLevel > myLevel || (b.NeedsSl && !paid))
             {
                 continue; // not an NCU buff / self-only / above our level / SL we don't own
             }
@@ -1498,7 +1563,7 @@ public sealed class BuffCatalog
                 best = new NcuPick
                 {
                     Tell = b.Tell, MaxNcuAdded = added, LandId = b.RepNanoId,
-                    CasterLevel = b.CasterLevel, NeedsTeam = b.NeedsTeam, Name = b.Name,
+                    ReceiverLevel = b.ReceiverLevel, NeedsTeam = b.NeedsTeam, Name = b.Name,
                 };
             }
         }
