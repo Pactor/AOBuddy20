@@ -189,7 +189,8 @@ public sealed class FollowController
                     return;
                 }
 
-                BreakMirror($"he left the playfield and did not cross in {MirrorCrossGraceSec:0}s");
+                var drift = Vector3.Distance(me.MovementComponent.Position, _lastSeenPos);
+                BreakMirror($"he left the playfield and did not cross in {MirrorCrossGraceSec:0}s (I'm {drift:0.0} m from his last spot {_lastSeenPos.X:0} {_lastSeenPos.Z:0})");
             }
         }
 
@@ -251,7 +252,7 @@ public sealed class FollowController
             if (Movement.HeadingOffsetDeg(me.MovementComponent.Heading, ownerHeading) < LockHeadingDeg)
             {
                 _mirrorLocked = true;
-                _logger.LogInformation("FOLLOW: stacked on owner - mirroring his movement packets.");
+                _logger.LogInformation($"FOLLOW: stacked on owner - mirroring. me ({pos.X:0} {pos.Z:0}) him ({ownerPos.X:0} {ownerPos.Z:0}) d={dist:0.0}.");
             }
 
             return;
@@ -263,7 +264,7 @@ public sealed class FollowController
         if (ownerMoving && !_mirrorLocked)
         {
             _mirrorLocked = true;
-            _logger.LogInformation("FOLLOW: joined owner on the move - mirroring his movement packets.");
+            _logger.LogInformation($"FOLLOW: joined owner on the move - mirroring. me ({pos.X:0} {pos.Z:0}) him ({ownerPos.X:0} {ownerPos.Z:0}) d={dist:0.0}.");
         }
     }
 
