@@ -59,6 +59,7 @@ public class GeneralCombatBrain : CombatBrain
 
     private bool _hadOwnerTarget; // we were swinging the owner's target, for the stand-down StopAttack edge
     private bool _stoodDown; // the one StopAttack has been sent for this stand-down (dedupe)
+    private bool _ownerAssistSwing; // this tick's target is an OWNER-ASSIST (teaming) target, so a pet class may swing its own weapon too (owner 2026-10-11). Clear mode and everything else keep the pet class pets-only.
 
     public GeneralCombatBrain(ILogger<GeneralCombatBrain> logger, ControlArbiter controlArbiter,
         PacketRouter packetRouter, OwnerAssist ownerAssist, BrainBank brains,
@@ -80,26 +81,26 @@ public class GeneralCombatBrain : CombatBrain
             var foe = ClearTarget(me);
             if (foe != null)
             {
+                _ownerAssistSwing = false; // clear mode is NOT teaming - a pet class stays pets-only here
                 return foe;
             }
         }
 
-        // A PET CLASS stays back and lets its pet fight (owner's rule 2026-10-06): no melee-assist at all,
-        // the pet brain already drives the pet onto the owner's target. Only non-pet professions swing.
-        if (_brains.IsPetClass)
-        {
-            return null;
-        }
-
+        // TEAMING WITH THE OWNER only (owner's rule 2026-10-11, supersedes the 2026-10-06 "pet classes
+        // stay back"): a pet class fights like 10 did - it SWINGS ITS OWN WEAPON at the owner's target AND
+        // its pets attack. This applies ONLY to the owner-assist path below, not clear mode or anything
+        // else, and only when the OWNER is swinging the mob himself.
         var mob = _ownerAssist.Target(me, out var source);
 
-        // Swing only when the OWNER is swinging it himself.
         if (mob != null && source == AssistSource.OwnerTarget)
         {
             _hadOwnerTarget = true;
             _stoodDown = false;
+            _ownerAssistSwing = true; // teaming: let a pet class swing its weapon (Engage below)
             return mob;
         }
+
+        _ownerAssistSwing = false;
 
         // Owner stood down (or switched to pets-only) while we were still swinging his mob: mirror him
         // OUT with exactly one StopAttack. (A natural kill ends the same way, which is also what we want
@@ -153,10 +154,11 @@ public class GeneralCombatBrain : CombatBrain
         return null;
     }
 
-    /// <summary>A pet class never swings its body - the pets are the weapon (same rule as assist).</summary>
+    /// <summary>A pet class swings its body ONLY while teaming with the owner (owner 2026-10-11, weapon +
+    /// pets like 10); in clear mode and everywhere else the pets are the weapon and the body holds fire.</summary>
     protected override void Engage(LocalPlayer me, SimpleChar target)
     {
-        if (_brains.IsPetClass)
+        if (_brains.IsPetClass && !_ownerAssistSwing)
         {
             return;
         }
