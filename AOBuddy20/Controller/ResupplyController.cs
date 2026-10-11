@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: ResupplyController.cs
 //
-// Last modified: 2026-10-01
+// Last modified: 2026-10-11
 // Created:       2026-10-01 (ported from AOBuddy10 ResupplyController.cs)
 //
 // Long live OmniCell and AOBuddy
@@ -65,9 +65,33 @@ namespace AOBuddy20.Controlling;
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class ResupplyController : IPacketConsumer
 {
-    private enum Phase { Idle, Approach, Opening, Adding, Settling, WaitMoney, Transit }
+    private enum Phase
+    {
+        Idle,
+        Approach,
+        Opening,
+        Adding,
+        Settling,
+        WaitMoney,
+        Transit
+    }
 
-    private enum Supply { Stim, Recharger, Container, Lockpick }
+    private enum Supply
+    {
+        Stim,
+        Recharger,
+        Container,
+        Lockpick
+    }
+
+    // Charges per BOUGHT unit (owner, 2026-10-11): stims and rechargers do not come in single units -
+    // a purchase adds a whole stack, a stim carries 50 charges and a Health and Nano Recharger 20.
+    // Lockpicks and bags are single-stack items (1). Want()/Have()/the status line all count charges;
+    // Remaining() converts a charge shortfall into the stacks to buy.
+    private static readonly Dictionary<Supply, int> _stacksizes = new()
+    {
+        { Supply.Stim, 50 }, { Supply.Recharger, 20 }, { Supply.Container, 1 }, { Supply.Lockpick, 1 },
+    };
 
     private sealed class Offer
     {
@@ -166,7 +190,13 @@ public sealed class ResupplyController : IPacketConsumer
     // The owner handing us credits in a player trade. Our answer to his accept, wire-proven:
     // Accept(owner) then Confirm(owner), each naming the owner with p34 empty (as the retail client
     // sends them). One Confirm closes it; a second opens a second confirm window.
-    private enum OwnerStep { None, Accept, Confirm, Done }
+    private enum OwnerStep
+    {
+        None,
+        Accept,
+        Confirm,
+        Done
+    }
 
     private bool _ownerTrade;
     private OwnerStep _ownerStep;
@@ -469,7 +499,12 @@ public sealed class ResupplyController : IPacketConsumer
     }
 
     // What became of the try to plan the trip to the shop playfield.
-    private enum ShopTravel { Travelled, Local, Failed }
+    private enum ShopTravel
+    {
+        Travelled,
+        Local,
+        Failed
+    }
 
     // No terminal in reach here: the one travel a resupply run plans - to the shop playfield
     // (ResupplyShopPf, default 1187 "Neutral Supermarket Advanced", the Fair Trade instance:
@@ -564,8 +599,10 @@ public sealed class ResupplyController : IPacketConsumer
 
         // He changed the offer: his accept is void; we answer his next one afresh.
         if (_ownerTrade &&
-            trade.Action is TradeAction.UpdateCredits or TradeAction.AddItem
-                or TradeAction.RemoveItem or TradeAction.OtherPlayerAddItem)
+            trade.Action is TradeAction.UpdateCredits
+                or TradeAction.AddItem
+                or TradeAction.RemoveItem
+                or TradeAction.OtherPlayerAddItem)
         {
             _ownerStep = OwnerStep.None;
         }
@@ -1140,7 +1177,7 @@ public sealed class ResupplyController : IPacketConsumer
         var action = _ownerStep == OwnerStep.Accept ? TradeAction.Accept : TradeAction.Confirm;
         _logger.LogInformation($"RESUPPLY: owner trade — {action}.");
         Client.Send(new TradeMessage
-        { Version = 2, Action = action, Param1 = (int)owner.Type, Param2 = owner.Instance });
+            { Version = 2, Action = action, Param1 = (int)owner.Type, Param2 = owner.Instance });
         // After Confirm we're done (until he changes the offer); the server finishes once he confirms too.
         _ownerStep = _ownerStep == OwnerStep.Accept ? OwnerStep.Confirm : OwnerStep.Done;
     }
@@ -1415,8 +1452,10 @@ public sealed class ResupplyController : IPacketConsumer
     {
         if (s == Supply.Container)
         {
-            return Inventory.Items?.Count(i => i != null && i.Slot.Type == IdentityType.Inventory &&
-                                               i.UniqueIdentity.Type == IdentityType.Container) ?? 0;
+            return Inventory.Items?.Count(i => i != null &&
+                                               i.Slot.Type == IdentityType.Inventory &&
+                                               i.UniqueIdentity.Type == IdentityType.Container) ??
+                   0;
         }
 
         var me = DynelManager.LocalPlayer;
@@ -1443,18 +1482,21 @@ public sealed class ResupplyController : IPacketConsumer
         };
     }
 
-    // Still to buy this run: what the inventory says is missing, but never more than the run set
-    // out to buy — so a purchase the inventory model misses can't make us buy the same stims over
-    // and over.
+    // Still to buy this run, in STACKS: the charge shortfall (Want - Have, both in charges) rounded
+    // up to whole stacks - a stim or recharger cannot be bought as a partial stack - but never more
+    // than the run set out to buy, so a purchase the inventory model misses can't make us buy the
+    // same supplies over and over. Single-stack supplies (lockpick, bags) are unchanged by the math.
     private int Remaining(Supply s)
     {
-        var byInventory = Want(s) - Have(s);
+        var size = _stacksizes[s];
+        var byInventory = (Math.Max(0, Want(s) - Have(s)) + size - 1) / size;
         if (!_haveAtStart.TryGetValue(s, out var start))
         {
-            return Math.Max(0, byInventory);
+            return byInventory;
         }
 
-        return Math.Max(0, Math.Min(byInventory, Want(s) - start - _bought[s]));
+        var planned = (Math.Max(0, Want(s) - start) + size - 1) / size;
+        return Math.Max(0, Math.Min(byInventory, planned - _bought[s]));
     }
 
     private List<Supply> Needs()
@@ -1499,9 +1541,11 @@ public sealed class ResupplyController : IPacketConsumer
     private int Price(int value, Identity machine, out string from, bool corrected = true)
     {
         int price;
-        if (DynelManager.Find(machine, out VendingMachine vm) && vm.Stats != null &&
+        if (DynelManager.Find(machine, out VendingMachine vm) &&
+            vm.Stats != null &&
             vm.Stats.TryGetValue(Stat.StaticInstance, out var tmpl) &&
-            ItemValues.TryGetShopModifiers(tmpl, out var sell, out _) && sell > 0)
+            ItemValues.TryGetShopModifiers(tmpl, out var sell, out _) &&
+            sell > 0)
         {
             price = ItemValues.ShopPrice(value, sell, Cl());
             from = $"SellModifier {sell}, CL discount {ItemValues.ClDiscount(Cl()):0.##}";

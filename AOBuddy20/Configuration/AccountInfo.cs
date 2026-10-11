@@ -33,14 +33,18 @@ public class AccountInfo
 
     // --- Resupply (AOBuddy10 Config.cs:120-138, 'resupply' command): buying stims/rechargers in a shop.
     // A field missing from the JSON keeps its default.
-    public int LowStimCount = 10; // warn when usable stims fall to this many (solo mode's shopping check)
-    public int LowRechargerCount = 10; // warn when usable rechargers fall to this many
+    public int LowStimCount = 10; // warn when usable stims (charges) fall to this many (solo mode's shopping check)
+    public int LowRechargerCount = 10; // warn when usable recharger charges fall to this many
     public string ResupplyStimName = "Health and Nano Stim"; // exact name: "Stim" also matches Boosted/Burst/Swim
     public string ResupplyRechargerName = "Health and Nano Recharger";
     public string ResupplyLockpickName = "Lock Pick"; // the mission doors' key: used on a shut door (break/entry)
     public int ResupplyLockpickTarget = 1; // one in the packs is the stock; it is not used up by success
-    public int ResupplyStimTarget = 2; // top usable stims back up to this many (times 25)
-    public int ResupplyRechargerTarget = 3; // top usable rechargers back up to this many (times 20)
+    // Targets are in CHARGES - the unit Have() and the status line count (owner, 2026-10-11). Stims and
+    // rechargers are bought only as whole stacks (a stim carries 50 charges, a Health and Nano Recharger
+    // 20), so the bot buys ceil((target - have) / stack) stacks to reach the target. Defaults are
+    // AOBuddy10's intent: one stim stack (50) and three recharger stacks (60).
+    public int ResupplyStimTarget = 50;
+    public int ResupplyRechargerTarget = 60;
     public float ResupplySearchRadius = 40f; // terminals within this of the bot are considered
     public float ResupplyUseRange = 3f; // walk this close to a terminal before using it
     public int ResupplyKeepFreeSlots = 2; // never fill the last inventory slots with supplies
