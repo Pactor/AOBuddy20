@@ -23,6 +23,30 @@ var layoutFile = args.Length > 1 ? args[1] : pluginDir + "/mission-layout-146786
 var unreachableArg = args.Length > 2 ? args[2] : "5";
 double D(string s) => double.Parse(s.Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
 
+// the leaf-test polylines from the gridprobe dump (Build/leafpaths-<missionPf>.json),
+// written by the leafs verb - the routes the bot would walk, per leaf
+var leafPathsBy = new Dictionary<int, float[]>();
+var leafDeadSet = new HashSet<int>();
+var lpFile = Path.Combine(pluginDir, $"leafpaths-{Regex.Match(File.ReadAllText(layoutFile), @"pf (\d+)").Groups[1].Value}.json");
+if (File.Exists(lpFile))
+{
+    var lp = JsonDocument.Parse(File.ReadAllText(lpFile)).RootElement;
+    foreach (var p in lp.GetProperty("paths").EnumerateArray())
+    {
+        var flat = new List<float>();
+        foreach (var pt in p.GetProperty("pts").EnumerateArray())
+        {
+            flat.Add(pt[0].GetSingle()); flat.Add(pt[1].GetSingle()); flat.Add(pt[2].GetSingle());
+        }
+        leafPathsBy[p.GetProperty("room").GetInt32()] = flat.ToArray();
+    }
+    foreach (var dd in lp.GetProperty("dead").EnumerateArray())
+    {
+        leafDeadSet.Add(dd.GetInt32());
+    }
+    Console.WriteLine($"leaf paths: {leafPathsBy.Count} route(s), {leafDeadSet.Count} sealed leaf(s)");
+}
+
 var nav = AOBuddyNav.Load(pluginDir, Pf);
 var pool = nav.Dungeon;
 List<List<float[]>> ReadBin(string file)
@@ -120,7 +144,10 @@ var tilesBy = new Dictionary<int, List<float>>();
 var recastBy = new Dictionary<int, List<float>>();
 var legacyBy = new Dictionary<int, List<float>>();
 var meshOnlyBy = new Dictionary<int, List<float>>();
-var roomSockets = new List<(int roomIdx, double x, double y, double z)>();
+var roomSockets = new List<(int roomIdx, double x, double y, double z, double nx, double nz)>();
+// the tile quads pending the ownership pass: the LATER-placed room wins the overlap cells
+// (the same rule as the blit's crop) - one continuous plate per area, the seam step steppable
+var tilePending = new List<(int room, float cx, float cz, float[] tris)>();
 float mnx = 1e9f, mxx = -1e9f, mnz = 1e9f, mxz = -1e9f;
 void Take(double x, double z)
 {
@@ -173,7 +200,7 @@ foreach (var (pr, pcx, pcz, prot) in placed)
             (nx, nz) = (-nz, nx);
         }
 
-        roomSockets.Add((ri, x, dw.Y, z));
+        roomSockets.Add((ri, x, dw.Y, z, nx, nz));
     }
 
     foreach (var src in new[] { colByRoom, wallByRoom })
@@ -252,8 +279,11 @@ foreach (var (pr, pcx, pcz, prot) in placed)
                 };
                 var pc = corners.Select(c => Place(c.x, c.z)).ToList();
                 foreach (var c in pc) Take((float)c.x, (float)c.z);
-                EmitTri(tiles, new[] { (pc[0].x, (double)corners[0].y, pc[0].z), (pc[1].x, (double)corners[1].y, pc[1].z), (pc[2].x, (double)corners[2].y, pc[2].z) });
-                EmitTri(tiles, new[] { (pc[0].x, (double)corners[0].y, pc[0].z), (pc[2].x, (double)corners[2].y, pc[2].z), (pc[3].x, (double)corners[3].y, pc[3].z) });
+                tilePending.Add((ri, (float)wxp, (float)wzp, new[]
+                {
+                    (float)pc[0].x, (float)corners[0].y, (float)pc[0].z, (float)pc[1].x, (float)corners[1].y, (float)pc[1].z, (float)pc[2].x, (float)corners[2].y, (float)pc[2].z,
+                    (float)pc[0].x, (float)corners[0].y, (float)pc[0].z, (float)pc[2].x, (float)corners[2].y, (float)pc[2].z, (float)pc[3].x, (float)corners[3].y, (float)pc[3].z,
+                }));
             }
         }
     }
@@ -314,6 +344,22 @@ foreach (var (pr, pcx, pcz, prot) in placed)
     }
 }
 
+// the numbered socket markers: 1 m INSIDE the room against the socket normal, so the
+// numbers never sit on the wall geometry and stay readable
+var sockDots = new List<float[]>();
+var sockLabels = new List<object>();
+for (var ri = 0; ri < placed.Count; ri++)
+{
+    var si = 0;
+    foreach (var s in roomSockets.Where(s => s.roomIdx == ri))
+    {
+        double mx = s.x - s.nx * 1.0, mz = s.z - s.nz * 1.0;
+        sockDots.Add(new[] { (float)mx, (float)(s.y + 0.15), (float)mz });
+        sockLabels.Add(new { x = mx, y = s.y + 0.5, z = mz, text = $"{ri}.{si}" });
+        si++;
+    }
+}
+
 // the server rows + the paired sockets (A = the row's room, B = the neighbour)
 var rows = new List<(int room, int adj, double x, double y, double z)>();
 foreach (var line in File.ReadAllLines(layoutFile))
@@ -365,6 +411,54 @@ void Rec(List<float> l)
     }
 }
 Rec(unreachQuads);
+// THE TILE OWNERSHIP (owner, 2026-10-11): the atlas rects are not clipped at the room
+// boundary, so neighbouring rooms' tile plates overlap at the seams - the double layer. The
+// LATER-placed room wins the overlap cells: a 0.5 m ownership raster, rooms processed in
+// placement order, each tile claiming its cells (overwriting earlier claims). A tile emits
+// only where its centre cell is its own - one continuous plate per area, the seam step
+// between two rooms' plates stays within the walk's step range.
+var tileOwner = new Dictionary<(int, int), int>();
+foreach (var tp in tilePending)
+{
+    var key = ((int)Math.Round(tp.cx * 2), (int)Math.Round(tp.cz * 2));
+    tileOwner[key] = tp.room;
+}
+
+foreach (var tp in tilePending)
+{
+    if (tileOwner[((int)Math.Round(tp.cx * 2), (int)Math.Round(tp.cz * 2))] != tp.room)
+    {
+        continue; // a later room owns this cell: its plate cropped
+    }
+
+    var sink = tilesBy[tp.room]; // the per-room sink: the room toggles keep working
+    for (var k = 0; k < 18; k += 3)
+    {
+        sink.Add(tp.tris[k]);
+        sink.Add(tp.tris[k + 1]);
+        sink.Add(tp.tris[k + 2]);
+    }
+}
+
+// the leaf-test polylines, lifted 0.4 m above the walked heights
+var leafLines = new List<float[]>();
+foreach (var kv in leafPathsBy)
+{
+    var a = kv.Value;
+    if (a.Length < 6)
+    {
+        continue; // an empty route: the sealed leaf
+    }
+
+    for (var k = 3; k < a.Length; k += 3)
+    {
+        leafLines.Add(new[] { a[k - 3] - (float)cx0, a[k - 2] + 0.4f, a[k - 1] - (float)cz0, a[k] - (float)cx0, a[k + 1] + 0.4f, a[k + 2] - (float)cz0 });
+    }
+}
+
+
+foreach (var seg in leafLines)
+for (var k = 0; k < 6; k += 3) { seg[k] -= (float)cx0; seg[k + 2] -= (float)cz0; }
 foreach (var l in meshBy.Values) Rec(l);
 foreach (var l in tilesBy.Values) Rec(l);
 foreach (var l in recastBy.Values) Rec(l);
@@ -387,6 +481,14 @@ var json = JsonSerializer.Serialize(new
     unreach = unreachQuads.ToArray(),
     unreachable = unreachable.ToArray(),
     pairA = pairA.Select(a => new[] { a[0] - cx0, a[1], a[2] - cz0 }).ToArray(),
+    sockDots = sockDots.Select(a => new[] { a[0] - cx0, a[1], a[2] - cz0 }).ToArray(),
+    leafLines = leafLines.SelectMany(l => l).ToArray(),
+    leafDead = leafDeadSet.ToArray(),
+    sockLabels = sockLabels.Select(o =>
+    {
+        var t = (dynamic)o;
+        return new { x = t.x - cx0, y = t.y, z = t.z - cz0, t.text };
+    }).ToArray(),
     pairB = pairB.Select(a => new[] { a[0] - cx0, a[1], a[2] - cz0 }).ToArray(),
     labels = labelsShifted,
     rooms = placed.Select(t => new { Index = placed.IndexOf(t), PoolIndex = t.pool.Index, PoolName = t.pool.Name, x = t.cx - cx0, z = t.cz - cz0 }),
@@ -423,6 +525,8 @@ var html = """
   <label><input type="checkbox" id="gMeshOnly"> floors - mesh only (no GNDA) <span style="color:#ff8844">&#9632;</span></label>
   <label><input type="checkbox" id="gUnreach" checked> UNREACHABLE rooms <span style="color:#ff2222">&#9632;</span></label>
   <label><input type="checkbox" id="gPairs" checked> SEAM PAIRS <span style="color:#00ffff">&#9679;</span>A <span style="color:#ff44ff">&#9679;</span>B</label>
+  <label><input type="checkbox" id="gSockNums" checked> socket numbers <span style="color:#ffd27a">&#9679;</span></label>
+  <label><input type="checkbox" id="gLeafPaths" checked> leaf-test paths <span style="color:#ff8800">&#9670;</span></label>
   <label><input type="checkbox" id="gLabels" checked> coordinate labels</label>
   <label><input type="checkbox" id="gRooms" checked> room labels</label>
   <div style="margin-top:6px; border-top:1px solid #334; padding-top:4px;">
@@ -446,9 +550,12 @@ for (const key of ['meshBy', 'tilesBy', 'recastBy', 'legacyBy', 'meshOnlyBy'])
   }
 for (const p of DATA.pairA) p[2] = -p[2];
 for (const p of DATA.pairB) p[2] = -p[2];
+for (const p of DATA.sockDots) p[2] = -p[2];
+for (const l of DATA.sockLabels) l.z = -l.z;
 for (const l of DATA.labels) l.z = -l.z;
 for (const r of DATA.rooms) r.z = -r.z;
-for (const q of DATA.unreach) q[2] = -q[2];
+for (let i = 2; i < DATA.unreach.length; i += 3) DATA.unreach[i] = -DATA.unreach[i]; // the flat quad floats: flip every third (the z)
+for (let i = 2; i < DATA.leafLines.length; i += 3) DATA.leafLines[i] = -DATA.leafLines[i];
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101018);
@@ -536,6 +643,15 @@ const extraGroups = {};
     const m = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), new THREE.MeshBasicMaterial({ color: 0xff44ff }));
     m.position.set(p[0], p[1] + 0.25, p[2]); pg.add(m);
   }
+  for (const p of DATA.sockDots) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffd27a }));
+    m.position.set(p[0], p[1], p[2]); pg.add(m);
+  }
+  if (DATA.leafLines && DATA.leafLines.length > 0) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(DATA.leafLines, 3));
+    pg.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xff8800 })));
+  }
   scene.add(pg); extraGroups.gPairs = pg;
 }
 for (const id of ['gUnreach', 'gPairs'])
@@ -598,14 +714,15 @@ function addTag(text, x, y, z, cls, group) {
   textTags.push({ tag, x, y, z, group });
 }
 for (const l of DATA.labels) addTag(l.text, l.x, l.y + 0.6, l.z, 'color:#ffe27a;', 'labels');
+for (const l of DATA.sockLabels) addTag(l.text, l.x, l.y, l.z, 'color:#ffd27a; font-weight:bold;', 'socks');
 for (const r of DATA.rooms) {
-  const dead = (DATA.unreachable || []).includes(r.Index);
+  const dead = (DATA.unreachable || []).includes(r.Index) || (DATA.leafDead || []).includes(r.Index);
   addTag((dead ? 'UNREACHABLE ' : '') + r.Index + ' ' + r.PoolName, r.x, 12, r.z,
     dead ? 'color:#ff4444; font-weight:bold;' : 'color:#8ff;', 'rooms');
 }
-const labelGroups = { labels: true, rooms: true };
-for (const id of ['gLabels', 'gRooms'])
-  document.getElementById(id).addEventListener('change', e => { labelGroups[id === 'gLabels' ? 'labels' : 'rooms'] = e.target.checked; });
+const labelGroups = { labels: true, rooms: true, socks: true };
+for (const id of ['gLabels', 'gRooms', 'gSockNums'])
+  document.getElementById(id).addEventListener('change', e => { labelGroups[id === 'gLabels' ? 'labels' : id === 'gRooms' ? 'rooms' : 'socks'] = e.target.checked; });
 
 const v = new THREE.Vector3();
 (function tick() {

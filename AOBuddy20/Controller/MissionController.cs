@@ -128,7 +128,7 @@ public sealed class MissionController : IPacketConsumer
     private const int DoorPickTries = 20;
     private const double DoorPickEverySec = 2.0; // one pick attempt per this (the use takes a beat server-side)
     private const double DoorPickApproachTimeout = 25.0; // the walk to the shut door that never got there
-    private const float DoorPickStandoff = 2.0f; // stop this far short of the door (its leaf bounces the body)
+    private const float DoorPickStandoff = 0.5f; // the approach radius (owner, 2026-10-11): stop 0.5 m short of the door - close enough that proximity doors swing and the pick reaches
     private const double SearchHopTimeout = 25.0; // a room walk this long without arriving: next room
     private const int DoorSides = 8; // 45° ladder, this many sides per round
     private const int DoorRounds = 2; // and this many rounds, then the door is given up
@@ -2657,6 +2657,20 @@ public sealed class MissionController : IPacketConsumer
         {
             _currentClearRoom = null;
 
+            // THE LOCK GATE (owner, 2026-10-11, 14678927 + the Subway re-run): a mob behind a
+            // LOCKED door is unknown to the pet - the attack loops "engagement closed" forever.
+            // Two forms: a locked door ON the bot-to-mob line, and (the passage juts case) the
+            // mob's own room behind its LOCKED entrance door - the locked door nearest the MOB
+            // within 6 m. Stop and run the lockpick beat; the re-stream clears the door.
+            var locked = LockedDoorBetween(pos, pick.Transform.Position)
+                         ?? LockedDoorNearMob(pick.Transform.Position);
+            if (locked.HasValue)
+            {
+                var d = locked.Value;
+                StartPicking((d.room, d.adjoining, d.pos, d.flags));
+                return;
+            }
+
             // THE DOOR GATE (owner, 2026-10-11, the 14678927 pet pull): a mob in ANOTHER room
             // is behind a door that only opens on player proximity - at pull distance the door
             // never opened and the pet has no knowledge of the mob (the engagement closes
@@ -2699,6 +2713,17 @@ public sealed class MissionController : IPacketConsumer
             _currentClearRoom = (rm.Floor, idx); // marked walked on arrival (standing) or when the hop ends
             _lastSearchRoom = idx; // NextDoorHop streams the room's inner sections on arrival
             var centre = new Vector3(rm.Pos[0], rm.Pos[1], rm.Pos[2]);
+
+            // the lock gate on the hop too: a locked door between here and the room centre
+            // glitches the hop - pick it first, the hop re-plans through the open door.
+            var lockedHop = LockedDoorBetween(pos, centre);
+            if (lockedHop.HasValue)
+            {
+                var dh = lockedHop.Value;
+                StartPicking((dh.room, dh.adjoining, dh.pos, dh.flags));
+                return;
+            }
+
             WalkTo(pos, centre, SearchReach, $"clear: {rm.PoolName} (floor {rm.Floor})");
             return;
         }
@@ -2910,6 +2935,56 @@ public sealed class MissionController : IPacketConsumer
         }
 
         return best;
+    }
+
+    // The LOCKED door standing between the bot and the target: flags 0x40, not open, within
+    // 3 m of the bot-to-target line and not within 10 % of either end (the endpoints have
+    // their own beats). Only the STREAMED doors can answer - DoorFullUpdates arrive per room,
+    // so the gate acts as the bot advances and the next room's doors stream in.
+    private (short room, short adjoining, Vector3 pos, uint flags)? LockedDoorBetween(Vector3 from, Vector3 to)
+    {
+        var segx = to.X - from.X;
+        var segz = to.Z - from.Z;
+        var len2 = segx * segx + segz * segz;
+        if (len2 < 1e-6)
+        {
+            return null;
+        }
+
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf != _missionPf || (d.flags & 0x80) != 0 || (d.flags & 0x40) == 0)
+            {
+                continue; // another building's, open, or merely shut (shut opens on approach)
+            }
+
+            var t = ((d.pos.X - from.X) * segx + (d.pos.Z - from.Z) * segz) / len2;
+            if (t < 0.08 || t > 0.92)
+            {
+                continue; // at an endpoint: that walk's own business
+            }
+
+            var px = from.X + segx * t;
+            var pz = from.Z + segz * t;
+            var perp = Math.Sqrt((d.pos.X - px) * (d.pos.X - px) + (d.pos.Z - pz) * (d.pos.Z - pz));
+            if (perp <= 3.0)
+            {
+                return (d.room, d.adjoining, d.pos, d.flags); // drop pf: the 4-tuple the callers take
+            }
+        }
+
+        return null;
+    }
+
+    // The LOCKED door nearest the MOB (within 6 m): the mob's own room's entrance door - the
+    // mob behind it is unknown to the pet until it opens. Only the streamed doors answer.
+    private (short room, short adjoining, Vector3 pos, uint flags)? LockedDoorNearMob(Vector3 mob)
+    {
+        return _serverDoors
+            .Where(d => d.pf == _missionPf && (d.flags & 0x40) != 0 && (d.flags & 0x80) == 0)
+            .OrderBy(d => Movement.Flat(d.pos, mob))
+            .Select(d => (d.room, d.adjoining, d.pos, d.flags))
+            .FirstOrDefault(d => Movement.Flat(d.pos, mob) <= 6f);
     }
 
     // Fit to fight: not a pet (ours or anyone's), alive, not the person we came to find, not

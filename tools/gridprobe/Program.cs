@@ -1559,10 +1559,27 @@ internal static class MissionX
                 .Where(r => r.Index != 0 && neighbours.TryGetValue(r.Index, out var n) && n.Count == 1)
                 .ToList();
             Console.WriteLine($"leaf rooms (1 connection): {leaves.Count} of {nav.Dungeon.Rooms.Count} room(s); start room 0 {startRoom.Name}");
+            // the leaf-path polylines for the floor viewer: per leaf, the walked route or an
+            // empty point list when the leaf is sealed
+            var leafPaths = new List<object>();
+            var leafDead = new List<int>();
             var reachable = 0;
+            Console.WriteLine($"[dbg] MissionDoorways {nav.MissionDoorways.Count}, room2 own: {nav.MissionDoorways.Count(d => d.Room == 2)}");
             foreach (var r in leaves)
             {
+                // THE GOAL 2 m INSIDE FROM THE DOOR (owner, 2026-10-11): the room centre can sit
+                // inside a big column (Mine_Lesser8_2's centre pillar) - never walkable, and the
+                // leaf then reads sealed behind its own geometry. The connection doorway + 2 m
+                // inward is the fitting goal for every room shape; the centre is the fallback.
                 var goal = new Vector3(r.Pos[0], float.NaN, r.Pos[2]);
+                var ownDoor = nav.MissionDoorways?.Where(d => d.Room == r.Index)
+                    .OrderBy(d => (d.X - r.Pos[0]) * (d.X - r.Pos[0]) + (d.Z - r.Pos[2]) * (d.Z - r.Pos[2]))
+                    .FirstOrDefault();
+                if (ownDoor != null)
+                {
+                    goal = new Vector3((float)(ownDoor.X - ownDoor.Nx * 2.0), float.NaN, (float)(ownDoor.Z - ownDoor.Nz * 2.0));
+                }
+
                 var path = grid.FindPath(from, goal, null, 2f, 1.0f, out var why);
                 if (path != null)
                 {
@@ -1577,9 +1594,12 @@ internal static class MissionX
 
                     var end = path[path.Count - 1];
                     Console.WriteLine($"  room {r.Index,2} {r.Name}: PATH, {path.Count} pts, {len:0.0} m, ends ({end.X:0.0},{end.Y:0.0},{end.Z:0.0})");
+                    leafPaths.Add(new { room = r.Index, pts = path.Select(p => new[] { p.X, p.Y, p.Z }).ToArray() });
                 }
                 else
                 {
+                    leafDead.Add(r.Index);
+                    leafPaths.Add(new { room = r.Index, pts = Array.Empty<float[]>() });
                     Console.WriteLine($"  room {r.Index,2} {r.Name} centre ({r.Pos[0]:0.0},{r.Pos[2]:0.0}): NO PATH - {why}");
                     // TEMP: name the blockers around the leaf's centre - which room's blit owns
                     // each sealed cell, and what levels it carries
@@ -1602,6 +1622,19 @@ internal static class MissionX
             }
 
             Console.WriteLine($"leaf pathability: {reachable}/{leaves.Count} reachable");
+            // the polylines out for the floor viewer
+            try
+            {
+                var mpf = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(args[3]), @"pf (\d+)");
+                var outPath = Path.Combine("Build", $"leafpaths-{(mpf.Success ? mpf.Groups[1].Value : "x")}.json");
+                File.WriteAllText(outPath, System.Text.Json.JsonSerializer.Serialize(new { paths = leafPaths, dead = leafDead }));
+                Console.WriteLine($"leaf paths -> {outPath}");
+            }
+            catch (Exception ex2)
+            {
+                Console.WriteLine($"leaf paths not written: {ex2.Message}");
+            }
+
             return 0;
         }
 
