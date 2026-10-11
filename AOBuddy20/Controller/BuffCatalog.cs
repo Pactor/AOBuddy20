@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: BuffCatalog.cs
 //
-// Last modified: 2026-10-05
+// Last modified: 2026-10-11
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -1208,13 +1208,15 @@ public sealed class BuffCatalog
     }
 
     /// <summary>
-    ///     THE COMFORT FILL (owner, 2026-10-07), after the obedience floor is established. The
-    ///     MUSTS are planned TOGETHER, each taking its biggest tier with tiers downgrading -
-    ///     largest consumer first - until ALL of them fit the remaining NCU (a smaller Fixer HoT
-    ///     beats a missing Doctor health/HoT; owner's "take a smaller essence" rule, applied to
-    ///     the musts themselves). Then the OPTIONALS fill what is left, biggest that fits:
-    ///      musts: 1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
-    ///      optionals: 4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
+    ///     THE COMFORT FILL (owner, 2026-10-07; HoT-first, owner 2026-10-11), after the obedience
+    ///     floor is established. ONE priority walk: the budget is spent strictly in category
+    ///     order, each category taking the biggest receivable tier that fits what is left - what
+    ///     a higher category leaves behind is all a lower one ever gets. THE HO TS STAND FIRST
+    ///     and are never shrunk to make room ("you want as much as possible HoT, even if you
+    ///     can't fit in something else because of that"); a lower must's own smaller tiers are
+    ///     its downgrade:
+    ///      1. Fixer long HoT, 2. Doctor health + long HoT, 3. Fixer runspeed;
+    ///      4. Enforcer Essence, 5. damage shields (long) / Coruscating Screen,
     ///      6. damage buffs, 7. XP buffs, 8. evasion (self-cast counts when learned - owner,
     ///      2026-10-07). One buff per strain, receiver-gated. The caller routes each pick
     ///      (RouteFor): a learned self-cast becomes me.Cast, the rest go as bot tells.
@@ -1292,105 +1294,35 @@ public sealed class BuffCatalog
             return ok.OrderByDescending(b => b.Ncu).ToList(); // the biggest tier first - downgrade until it fits
         }
 
+        // THE PRIORITY WALK (owner, 2026-10-11: "you want as much as possible HoT, even if you
+        // can't fit in something else because of that"): the budget is spent strictly in category
+        // order - each category takes the biggest receivable tier that fits the NCU left, and
+        // what a higher category leaves behind is all a lower one ever sees. The HoTs stand
+        // first, so nothing can shrink them; a lower must's own smaller tiers are its downgrade
+        // (the old all-at-once dance bought them by shrinking the HoTs). The optionals trail the
+        // musts - nice to have, by no means necessary.
         var budget = ncuBudget;
         var usedStrains = new HashSet<int>();
-
-        // THE MUSTS IN IMPORTANCE ORDER (owner, 2026-10-07: "a Heal over time is way more
-        // important than the XP buff"): start with every must at its biggest tier; when even the
-        // smallest tiers overflow the budget, the LEAST important must is dropped first; within
-        // what remains, the least important consumers downgrade first. The optionals (XP,
-        // evasion included) only get what is left - nice to have, by no means necessary.
-        var kept = categories.Where(c => c.Must)
-            .Select(c => (Name: c.Name, Cands: Candidates(c.Name, c.Match)))
-            .ToList();
-
-        int MinSum() => kept.Sum(k => k.Cands.Count > 0 ? k.Cands[^1].Ncu : 0);
-        while (kept.Count > 0 && MinSum() > budget)
+        foreach (var (must, name, match) in categories)
         {
-            _logger.LogInformation(
-                $"COMFORT: must '{kept[^1].Name}' - the budget cannot hold every must; dropping it (least important first).");
-            kept.RemoveAt(kept.Count - 1);
-        }
-
-        var picks = kept.Select(k => k.Cands.Count > 0 ? k.Cands[0] : null).ToList(); // the biggest tier each
-        while (picks.Sum(p => p?.Ncu ?? 0) > budget)
-        {
-            // downgrade the LEAST important pick that still has a smaller tier
-            var victim = -1;
-            for (var i = picks.Count - 1; i >= 0; i--)
-            {
-                if (picks[i] == null)
-                {
-                    continue;
-                }
-
-                if (kept[i].Cands.Any(c => c.Ncu < picks[i]!.Ncu))
-                {
-                    victim = i;
-                    break;
-                }
-            }
-
-            if (victim < 0)
-            {
-                break; // everything is at its smallest tier
-            }
-
-            picks[victim] = kept[victim].Cands.First(c => c.Ncu < picks[victim]!.Ncu);
-        }
-
-        // still overflowing at the smallest tiers: drop from the LEAST important end
-        while (picks.Sum(p => p?.Ncu ?? 0) > budget && picks.Any(p => p != null))
-        {
-            var i = picks.FindLastIndex(p => p != null);
-            _logger.LogWarning(
-                $"COMFORT: must '{kept[i].Name}' - even at its smallest tier it does not fit - dropped (least important first).");
-            picks[i] = null;
-        }
-
-        for (var i = 0; i < picks.Count; i++)
-        {
-            var pick = picks[i];
+            var cands = Candidates(name, match);
+            var pick = cands.FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
             if (pick == null)
             {
-                if (kept[i].Cands.Count > 0)
+                if (cands.Count > 0)
                 {
-                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - dropped for budget (least important first).");
-                }
-                else
-                {
-                    _logger.LogInformation($"COMFORT: must '{kept[i].Name}' - nothing learned/castable - skipped.");
+                    _logger.LogInformation(
+                        $"COMFORT: {(must ? "must" : "optional")} '{name}' - nothing fits the {budget} NCU left - skipped.");
                 }
 
-                continue;
-            }
-
-            if (usedStrains.Contains(pick.Strain))
-            {
-                continue; // a same-strain pick earlier in the fill already covers it
+                continue; // nothing castable (logged in Candidates) or nothing fits: the next category tries
             }
 
             plan.Add(pick);
             usedStrains.Add(pick.Strain);
             budget -= pick.Ncu;
             _logger.LogInformation(
-                $"COMFORT: must '{kept[i].Name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
-        }
-
-        // THE OPTIONALS: the biggest tier that fits the remainder, in the owner's order.
-        foreach (var (_, name, match) in categories.Where(c => !c.Must))
-        {
-            var pick = Candidates(name, match).FirstOrDefault(b => b.Ncu <= budget && !usedStrains.Contains(b.Strain));
-            if (pick == null)
-            {
-                continue;
-            }
-
-            plan.Add(pick);
-            usedStrains.Add(pick.Strain);
-            budget -= pick.Ncu;
-            _logger.LogInformation(
-                $"COMFORT: optional '{name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
+                $"COMFORT: {(must ? "must" : "optional")} '{name}' - '{pick.Name}' ({pick.Ncu} NCU, {budget} left).");
         }
 
         return plan;
