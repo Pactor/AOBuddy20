@@ -1125,21 +1125,14 @@ public static class NorthboundBuilder
                 }
             }
 
-            // DOWN-FACING TRIANGLES ARE EXCLUDED: the bins carry render-order triangles in both
-            // windings, and a down-wound face is a CEILING/underside - nothing a walker stands
-            // on. Feeding them (flipped up, an earlier attempt) made their undersides walkable
-            // area: the shell's underside carpeted every column under it, and the bogus levels
-            // punched holes into the tile-ramp spans under the shell (owner's room-5 seal).
-            // Their headroom role is minor at these ceiling heights; the up-facing geometry
-            // carries the room.
-            float ux = v[3] - v[0], uy = v[4] - v[1], uz = v[5] - v[2];
-            float wx = v[6] - v[0], wy = v[7] - v[1], wz = v[8] - v[2];
-            var ny = uz * wx - ux * wz;
-            if (ny < 0)
-            {
-                return; // a ceiling/underside: not standable, not wanted
-            }
-
+            // FEED EVERYTHING UNMODIFIED: the bins carry render-order triangles in both
+            // windings, and Recast judges each by its SIGNED slope - an up-wound flat is
+            // walkable ground, a down-wound flat (a ceiling's underside) is NULL-area: solid
+            // for headroom but never standable (no carpet), and steep walls are NULL either
+            // way while still marking their columns solid. Flipping or excluding either one
+            // opened holes: flipped ceilings carpeted rooms and holed the tile ramps (the
+            // room-5 seal), excluded down-wound walls opened wall gaps the bot ran through
+            // (14678927: Mine_07 -> Startroom_08).
             var b = verts.Count / 3;
             for (var k = 0; k < 9; k++)
             {

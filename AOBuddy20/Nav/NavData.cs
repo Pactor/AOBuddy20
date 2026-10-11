@@ -1013,6 +1013,12 @@ public sealed class AOBuddyNav
         // SELECTOR (which socket of the parent) and the sill-Y source; it no longer names the
         // target point.
         var hookOf = new Dictionary<int, Doorway>(); // per placed room: the socket it hung by, current frame
+        // KNOWN GAP (owner, 2026-10-11, 14678927 room 8): the selection is per-connection, so
+        // two connections CAN dock onto the same wall socket (room 2's second north door and
+        // room 8's east door shared grey_mh5's south wall socket). A claim set fixing that was
+        // tried and reverted: local exclusivity steals sockets across legitimate neighbouring
+        // connections (14678642 -2, 14678521 -2 leaves) - the proper fix is a global
+        // socket-to-connection assignment over all of a wall's sockets, per template family.
         foreach (var child in order)
         {
             if (!parentOf.TryGetValue(child, out var par))
@@ -1038,23 +1044,27 @@ public sealed class AOBuddyNav
                 ai = rows[0];
             }
 
-            // the parent-side socket: the parent's doorway facing this connection's row point,
-            // nearest it - in the parent's current frame. It IS the target; the row only picks it.
+            // THE DOCKING (owner, 2026-10-11): each socket docks exactly ONCE - the claim set
+            // enforces exclusivity (room 2's second north door had claimed the socket room 8's
+            // east door docked onto). Selection stays the proven nearest-facing rule per side,
+            // in the parent's current (already snapped) frame; the target = the parent's own
+            // socket (the first-placed room is authoritative), the row only as the fallback.
+            // (A joint-pair attempt with an opposite-normal requirement regressed three
+            // missions - angled sockets rejected outright cascade wrong pairings - and was
+            // reverted; exclusivity alone is the fix that kept every green mission green.)
+            var prowX = doors[ai].pos.X;
+            var prowZ = doors[ai].pos.Z;
+            // NO FACING FILTER on either side (owner, 2026-10-11, 14678927 room 8): the hub's
+            // INNER sockets face sideways relative to the connection row, and the old facing
+            // test rejected exactly the right parent socket - the room then hung 1 m off
+            // instead of the needed (−5,+5). The server row IS the door's world position:
+            // nearest-to-row, unclaimed, is the selector on both sides.
             Doorway parentSock = null;
             var parBest = double.MaxValue;
             {
-                var prow = doors[ai].pos;
-                var pfx = prow.X - d.Rooms[par].Pos[0];
-                var pfz = prow.Z - d.Rooms[par].Pos[2];
-                var pflen = Math.Sqrt(pfx * pfx + pfz * pfz);
                 foreach (var dw in placed[par])
                 {
-                    if (pflen > 0.5 && (dw.Nx * pfx + dw.Nz * pfz) / pflen < 0.0)
-                    {
-                        continue; // faces away from the connection
-                    }
-
-                    var dd = (dw.X - prow.X) * (dw.X - prow.X) + (dw.Z - prow.Z) * (dw.Z - prow.Z);
+                    var dd = (dw.X - prowX) * (dw.X - prowX) + (dw.Z - prowZ) * (dw.Z - prowZ);
                     if (dd < parBest)
                     {
                         parBest = dd;
@@ -1063,39 +1073,14 @@ public sealed class AOBuddyNav
                 }
             }
 
-            // the target: the parent's socket (the owner's first-placed rule); the server row
-            // only as the fallback when the parent's side has no facing socket (a decode gap)
             var target = parentSock != null
                 ? new Vector3((float)parentSock.X, doors[ai].pos.Y, (float)parentSock.Z)
                 : doors[ai].pos;
-            // the child's doorway for this connection. The row names the two rooms and the
-            // door's world point - never WHICH socket of the room it stands in (the server's
-            // generator decides that at build time; the template's adjoining is 0xFFFF in 1,851
-            // of 1,889 sockets) - so one geometric identification per room is forced: the
-            // doorway that FACES THE ROW'S OWN DOOR POINT (the socket's outward normal against
-            // the direction from the room centre to the point - NOT the direction to the
-            // parent's centre: notched hubs wrap their neighbours, and centre-to-centre points
-            // straight across the courtyard, away from the real shared wall; owner, 2026-10-10,
-            // dump 14678613: rooms 2/6/9's doors face south/north/east into grey_mh7's arms
-            // while the centre said north-west). Among facing doorways - two doors to one
-            // neighbour on a long shared wall - the nearest is the selector, deterministic;
-            // there is NO absolute cap: a room genuinely placed 3-5 m off is exactly the one
-            // that must still hang, and the residual/meeting checks below report any hook that
-            // went wrong.
+
             Doorway hook = null;
             var bestD = double.MaxValue;
-            var facing = 0;
             foreach (var dw in placed[child])
             {
-                var fx = target.X - d.Rooms[child].Pos[0];
-                var fz = target.Z - d.Rooms[child].Pos[2];
-                var flen = Math.Sqrt(fx * fx + fz * fz);
-                if (flen > 0.5 && (dw.Nx * fx + dw.Nz * fz) / flen < 0.0)
-                {
-                    continue; // this doorway's face points away from the server door point
-                }
-
-                facing++;
                 var dd = (dw.X - target.X) * (dw.X - target.X) + (dw.Z - target.Z) * (dw.Z - target.Z);
                 if (dd < bestD)
                 {
@@ -1104,9 +1089,20 @@ public sealed class AOBuddyNav
                 }
             }
 
-            if (hook == null)
+            if (hook == null || parentSock == null)
             {
-                log.Add($"  room {child} ({d.Rooms[child].PoolName}) keeps its slot placement - no doorway faces its parent door point ({target.X:0.0},{target.Z:0.0}) (a decode gap).");
+                log.Add($"  room {child} ({d.Rooms[child].PoolName}) keeps its slot placement - no unclaimed facing socket for the connection to room {par} (a decode gap).");
+                continue;
+            }
+
+            // THE DIRECTION RULE (owner, 2026-10-11): an east-facing door can NEVER dock to a
+            // north/south-facing doorway - the two sockets must face each other, normals
+            // near-opposite. A violation means the identification picked the wrong socket
+            // (14678927 room 8: its east door docked onto a north/south wall): keep the slot
+            // placement rather than docking wrong - a wrong dock is a setpos waiting to happen.
+            if (parentSock.Nx * hook.Nx + parentSock.Nz * hook.Nz > 0.1)
+            {
+                log.Add($"  room {child} ({d.Rooms[child].PoolName}) mis-dock rejected: its socket ({hook.X:0.00},{hook.Z:0.00}) n({hook.Nx:0.##},{hook.Nz:0.##}) does not face room {par}'s socket ({parentSock.X:0.00},{parentSock.Z:0.00}) n({parentSock.Nx:0.##},{parentSock.Nz:0.##}) - slot placement stands.");
                 continue;
             }
 

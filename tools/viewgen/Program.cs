@@ -437,6 +437,19 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const DATA = __DATA__;
 
+// Z FLIP: display with the in-game map's z orientation (north up) - all geometry and
+// markers mirror once here; every material is DoubleSide so the winding flip is invisible.
+for (const key of ['meshBy', 'tilesBy', 'recastBy', 'legacyBy', 'meshOnlyBy'])
+  for (const ri of Object.keys(DATA[key])) {
+    const a = DATA[key][ri];
+    for (let i = 2; i < a.length; i += 3) a[i] = -a[i];
+  }
+for (const p of DATA.pairA) p[2] = -p[2];
+for (const p of DATA.pairB) p[2] = -p[2];
+for (const l of DATA.labels) l.z = -l.z;
+for (const r of DATA.rooms) r.z = -r.z;
+for (const q of DATA.unreach) q[2] = -q[2];
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101018);
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 2000);
