@@ -2663,13 +2663,13 @@ public sealed class MissionController : IPacketConsumer
             // instantly). Walk to that room's door first, approach 0.5 m so the door swings,
             // then the pull works on the next ticks.
             var myRoom = RoomIndexAt(pos);
-            var mobRoom = _mobRoom.TryGetValue(pick.Identity, out var mrm) ? mrm : (int?)null;
+            (int floor, int idx)? mobRoom = _mobRoom.TryGetValue(pick.Identity, out var mrm) ? mrm : null;
             if (myRoom.HasValue && mobRoom.HasValue && myRoom.Value != mobRoom.Value)
             {
-                var door = DoorBetween(myRoom.Value, mobRoom.Value, pos);
+                var door = DoorBetween(myRoom.Value.idx, mobRoom.Value.idx, pos);
                 if (door.HasValue)
                 {
-                    WalkTo(pos, door.Value, 0.5f, $"clear: the door to room {mobRoom.Value}");
+                    WalkTo(pos, door.Value, 0.5f, $"clear: the door to room {mobRoom.Value.idx}");
                     return;
                 }
             }
@@ -2881,10 +2881,6 @@ public sealed class MissionController : IPacketConsumer
         return null;
     }
 
-    // Fit to fight: not a pet (ours or anyone's), alive, not the person we came to find, not
-    // sitting out a pull refusal.
-    private bool Pullable(LocalPlayer me, NpcChar n)
-
     // The door between two placed rooms, nearest the bot, nudged 0.5 m to the fromRoom side
     // (the approach radius that pops the door open). Null when the rooms share no doorway.
     private Vector3? DoorBetween(int fromRoom, int toRoom, Vector3 pos)
@@ -2898,7 +2894,7 @@ public sealed class MissionController : IPacketConsumer
                 continue;
             }
 
-            var paired = _nav.MissionDoorways.Any(o => o.Room == toRoom &&
+            var paired = _nav.MissionDoorways.Any(o => o.Room == toRoom && o.Floor == dw.Floor &&
                 Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
             if (!paired)
             {
