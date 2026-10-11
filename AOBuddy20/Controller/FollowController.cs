@@ -49,6 +49,15 @@ public sealed class FollowController
     // that lands in the wrong booth. A real cross fires a zone Reset well inside this window.
     private const double MirrorCrossGraceSec = 3.0;
 
+    // LOGIN/ZONE position confirm: the owner's dynel can read a stale or default spot for a moment
+    // right after we log in or zone, before the server streams his real position. Running a FAR
+    // approach at that bad read sends us off the wrong way (owner, 2026-10-11: stacked and standing,
+    // the bot ran away on login then snapped back when the real position arrived). So don't chase far
+    // until his position is trusted: a live move stream (a fresh CharDCMove), or a spot that has held
+    // steady within this radius for this long.
+    private const float OwnerConfirmRadius = 5f;
+    private const double OwnerConfirmSeconds = 1.0;
+
     private readonly ILogger _logger;
     private readonly Movement _movement;
     private readonly int _sendIntervalMs;
@@ -69,6 +78,10 @@ public sealed class FollowController
     private bool _lostPushed;
     private bool _sawHim; // (0,0,0) is a real coordinate: a flag, not a default position
     private double _crossGrace; // seconds the mirror has been held after the owner left view (the crossing ride)
+    private bool _ownerConfirmed; // the owner's reported position is trusted for a far approach (login/zone gate)
+    private Vector3 _confirmAnchor;
+    private double _confirmElapsed = -1;
+    private bool _approachLogged; // throttle the chase/settle diagnostic to once per approach episode
 
     // His speed, measured off his own position samples, for the outrun warning.
     private Vector3? _speedRefPos;
@@ -103,6 +116,9 @@ public sealed class FollowController
     {
         _mirrorLocked = false;
         _crossGrace = 0;
+        _ownerConfirmed = false; // a fresh login/zone: re-confirm his position before chasing far
+        _confirmElapsed = -1;
+        _approachLogged = false;
         MirrorQueue.Clear();
         _lostTarget = null;
         _lostPushed = false;
@@ -185,12 +201,32 @@ public sealed class FollowController
 
         if (dist > maxStep)
         {
+            // LOGIN/ZONE guard: don't run at a far reading of his spot until it is confirmed real -
+            // a stale/default spawn read would send us the wrong way (owner, 2026-10-11).
+            if (!ConfirmOwner(ownerPos, ownerMoving, dt))
+            {
+                _movement.Hold(me, _sendIntervalMs);
+                if (!_approachLogged)
+                {
+                    _approachLogged = true;
+                    _logger.LogInformation($"FOLLOW: owner reads {dist:0} m off at ({ownerPos.X:0} {ownerPos.Z:0}), but his position isn't confirmed yet (login/zone settle) - holding before I chase, so a stale spawn read can't send me the wrong way.");
+                }
+
+                return;
+            }
+
             // Can't reach his spot this frame - run flat out at it. Sliding close in, keep HIS facing
             // so joining never needs an about-face. The outrun warning names the one cause a
             // stack-follow can lag: he is simply faster.
             WarnIfOutrun(mySpeed, ownerMoving);
             if (dist > StackSlideMeters)
             {
+                if (!_approachLogged)
+                {
+                    _approachLogged = true;
+                    _logger.LogInformation($"FOLLOW: chasing owner - me ({pos.X:0} {pos.Z:0}) -> him ({ownerPos.X:0} {ownerPos.Z:0}), {dist:0} m.");
+                }
+
                 walkStep(me, ownerPos, dt); // stack-chase
                 return;
             }
@@ -199,6 +235,8 @@ public sealed class FollowController
             _movement.Advance(me, pos + d * maxStep, ownerHeading, run: true, dt, _sendIntervalMs);
             return;
         }
+
+        _approachLogged = false; // close enough to stack: the approach episode is over, re-arm the line
 
         if (!ownerMoving && dist < OnHimDist)
         {
@@ -298,6 +336,40 @@ public sealed class FollowController
             _speedRefPos = ownerPos;
             _speedRefAt = now;
         }
+    }
+
+    // Is the owner's reported position safe to RUN at? A live move stream (ownerMoving = a fresh
+    // CharDCMove) is always a real position. Otherwise require the reported spot to hold within
+    // OwnerConfirmRadius for OwnerConfirmSeconds - which filters the stale/default spawn read that
+    // made a stacked, standing bot run off on login. Once confirmed it stays confirmed until the next
+    // Reset (login/zone); a close owner never needs this (the far-approach is the only caller).
+    private bool ConfirmOwner(Vector3 ownerPos, bool ownerMoving, double dt)
+    {
+        if (_ownerConfirmed)
+        {
+            return true;
+        }
+
+        if (ownerMoving)
+        {
+            _ownerConfirmed = true;
+            return true;
+        }
+
+        if (_confirmElapsed < 0 || Vector3.Distance(ownerPos, _confirmAnchor) > OwnerConfirmRadius)
+        {
+            _confirmAnchor = ownerPos; // first read, or he jumped: (re)anchor and time the hold from here
+            _confirmElapsed = 0;
+            return false;
+        }
+
+        _confirmElapsed += dt;
+        if (_confirmElapsed >= OwnerConfirmSeconds)
+        {
+            _ownerConfirmed = true;
+        }
+
+        return _ownerConfirmed;
     }
 
     // At most every 5 s: the one thing no follow algorithm fixes - he is faster than we are
