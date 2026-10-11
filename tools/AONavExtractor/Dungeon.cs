@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace AONavExtractor
@@ -25,6 +26,7 @@ namespace AONavExtractor
             public List<int[]> Doors = new List<int[]>(); public List<Poly> Polys = new List<Poly>(); public List<float[]> Objects = new List<float[]>();
             public int HeightBase;
             public int[][] Tile, Height, Flags3;     // rows z1..z2 of cols x1..x2
+            public int[][] Height2;                  // GNDA layer 2: the SIGNED second surface (pits/water bottoms); 250-255 decodes to -6..-1
         }
 
         public int Playfield, Tilemap, AtlasW, AtlasH;
@@ -55,7 +57,7 @@ namespace AONavExtractor
             d.Cell = BitConverter.ToSingle(tb, 16); d.HeightScale = BitConverter.ToSingle(tb, 20);
             List<Png> layers = Png.FindAll(tb);
             if (layers.Count < 2) throw new InvalidDataException("pf " + pf + ": tilemap has " + layers.Count + " layers");
-            Png tileL = layers[0], hgtL = layers[1], flgL = layers.Count > 3 ? layers[3] : null;
+            Png tileL = layers[0], hgtL = layers[1], hgt2L = layers.Count > 2 ? layers[2] : null, flgL = layers.Count > 3 ? layers[3] : null;
 
             int p = RoomsStart(b);
             for (int r = 0; r < nrooms; r++)
@@ -92,17 +94,18 @@ namespace AONavExtractor
                 }
                 int x1 = rm.Rect[0], z1 = rm.Rect[1], x2 = rm.Rect[2], z2 = rm.Rect[3];
                 int rows = z2 - z1 + 1, cols = x2 - x1 + 1;
-                rm.Tile = new int[rows][]; rm.Height = new int[rows][]; rm.Flags3 = new int[rows][];
+                rm.Tile = new int[rows][]; rm.Height = new int[rows][]; rm.Flags3 = new int[rows][]; rm.Height2 = new int[rows][];
                 int kmin = int.MaxValue;
                 for (int zz = 0; zz < rows; zz++)
                 {
-                    rm.Tile[zz] = new int[cols]; rm.Height[zz] = new int[cols]; rm.Flags3[zz] = new int[cols];
+                    rm.Tile[zz] = new int[cols]; rm.Height[zz] = new int[cols]; rm.Flags3[zz] = new int[cols]; rm.Height2[zz] = new int[cols];
                     for (int xx = 0; xx < cols; xx++)
                     {
                         int ax = x1 + xx, az = z1 + zz;
                         bool inside = ax < tileL.Width && az < tileL.Height;
                         rm.Tile[zz][xx] = inside ? tileL.At(ax, az) : 0;
                         rm.Height[zz][xx] = inside && ax < hgtL.Width && az < hgtL.Height ? hgtL.At(ax, az) : 0;
+                        rm.Height2[zz][xx] = inside && hgt2L != null && ax < hgt2L.Width && az < hgt2L.Height ? hgt2L.At(ax, az) : 0;
                         rm.Flags3[zz][xx] = flgL != null && inside && ax < flgL.Width && az < flgL.Height ? flgL.At(ax, az) : 0;
                         if (rm.Tile[zz][xx] != 0 && rm.Height[zz][xx] < kmin) kmin = rm.Height[zz][xx];
                     }
@@ -162,6 +165,10 @@ namespace AONavExtractor
                 }
                 w.End();
                 w.Key("tile").Grid(rm.Tile); w.Key("height").Grid(rm.Height); w.Key("flags3").Grid(rm.Flags3);
+                if (rm.Height2 != null && rm.Height2.Any(r2 => r2.Any(v => v != 0)))
+                {
+                    w.Key("height2").Grid(rm.Height2); // GNDA layer 2: the signed second surface, only when any tile carries one
+                }
                 w.End();
             }
             w.End(); w.End();

@@ -475,6 +475,94 @@ if (args.Length > 2 && args[1] == "seams")
     }
 }
 
+if (args.Length > 5 && args[1] == "tris")
+{
+    // gridprobe <pluginDir> tris <missionPf> <layout.txt> <x> <z> - which triangles of the
+    // owning pool room cover this PLACED point (reverse-rotated into pool frame), scanned
+    // ±3.5 m along pool x and z: per 0.2 m sample the tallest covering triangle's Y extent.
+    // '#' = a wall-like triangle (extent >= 1.5 m), '-' = only thin/flat ones, '.' = nothing.
+    // Answers "is the wall in the data at all" (owner 2026-10-11: room 0's east wall walks
+    // through at floor level).
+    var invT = System.Globalization.CultureInfo.InvariantCulture;
+    int tPf = int.Parse(args[2], invT);
+    double qx = double.Parse(args[4], invT), qz = double.Parse(args[5], invT);
+    var navT = AOBuddyNav.ComposeMission(args[0], MissionSweep.BuildLayout(args[0], tPf, args[3]));
+    var poolT = NavDungeon.Read(System.IO.Path.Combine(AOBuddyNav.FolderFor(args[0], navT.Layout.TemplatePlayfield), "rooms.json"));
+    var folderT = AOBuddyNav.FolderFor(args[0], navT.Layout.TemplatePlayfield);
+    List<List<float[]>> ReadBinT(string file)
+    {
+        var byRoom = new List<List<float[]>>();
+        foreach (var c in NavCollision.Read(System.IO.Path.Combine(folderT, file)).Chunks)
+        {
+            var idx = c.Instance & 0xFFFF;
+            while (byRoom.Count <= idx) byRoom.Add(null);
+            (byRoom[idx] ??= new List<float[]>()).Add(c.Verts);
+        }
+        return byRoom;
+    }
+
+    var colByRoom = ReadBinT("collision.bin");
+    var wallByRoom = ReadBinT("walls.bin");
+    NavDungeon.Room best = null;
+    var bd = double.MaxValue;
+    foreach (var mr in navT.Dungeon.Rooms)
+    {
+        if (mr?.Pos == null || mr.PoolIndex < 0) continue;
+        var dd = (mr.Pos[0] - qx) * (mr.Pos[0] - qx) + (mr.Pos[2] - qz) * (mr.Pos[2] - qz);
+        if (dd < bd) { bd = dd; best = mr; }
+    }
+
+    if (best == null) { Console.WriteLine("no placed room"); return 1; }
+    var prT = poolT.Rooms.First(r => r.Index == best.PoolIndex); // the POOL room's Pos: the reverse pivot (the blit lands on the PLACED Pos)
+    int turnsT = ((-best.Rot) % 4 + 4) % 4;
+    double dx = qx - best.Pos[0], dz = qz - best.Pos[2];
+    for (int t = 0; t < turnsT; t++) (dx, dz) = (dz, -dx); // inverse of the blit's (-z, x)
+    double px = prT.Pos[0] + dx, pz = prT.Pos[2] + dz;
+    Console.WriteLine($"placed ({qx:0.0},{qz:0.0}) -> room {best.Index} pool {best.PoolIndex} '{best.PoolName}' rot {best.Rot} -> pool frame ({px:0.00},{pz:0.00})");
+    var tris = new List<float[]>();
+    if (best.PoolIndex < colByRoom.Count && colByRoom[best.PoolIndex] != null) tris.AddRange(colByRoom[best.PoolIndex]);
+    if (best.PoolIndex < wallByRoom.Count && wallByRoom[best.PoolIndex] != null) tris.AddRange(wallByRoom[best.PoolIndex]);
+    Console.WriteLine($"room {best.PoolIndex}: {tris.Count} triangle array(s)");
+    void ScanT(bool alongX)
+    {
+        var strip = new char[36];
+        var info = new string[36];
+        for (var s = 0; s < 36; s++)
+        {
+            var off = -3.5 + s * 0.2;
+            var sx = px + (alongX ? off : 0);
+            var sz = pz + (alongX ? 0 : off);
+            var tall = 0;
+            var flat = 0;
+            var maxExt = 0.0;
+            var yTop = double.NaN;
+            foreach (var v in tris)
+            {
+                for (int o = 0; o + 8 < v.Length; o += 9)
+                {
+                    var mnx = Math.Min(v[o], Math.Min(v[o + 3], v[o + 6]));
+                    var mxx = Math.Max(v[o], Math.Max(v[o + 3], v[o + 6]));
+                    var mnz = Math.Min(v[o + 2], Math.Min(v[o + 5], v[o + 8]));
+                    var mxz = Math.Max(v[o + 2], Math.Max(v[o + 5], v[o + 8]));
+                    if (sx < mnx || sx > mxx || sz < mnz || sz > mxz) continue;
+                    var ext = Math.Max(v[o + 1], Math.Max(v[o + 4], v[o + 7])) - Math.Min(v[o + 1], Math.Min(v[o + 4], v[o + 7]));
+                    if (ext > maxExt) { maxExt = ext; yTop = Math.Max(v[o + 1], Math.Max(v[o + 4], v[o + 7])); }
+                    if (ext >= 1.5) tall++; else flat++;
+                }
+            }
+
+            strip[s] = tall > 0 ? '#' : flat > 0 ? '-' : '.';
+            info[s] = maxExt > 0 ? $"{maxExt:0.0}@{yTop:0.0}" : "";
+        }
+
+        Console.WriteLine($"  {(alongX ? "x" : "z")} {(alongX ? px : pz) - 3.5,7:0.0}: {new string(strip)}   max extent per sample: {string.Join(" ", info.Where(i => i != "").Take(6))}");
+    }
+
+    ScanT(true);
+    ScanT(false);
+    return 0;
+}
+
 if (args.Length > 4 && args[1] == "trail")
 {
     // gridprobe <pluginDir> trail <poolPf> <layout.txt> <trailfile> - replay a captured walk

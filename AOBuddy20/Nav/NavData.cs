@@ -543,6 +543,13 @@ public sealed class AOBuddyNav
     }
 
     /// <summary>Compose the placed rooms from a decoded layout and the pool's rooms.json.</summary>
+    /// <summary>A bare mission-style nav over a hand-composed dungeon (the viewers and audits):
+    /// the server-door chain and the grid blit run on it exactly as on a composed mission.</summary>
+    public static AOBuddyNav ForDungeon(int pf, string name, NavDungeon d)
+    {
+        return new AOBuddyNav(pf, "mission", name, null, d, null);
+    }
+
     public static AOBuddyNav ComposeMission(string pluginDir, MissionLayout m)
     {
         var poolPath = Path.Combine(FolderFor(pluginDir, m.TemplatePlayfield), "rooms.json");
@@ -996,10 +1003,16 @@ public sealed class AOBuddyNav
             log.Add($"server door Room={sd.room} Adjoining={sd.adjoining} at ({sd.pos.X:0.0},{sd.pos.Z:0.0}).");
         }
 
-        // the walk, BFS order: a room hangs by its parent connection's first row - the parent
-        // side's where the connection carries both. Each room's move is independent (targets
-        // are absolute server points; only its own doorways move with it), so the order is
-        // for the log, not the maths.
+        // the walk, BFS order: a room hangs onto ITS PARENT'S OWN PLACED SOCKET (owner,
+        // 2026-10-11: "the coords would be from whichever room was placed first - adjust the
+        // later room so it fits exactly on top - and that goes for ALL rooms"). The anchor
+        // never moves, so its sockets are the ground truth; every child's target is the
+        // parent-side socket for this connection, in the parent's CURRENT (already snapped)
+        // frame - grandchildren therefore snap onto corrected parents, and the per-template
+        // socket bias can no longer accumulate into seams. The server row is demoted to the
+        // SELECTOR (which socket of the parent) and the sill-Y source; it no longer names the
+        // target point.
+        var hookOf = new Dictionary<int, Doorway>(); // per placed room: the socket it hung by, current frame
         foreach (var child in order)
         {
             if (!parentOf.TryGetValue(child, out var par))
@@ -1025,7 +1038,36 @@ public sealed class AOBuddyNav
                 ai = rows[0];
             }
 
-            var target = doors[ai].pos;
+            // the parent-side socket: the parent's doorway facing this connection's row point,
+            // nearest it - in the parent's current frame. It IS the target; the row only picks it.
+            Doorway parentSock = null;
+            var parBest = double.MaxValue;
+            {
+                var prow = doors[ai].pos;
+                var pfx = prow.X - d.Rooms[par].Pos[0];
+                var pfz = prow.Z - d.Rooms[par].Pos[2];
+                var pflen = Math.Sqrt(pfx * pfx + pfz * pfz);
+                foreach (var dw in placed[par])
+                {
+                    if (pflen > 0.5 && (dw.Nx * pfx + dw.Nz * pfz) / pflen < 0.0)
+                    {
+                        continue; // faces away from the connection
+                    }
+
+                    var dd = (dw.X - prow.X) * (dw.X - prow.X) + (dw.Z - prow.Z) * (dw.Z - prow.Z);
+                    if (dd < parBest)
+                    {
+                        parBest = dd;
+                        parentSock = dw;
+                    }
+                }
+            }
+
+            // the target: the parent's socket (the owner's first-placed rule); the server row
+            // only as the fallback when the parent's side has no facing socket (a decode gap)
+            var target = parentSock != null
+                ? new Vector3((float)parentSock.X, doors[ai].pos.Y, (float)parentSock.Z)
+                : doors[ai].pos;
             // the child's doorway for this connection. The row names the two rooms and the
             // door's world point - never WHICH socket of the room it stands in (the server's
             // generator decides that at build time; the template's adjoining is 0xFFFF in 1,851
@@ -1104,6 +1146,7 @@ public sealed class AOBuddyNav
             }
 
             var move = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            hookOf[child] = hook; // the socket this room hung by, current frame - later children snap onto it
             if (move > 0.05)
             {
                 worst = Math.Max(worst, move);
@@ -1789,6 +1832,7 @@ public sealed class NavDungeon
         [JsonProperty("polys")] public List<Poly> Polys;
         [JsonProperty("tile")] public int[][] Tile;
         [JsonProperty("height")] public int[][] Height;
+        [JsonProperty("height2")] public int[][] Height2;   // GNDA layer 2: the signed second surface (pits/water bottoms), where the tilemap carries one
         [JsonProperty("flags3")] public int[][] Flags3;
         [JsonIgnore] public int Floor; // mission rooms only: the floor as the server numbered it
         [JsonIgnore] public string PoolName = ""; // mission rooms only: the pool room's own name
@@ -1817,7 +1861,10 @@ public sealed class NavDungeon
         }
 
         int x1 = rm.Rect[0], z1 = rm.Rect[1], x2 = rm.Rect[2], z2 = rm.Rect[3];
-        int a = (int)Math.Floor((x1 + x2 + 1) / 2.0 + dx / Cell), b = (int)Math.Floor((z1 + z2 + 1) / 2.0 + dz / Cell);
+        // the EXCLUSIVE tile-grid convention (2026-10-11): the tile centres sit at
+        // (x1+x2)/2-tile offsets, verified by the mesh-vs-tile overhang symmetry - the +1
+        // inclusive reading shifted every room's tiles half a tile (+1 m), rotation-mapped
+        int a = (int)Math.Floor((x1 + x2) / 2.0 + dx / Cell), b = (int)Math.Floor((z1 + z2) / 2.0 + dz / Cell);
         col = a - x1;
         row = b - z1;
         return a >= x1 && a <= x2 && b >= z1 && b <= z2;

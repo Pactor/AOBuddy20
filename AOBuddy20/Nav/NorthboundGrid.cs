@@ -2,6 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using DotRecast.Core;
+using DotRecast.Core.Numerics;
+using DotRecast.Recast;
+using DotRecast.Recast.Geom;
 using Ionic.Zlib;
 
 namespace AOBuddy20.Nav;
@@ -21,7 +25,7 @@ namespace AOBuddy20.Nav;
 public sealed class NorthboundPool
 {
     public const string Magic = "NBGR"; // file signature
-    public const int Version = 10; // v10: the interval model - solid Y runs per cell (flat faces plane-range, steep faces full span), walkable = run top with BodyHigh open above; tile sheets join in the SAME frame (mesh-vs-tile offset verified +0.01 spread 0.00); portals restore the tile floor over the template's closed-door leaf // v9: the band test = solid overlap with a level's knee-to-head band (the step-side exemption removed: wall tops are sampled levels, every face would qualify as a climbable step) // v8: the band test applied after the tile stamp; v7: the steep-span band test (unbuilt door sockets seal); v6: the height layer's surface stamps over untiled water dips; v5: MissionStep surface cutoff; v4: portal mesh-level candidate lists; v3: OmniCell socket decode // bump when the binary layout OR the decode changes (Load refuses other versions)
+    public const int Version = 14; // v14: the OWN-COMPONENT mask - flood from the tiles across standable steps; a lattice cell is the room's when connected (the tile rects do not bound the real rooms: WildCave_Lesser8_5's entrance tube runs ~8 m past its rect, and the atlas spill sits behind walls, disconnected - rectangles cannot separate them, connectivity can; owner's room-5 seal) // v13: the levels come from RECAST (DotRecast), spans filtered by slope 60 / clearance 1.9 / climb 0.8; the tile quads UP-WOUND + mesh windings normalized // v12: the column clip; v11: diagonal intersection (reverted); v10: the interval model, tile sheets in the tile frame, the Tile==0 guard; v9: the band test; v6: water stamps; v5: MissionStep cutoff; v4: portal MeshLevels; v3: OmniCell sockets // bump when the binary layout OR the decode changes (Load refuses other versions)
 
     public float Cell = 0.2f; // lattice resolution: the 20 cm the whole design hangs on
     public int PoolPf; // the pool playfield the lattices were rasterized from
@@ -197,6 +201,23 @@ public sealed class NorthboundPool
                 }
             }
 
+            if (version >= 14)
+            {
+                var ownBytes = reader.ReadInt32();
+                r.Own = new bool[cells];
+                for (var b = 0; b < ownBytes; b++)
+                {
+                    var bits = reader.ReadByte(); // the own-component mask, LSB-first
+                    for (var bit = 0; bit < 8 && b * 8 + bit < cells; bit++)
+                    {
+                        if ((bits & (1 << bit)) != 0)
+                        {
+                            r.Own[b * 8 + bit] = true;
+                        }
+                    }
+                }
+            }
+
             r.Hug = reader.ReadBytes(cells);
             if (r.Hug.Length < cells)
             {
@@ -308,6 +329,22 @@ public sealed class NorthboundPool
                 writer.Write(bits);
             }
 
+            // the own-component mask as a bitmap (v14): the cells flood-connected to the tiles
+            writer.Write((cells + 7) / 8);
+            for (var cellIndex = 0; cellIndex < cells; cellIndex += 8)
+            {
+                byte bits = 0;
+                for (var bit = 0; bit < 8 && cellIndex + bit < cells; bit++)
+                {
+                    if (cellIndex + bit < r.Own.Length && r.Own[cellIndex + bit])
+                    {
+                        bits |= (byte)(1 << bit);
+                    }
+                }
+
+                writer.Write(bits);
+            }
+
             // the hug cost byte per cell
             for (var cellIndex = 0; cellIndex < cells; cellIndex++)
             {
@@ -361,6 +398,13 @@ public sealed class NorthboundRoom
     public List<float>[] MeshLevels = new List<float>[0];
     public bool[] Blocked = new bool[0]; // per cell: no passage even where a level exists (wall band, no headroom, erosion)
 
+    /// <summary>Per cell: the OWN-COMPONENT mask (v14) - the cells flood-connected to the
+    /// room's tiles across standable steps. The tile rects do not bound the real rooms (an
+    /// entrance tube can run metres past its rect) and the atlas spill sits behind walls,
+    /// disconnected: connectivity separates a room's own floor from the spill, rectangles
+    /// cannot. The blit admits levels for own cells; spill stays out.</summary>
+    public bool[] Own = new bool[0];
+
     /// <summary>Per-cell hug cost, 0-255: how close the cell sits to a wall/column/void
     /// (255 = on it). The blit turns it into the A*'s per-cell penalty, so routes naturally
     /// run the centres of rooms and hallways. Precalculated - zero runtime cost.</summary>
@@ -410,7 +454,7 @@ public static class NorthboundBuilder
     private const int MaxLevels = 8;
     private const float DoorAcross = 1.25f, DoorAlong = 3.5f; // as FloorGrid.StampDoorways
 
-    public static NorthboundRoom? Build(int roomIndex, NavDungeon.Room pr, List<float[]> collision, List<float[]> walls, List<AOBuddyNav.Doorway> doorways, NavDungeon pool)
+    public static NorthboundRoom? Build(int roomIndex, NavDungeon.Room pr, List<float[]> collision, List<float[]> walls, List<AOBuddyNav.Doorway> doorways, NavDungeon pool, bool recast = true, bool tilesInRecast = true)
     {
         // bounds over everything the room carries
         float minx = float.MaxValue, minz = float.MaxValue, maxx = float.MinValue, maxz = float.MinValue;
@@ -443,7 +487,7 @@ public static class NorthboundBuilder
         if (pr.Pos != null)
         {
             // the two far corners of the tile rect, in pool world: two 1-vertex "triangles" for Take
-            double mx = (pr.Rect[0] + pr.Rect[2] + 1) / 2.0, mz = (pr.Rect[1] + pr.Rect[3] + 1) / 2.0;
+            double mx = (pr.Rect[0] + pr.Rect[2]) / 2.0, mz = (pr.Rect[1] + pr.Rect[3]) / 2.0; // the EXCLUSIVE tile-grid convention (mesh-vs-tile overhang symmetry, 2026-10-11)
             Take(new[] { (float)(pr.Pos[0] + (pr.Rect[0] - mx) * pool.Cell), 0f,
                           (float)(pr.Pos[2] + (pr.Rect[1] - mz) * pool.Cell) });
             Take(new[] { (float)(pr.Pos[0] + (pr.Rect[2] + 1 - mx) * pool.Cell), 0f,
@@ -466,13 +510,12 @@ public static class NorthboundBuilder
         r.W = (int)Math.Ceiling((maxx - r.Ox) / cell) + 2;
         r.H = (int)Math.Ceiling((maxz - r.Oz) / cell) + 2;
         var runs = new List<(float y0, float y1)>[r.W * r.H]; // per cell: the solid Y intervals collected from every covering triangle
+        var tileQuads = new List<float[]>();            // the tile floor as flat triangles (the Recast producer's floor source)
         var levels = new List<float>[r.W * r.H];        // the walkable run tops per cell, ABSOLUTE - the mesh chunks sit in the tile frame (verified 2026-10-11: the mesh-vs-tile offset is +0.01 with spread 0.00 at every socket of every room in pools 341 and 351; the old "pool mesh datum" was rim sampling at the portals)
         var blocked = new bool[r.W * r.H];
         var tileH = new float[r.W * r.H];               // the tile height per lattice cell (the keep-open restore needs it)
         var tiled = new bool[r.W * r.H];                // the room's own tile footprint (the wall ring's inner edge)
         var portalCells = new HashSet<int>();           // doorway cells: exempt from the wall ring
-        var flatProbes = new (double, double)[] { (0.5, 0.5), (0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85) }; // the old Surface's five inner probes
-        var edgeProbes = new (double, double)[] { (0.5, 0.5), (0.5, 0.0), (0.5, 1.0), (0.0, 0.5), (1.0, 0.5) }; // centre + edge midpoints, for thin wall faces
 
         // THE INTERVAL MODEL (the owner's raycast proposal, 2026-10-11: "walk each x/z/y and
         // cast rays up/down and north/south/east/west - if we're inside the geometry, the
@@ -501,19 +544,17 @@ public static class NorthboundBuilder
                 // walkability itself
                 float ux = v[o + 3] - v[o], uy = v[o + 4] - v[o + 1], uz = v[o + 5] - v[o + 2];
                 float wx = v[o + 6] - v[o], wy = v[o + 7] - v[o + 1], wz = v[o + 8] - v[o + 2];
-                var ny = uz * wx - ux * wz;
                 var len = (float)Math.Sqrt(ux * ux + uy * uy + uz * uz) * (float)Math.Sqrt(wx * wx + wy * wy + wz * wz);
                 if (len < 1e-9f)
                 {
                     continue; // degenerate triangle (a zero-length edge)
                 }
 
-                var flat = ny / len >= WalkNy; // cave shell floors at 41-60 degrees stay flat; steeper goes to the span
-                var ymin = Math.Min(v[o + 1], Math.Min(v[o + 4], v[o + 7]));
-                var ymax = Math.Max(v[o + 1], Math.Max(v[o + 4], v[o + 7]));
+                // (the normal is no longer used for classification: the column clip below is
+                // exact for every orientation - floors, ramps, verticals, ceilings alike)
                 // the cell bounding box to visit. The LOW bound rides on vertex A alone, the
                 // HIGH bound on max(B, C): valid for the bins' vertex order, where A is the
-                // min corner. Too narrow would silently skip cells; too wide only wastes probes.
+                // min corner. Too narrow would silently skip cells; too wide only wastes clips.
                 int i0 = XCell(v[o]), i1 = Math.Max(XCell(v[o + 3]), XCell(v[o + 6]));
                 int j0 = ZCell(v[o + 2]), j1 = Math.Max(ZCell(v[o + 5]), ZCell(v[o + 8]));
                 for (int j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++) // clamped to the lattice
@@ -521,59 +562,31 @@ public static class NorthboundBuilder
                     for (int i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
                     {
                         double bx = r.Ox + i * cell, bz = r.Oz + j * cell; // the cell's MIN CORNER, pool world
-                        float y0, y1;
-                        var hit = false;
-                        if (flat)
-                        {
-                            // five probes well inside the cell (the Swiss-cheese rule from the
-                            // old Surface): the interval is the plane range over the probes
-                            // that hit - bounded by the true footprint, so no phantom sheets
-                            // extrapolate past a floor's edge
-                            y0 = float.MaxValue;
-                            y1 = float.MinValue;
-                            foreach (var (fx, fz) in flatProbes)
-                            {
-                                double px = bx + fx * cell, pz = bz + fz * cell;
-                                if (!InXZ(v, o, px, pz))
-                                {
-                                    continue;
-                                }
 
-                                var y = (float)PlaneY(v, o, px, pz); // the plane's height at that probe
-                                y0 = Math.Min(y0, y);
-                                y1 = Math.Max(y1, y);
-                                hit = true;
-                            }
-                        }
-                        else
-                        {
-                            // steep or vertical: the FULL span, on every cell the face actually
-                            // crosses. Centre + the four edge midpoints: a thin wall sliver
-                            // between two cell centres was the old Blocker's blind spot (its
-                            // centre-only InXZ missed it) - the false r1<->r18 connection of
-                            // dump 14678642 walked exactly through such a face.
-                            foreach (var (fx, fz) in edgeProbes)
-                            {
-                                double px = bx + fx * cell, pz = bz + fz * cell;
-                                if (!InXZ(v, o, px, pz))
-                                {
-                                    continue;
-                                }
-
-                                hit = true;
-                                break; // the span is the triangle's whole extent: one hit is enough
-                            }
-
-                            y0 = ymin;
-                            y1 = ymax;
-                        }
-
+                        // THE CONTRIBUTION IS THE TRIANGLE CLIPPED TO THE CELL'S VERTICAL
+                        // COLUMN (owner, 2026-10-11: "you have to do it at y levels -
+                        // flattening would add geometry from the ceiling, which also has
+                        // verticals"). The triangle is clipped against the four half-spaces
+                        // x>=bx, x<=bx+c, z>=bz, z<=bz+c (Sutherland-Hodgman, Y interpolated
+                        // along clipped edges); the survivor's Y range is the interval. This is
+                        // exact for every orientation at once:
+                        //   * a flat floor yields its true local sheet - nothing extrapolates
+                        //     past the footprint, nothing is missed between probe points;
+                        //   * a vertical wall (ZERO XZ area - no point test can see it) survives
+                        //     clipping where its line crosses the column, carrying its local
+                        //     height range - boundary-riding, strictly-interior and
+                        //     corner-clipping faces alike (the diagonal hitting-set rule this
+                        //     generalises: any chord of the square crosses a diagonal);
+                        //   * a tube-ceiling panel passing 8 m overhead clips to ITS height
+                        //     there - its span no longer flattens down onto the floor cell
+                        //     (the v10 attempt did exactly that and sealed every tube floor).
+                        var (yr, hit) = ClipColumn(v, o, bx, bz, cell);
                         if (!hit)
                         {
                             continue; // the triangle misses this cell entirely
                         }
 
-                        (runs[j * r.W + i] ??= new List<(float y0, float y1)>()).Add((y0, y1));
+                        (runs[j * r.W + i] ??= new List<(float y0, float y1)>()).Add((yr.y0, yr.y1));
                     }
                 }
             }
@@ -589,17 +602,27 @@ public static class NorthboundBuilder
             Contribute(v); // walls.bin joins the same column - a wall is just tall solid runs
         }
 
-        // THE TILE FLOOR as thin sheets in the same solid column: the heightfield is the room's
-        // floor where the mesh carries nothing at all (the Startroom's centre: not one mesh
-        // triangle, tiles say 5.8), and it merges with the mesh runs freely - ONE frame,
-        // verified (the probe found +0.01 with spread 0.00 at every socket of every room in
-        // pools 341 and 351; the old separate "pool mesh datum" was the portals sampling rim
+        // THE TILE FLOOR as corner-interpolated quads in the same solid column: the heightfield
+        // is the room's floor where the mesh carries nothing at all (the Startroom's centre:
+        // not one mesh triangle, tiles say 5.8), and it merges with the mesh runs freely - ONE
+        // frame, verified (the probe found +0.01 with spread 0.00 at every socket of every room
+        // in pools 341 and 351; the old separate "pool mesh datum" was the portals sampling rim
         // ledges as the floor, fixed by the MeshLevels candidate lists).
+        //
+        // CORNER INTERPOLATION (owner, 2026-10-11: "the tiles will be quads"): the rendered
+        // floor is a (w+1)x(h+1) VERTEX grid, not flat 2 m plates - each tile is a quad whose
+        // four corners take the mean of the adjacent tiles' heights, so a step between
+        // neighbouring tiles becomes a slope the width of the shared corner instead of a cliff.
         if (pr.Tile != null && pr.Height != null && pr.Rect != null && pr.Pos != null)
         {
             int x1 = pr.Rect[0], z1 = pr.Rect[1];
-            double mx = (pr.Rect[0] + pr.Rect[2] + 1) / 2.0, mz = (pr.Rect[1] + pr.Rect[3] + 1) / 2.0; // the tile grid's centre
-            for (int tr = 0; tr < pr.Tile.Length; tr++)
+            int rows = pr.Tile.Length, cols = pr.Tile.Max(t => t?.Length ?? 0);
+            double mx = (pr.Rect[0] + pr.Rect[2]) / 2.0, mz = (pr.Rect[1] + pr.Rect[3]) / 2.0; // the EXCLUSIVE tile-grid convention (mesh-vs-tile overhang symmetry, 2026-10-11) // the tile grid's centre
+
+            // pass 1: the tile heights (with the sentinel guard), NaN where no tile
+            var thG = new float[rows + 2, cols + 2];
+            var okG = new bool[rows + 2, cols + 2];
+            for (int tr = 0; tr < rows; tr++)
             {
                 var trow = pr.Tile[tr];
                 if (trow == null)
@@ -610,18 +633,88 @@ public static class NorthboundBuilder
                 for (int tc = 0; tc < trow.Length; tc++)
                 {
                     var hrow = pr.Height[tr];
-                    if (hrow == null || tc >= hrow.Length)
+                    // Tile == 0 is NO TILE: the void and the wall band inside the rect. The
+                    // sheet pass must skip it exactly like the old stamp did - stamping the
+                    // zeros laid phantom floor over every void and across every room seam
+                    // (owner, 2026-10-11: "everything inside the room rectangle is walkable").
+                    if (trow[tc] == 0 || hrow == null || tc >= hrow.Length)
                     {
-                        continue; // no height for it
+                        continue; // no tile, or no height for it
                     }
 
-                    // the tile centre in pool world, and its absolute surface/floor height
+                    var th = (float)(pr.Pos[1] + (hrow[tc] - pr.HeightBase) * pool.HeightScale);
+                    // GARBAGE HEIGHT SENTINELS: some heightfield entries are not floors -
+                    // h far outside any plausible relief decodes to th tens of kilometres up
+                    // (pool 341: th ~104,804 on sentinel tiles), and a phantom sheet up there
+                    // turns every wall column into a walkable "sky" level in Recast. The
+                    // room's real floors live within ~30 m of Pos[1] (the recorded walks span
+                    // floors 0..-2 at most); anything further is data noise, not floor.
+                    if (Math.Abs(th - pr.Pos[1]) > 30f)
+                    {
+                        continue;
+                    }
+
+                    thG[tr + 1, tc + 1] = th;
+                    okG[tr + 1, tc + 1] = true;
+                }
+            }
+
+            // pass 2: the corner grid - vertex (i,j) = the mean of the adjacent tiles' heights
+            var cG = new float[rows + 1, cols + 1];
+            for (var jj = 0; jj <= rows; jj++)
+            {
+                for (var ii = 0; ii <= cols; ii++)
+                {
+                    float sum = 0;
+                    var n = 0;
+                    for (var dj = 0; dj <= 1; dj++)
+                    {
+                        for (var di = 0; di <= 1; di++)
+                        {
+                            if (okG[jj + dj, ii + di])
+                            {
+                                sum += thG[jj + dj, ii + di];
+                                n++;
+                            }
+                        }
+                    }
+
+                    cG[jj, ii] = n > 0 ? sum / n : float.NaN;
+                }
+            }
+
+            // pass 3: per tile, the quad over its four corners (up-wound: Recast's
+            // MarkWalkableTriangles uses the SIGNED normal - the (0,0)->(1,0)->(1,1) order is
+            // down-facing and its spans came out NULL-area, wiping the tile floor from every
+            // Recast lattice - owner, 2026-10-11: "not one cell is on the mission floor level")
+            for (int tr = 0; tr < rows; tr++)
+            {
+                var trow = pr.Tile[tr];
+                if (trow == null)
+                {
+                    continue;
+                }
+
+                for (int tc = 0; tc < trow.Length; tc++)
+                {
+                    if (trow[tc] == 0 || !okG[tr + 1, tc + 1])
+                    {
+                        continue; // no tile
+                    }
+
+                    var th = thG[tr + 1, tc + 1]; // the tile's own flat height: the sill/band reference
                     double wxp = pr.Pos[0] + (x1 + tc - mx) * pool.Cell;
                     double wzp = pr.Pos[2] + (z1 + tr - mz) * pool.Cell;
-                    var th = (float)(pr.Pos[1] + (hrow[tc] - pr.HeightBase) * pool.HeightScale);
                     // the tile (pool.Cell metres square) covers these lattice sub-cells
                     int i0 = XCell((float)(wxp - pool.Cell / 2)), i1 = XCell((float)(wxp + pool.Cell / 2));
                     int j0 = ZCell((float)(wzp - pool.Cell / 2)), j1 = ZCell((float)(wzp + pool.Cell / 2));
+
+                    var y00 = cG[tr, tc];
+                    var y10 = cG[tr, tc + 1];
+                    var y11 = cG[tr + 1, tc + 1];
+                    var y01 = cG[tr + 1, tc];
+                    var lo = Math.Min(Math.Min(y00, y10), Math.Min(y11, y01));
+                    var hi2 = Math.Max(Math.Max(y00, y10), Math.Max(y11, y01));
 
                     for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
                     {
@@ -630,12 +723,42 @@ public static class NorthboundBuilder
                             var idx = j * r.W + i;
                             tiled[idx] = true; // the room's own tile: the wall ring's inner edge
                             tileH[idx] = th; // the keep-open restore reads it back
-                            (runs[idx] ??= new List<(float y0, float y1)>()).Add((th - 0.05f, th + 0.05f)); // the sheet
+                            (runs[idx] ??= new List<(float y0, float y1)>()).Add((lo - 0.05f, hi2 + 0.05f)); // the sloped sheet's range
                         }
                     }
+
+                    var hh = (float)(pool.Cell / 2);
+                    tileQuads.Add(new[]
+                    {
+                        (float)(wxp - hh), y00, (float)(wzp - hh),
+                        (float)(wxp - hh), y01, (float)(wzp + hh),
+                        (float)(wxp + hh), y11, (float)(wzp + hh),
+                    });
+                    tileQuads.Add(new[]
+                    {
+                        (float)(wxp - hh), y00, (float)(wzp - hh),
+                        (float)(wxp + hh), y11, (float)(wzp + hh),
+                        (float)(wxp + hh), y10, (float)(wzp - hh),
+                    });
                 }
             }
         }
+
+        if (recast)
+        {
+            // THE RECAST PRODUCER (owner, 2026-10-11: "why don't we use Recast?"): the full
+            // triangle set - collision, walls, the tile sheets - voxelizeed at 0.2 m, spans
+            // merged by the MissionStep climb, filtered by the 60-degree slope (the extractor's
+            // own WalkNy) and the 1.9 m agent clearance. A standable level = a compact span
+            // whose area survived the filters; its top is the level. Verticals need no special
+            // handling (voxelization marks their columns), ceilings stay ceilings (their spans
+            // carry their own heights), and nothing of the geometry is dropped by any bar.
+            var (lvR, blR) = RecastLevels(r.W, r.H, r.Ox, r.Oz, collision, walls, tilesInRecast ? tileQuads : new List<float[]>());
+            levels = lvR;
+            blocked = blR;
+        }
+        else
+        {
 
         // MERGE the intervals per cell and read the walkable levels off the run stack: a
         // walkable level is the TOP of a solid run that has at least BodyHigh of open space
@@ -697,6 +820,81 @@ public static class NorthboundBuilder
         {
             blocked[c] = levels[c] == null;
         }
+        }
+
+        // THE OWN COMPONENT (owner, 2026-10-11): the tile rects do not bound the real rooms -
+        // WildCave_Lesser8_5's entrance tube runs ~8 m past its rect, and the atlas spill sits
+        // behind other rooms' walls. Rectangles cannot separate a room's own floor from the
+        // spill; connectivity can: flood from the tiles across standable steps (any level pair
+        // within the walk's 0.8 m climb). The component is the room; the blit admits levels for
+        // own cells (plus the rect band and the portals) and drops the rest as spill.
+        const float stepLimit = 0.8f;
+        var own = new bool[r.W * r.H];
+        {
+            var q = new Queue<int>();
+            for (var c = 0; c < r.W * r.H; c++)
+            {
+                if (tiled[c] && levels[c] is { Count: > 0 })
+                {
+                    own[c] = true;
+                    q.Enqueue(c);
+                }
+            }
+
+            while (q.Count > 0)
+            {
+                var c = q.Dequeue();
+                var ci = c % r.W;
+                var cj = c / r.W;
+                for (var dj = -1; dj <= 1; dj++)
+                {
+                    for (var di = -1; di <= 1; di++)
+                    {
+                        if (di == 0 && dj == 0)
+                        {
+                            continue;
+                        }
+
+                        var ni = ci + di;
+                        var nj = cj + dj;
+                        if (ni < 0 || nj < 0 || ni >= r.W || nj >= r.H)
+                        {
+                            continue;
+                        }
+
+                        var n = nj * r.W + ni;
+                        if (own[n] || levels[n] == null)
+                        {
+                            continue;
+                        }
+
+                        var steppable = false;
+                        foreach (var a in levels[c])
+                        {
+                            foreach (var b in levels[n])
+                            {
+                                if (Math.Abs(a - b) <= stepLimit)
+                                {
+                                    steppable = true;
+                                    break;
+                                }
+                            }
+
+                            if (steppable)
+                            {
+                                break;
+                            }
+                        }
+
+                        if (steppable)
+                        {
+                            own[n] = true;
+                            q.Enqueue(n);
+                        }
+                    }
+                }
+            }
+        }
 
         // portals last: the door's keep-open box, cleared and levelled (doors are walkable by
         // default - a locked door is runtime state, not nav data)
@@ -711,6 +909,21 @@ public static class NorthboundBuilder
                 double az = Math.Abs(dw.Nz) > 0.5 ? DoorAlong : DoorAcross;
                 int i0 = XCell((float)(dw.X - ax)), i1 = XCell((float)(dw.X + ax));
                 int j0 = ZCell((float)(dw.Z - az)), j1 = ZCell((float)(dw.Z + az));
+                // the box's sill: the lowest tile floor among its tiled cells - the level the
+                // server's door sits at in this frame. The untiled threshold cells (the seam
+                // strip between the two rooms) restore to it as well.
+                var sill = float.NaN;
+                for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
+                {
+                    for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
+                    {
+                        if (tiled[j * r.W + i] && (float.IsNaN(sill) || tileH[j * r.W + i] < sill))
+                        {
+                            sill = tileH[j * r.W + i];
+                        }
+                    }
+                }
+
                 for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
                 {
                     for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
@@ -721,12 +934,13 @@ public static class NorthboundBuilder
                         // THE CLOSED-DOOR LEAF: in the template the door sits IN the passage (the
                         // server opens it at runtime), so the leaf's solid run merges with the
                         // sill sheet and the run top names the leaf top, not the floor. Restore
-                        // the tile floor - the level the bot actually crosses at. Untiled
-                        // threshold strips get theirs at blit (the threshold fold + the void
-                        // sill stamp over keep-open cells).
-                        if (tiled[j * r.W + i])
+                        // the crossing level: the tile floor on tiled cells, the box sill on the
+                        // untiled threshold strip (whose leaf geometry the column clip now
+                        // catches exactly - the 5-point probes used to miss it and let the sill
+                        // survive by luck).
+                        var th = tiled[j * r.W + i] ? tileH[j * r.W + i] : sill;
+                        if (!float.IsNaN(th))
                         {
-                            var th = tileH[j * r.W + i];
                             if (l == null)
                             {
                                 l = levels[j * r.W + i] = new List<float> { th };
@@ -846,6 +1060,7 @@ public static class NorthboundBuilder
         r.Levels = levels;
         r.MeshLevels = new List<float>[r.W * r.H]; // single frame since the interval model: every level is absolute in Levels; the array stays for the file format and the blit's vestigial mesh path
         r.Blocked = blocked;
+        r.Own = own;
         r.Hug = hug;
         return r;
 
@@ -854,32 +1069,281 @@ public static class NorthboundBuilder
         int ZCell(float z) => (int)Math.Floor((z - r.Oz) / cell);
     }
 
-    // Is (px, pz) inside the triangle's XZ projection? Three signed edge cross products: inside
-    // when they do not disagree (sign-wise). Degenerate/edge-on points count as inside.
-    private static bool InXZ(float[] v, int o, double px, double pz)
+    // THE RECAST PRODUCER: voxelize the room's full triangle set at the lattice resolution and
+    // read the standable levels off the compact heightfield. Parameters are today's rules in
+    // Recast's vocabulary: slope 60 degrees (the extractor's WalkNy), agent clearance 1.9 m
+    // (BodyHigh), climb 0.8 m (MissionStep), no radius erosion (the 20 cm cell is the margin,
+    // the world grid's step rules and hug do the rest). A standable level = a compact span
+    // whose area survived the filters; its top is the level. Verticals are free (voxelization
+    // marks their columns), ceilings stay at their own heights (no flattening), and nothing is
+    // lost to any height bar - the caller may pass the FULL RDB mesh.
+    private static (List<float>[] levels, bool[] blocked) RecastLevels(int w, int h, float ox, float oz,
+        List<float[]> collision, List<float[]> walls, List<float[]> tileQuads)
     {
-        double ax = v[o], az = v[o + 2], bx = v[o + 3], bz = v[o + 5], cx = v[o + 6], cz = v[o + 8];
-        double d1 = (px - bx) * (az - bz) - (ax - bx) * (pz - bz); // cross of edge AB with P-B
-        double d2 = (px - cx) * (bz - cz) - (bx - cx) * (pz - cz); // edge BC with P-C
-        double d3 = (px - ax) * (cz - az) - (cx - ax) * (pz - az); // edge CA with P-A
-        var neg = d1 < 0 || d2 < 0 || d3 < 0;
-        var pos = d1 > 0 || d2 > 0 || d3 > 0;
-        return !(neg && pos); // mixed signs = outside
-    }
-
-    // The triangle plane's height at (px, pz), from the plane equation through vertex a with the
-    // cross-product normal. Flat-normal degeneracy returns a's height.
-    private static double PlaneY(float[] v, int o, double px, double pz)
-    {
-        double ax = v[o], ay = v[o + 1], az = v[o + 2];
-        double ux = v[o + 3] - ax, uy = v[o + 4] - ay, uz = v[o + 5] - az;
-        double wx = v[o + 6] - ax, wy = v[o + 7] - ay, wz = v[o + 8] - az;
-        double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
-        if (Math.Abs(ny) < 1e-9)
+        // THE TILE BAND (checked per triangle at collection, so verts/faces stay paired): the
+        // room's tile floors are the server's own truth about where the room lives vertically.
+        // The raw vertex range is not - the atlas spill carries outliers (a y~104,860 structure
+        // in pool 341) that blow the heightfield's Y bounds up, and every vertical wall then
+        // rasterizes as a solid column to the "sky" whose top reads as a walkable level (the
+        // first Recast sweep: levels 104859 x 14808). Triangles fully outside the band are
+        // atlas garbage and never enter the build.
+        var lo = float.MinValue;
+        var hi = float.MaxValue;
+        if (tileQuads.Count > 0)
         {
-            return ay; // a vertical plane: no height to interpolate
+            var tmin = float.MaxValue;
+            var tmax = float.MinValue;
+            foreach (var q in tileQuads)
+            {
+                tmin = Math.Min(tmin, q[1]);
+                tmax = Math.Max(tmax, q[1]);
+            }
+
+            lo = tmin - 15f; // the dips reach ~10 m down
+            hi = tmax + 40f; // the pools' tallest interior structures reach ~27 m up
         }
 
-        return ay - (nx * (px - ax) + nz * (pz - az)) / ny; // solve n . (p - a) = 0 for y
+        var verts = new List<float>();
+        var faces = new List<int>();
+        void AddTri(float[] v)
+        {
+            if (lo != float.MinValue)
+            {
+                var inside = false;
+                for (var k = 1; k < 9; k += 3)
+                {
+                    if (v[k] >= lo && v[k] <= hi)
+                    {
+                        inside = true;
+                        break;
+                    }
+                }
+
+                if (!inside)
+                {
+                    return; // fully outside the tile band: atlas garbage, not this room
+                }
+            }
+
+            // DOWN-FACING TRIANGLES ARE EXCLUDED: the bins carry render-order triangles in both
+            // windings, and a down-wound face is a CEILING/underside - nothing a walker stands
+            // on. Feeding them (flipped up, an earlier attempt) made their undersides walkable
+            // area: the shell's underside carpeted every column under it, and the bogus levels
+            // punched holes into the tile-ramp spans under the shell (owner's room-5 seal).
+            // Their headroom role is minor at these ceiling heights; the up-facing geometry
+            // carries the room.
+            float ux = v[3] - v[0], uy = v[4] - v[1], uz = v[5] - v[2];
+            float wx = v[6] - v[0], wy = v[7] - v[1], wz = v[8] - v[2];
+            var ny = uz * wx - ux * wz;
+            if (ny < 0)
+            {
+                return; // a ceiling/underside: not standable, not wanted
+            }
+
+            var b = verts.Count / 3;
+            for (var k = 0; k < 9; k++)
+            {
+                verts.Add(v[k]);
+            }
+
+            faces.Add(b);
+            faces.Add(b + 1);
+            faces.Add(b + 2);
+        }
+
+        foreach (var arr in collision)
+        {
+            for (int o = 0; o + 8 < arr.Length; o += 9)
+            {
+                AddTri(arr.AsSpan(o).ToArray());
+            }
+        }
+
+        foreach (var arr in walls)
+        {
+            for (int o = 0; o + 8 < arr.Length; o += 9)
+            {
+                AddTri(arr.AsSpan(o).ToArray());
+            }
+        }
+
+        foreach (var q in tileQuads)
+        {
+            AddTri(q);
+        }
+
+        float ymin = float.MaxValue, ymax = float.MinValue;
+        for (var k = 1; k < verts.Count; k += 3)
+        {
+            ymin = Math.Min(ymin, verts[k]);
+            ymax = Math.Max(ymax, verts[k]);
+        }
+
+        // the heightfield's Y bounds come from the TILE BAND, never the raw vertex range: a
+        // wall triangle with one vertex at the floor and one at y=104,860 passes the per-
+        // triangle filter, and raw bounds would let its column rasterize to the "sky"
+        // (rasterization clamps spans into the bounds - a sky wall just ends at the ceiling).
+        var hfLo = lo != float.MinValue ? lo - 1f : ymin - 1f;
+        var hfHi = hi != float.MaxValue ? hi + 1f : ymax + 2f;
+
+        const float cs = 0.2f, chh = 0.1f;
+        var bmin = new RcVec3f(ox, hfLo, oz);
+        var bmax = new RcVec3f(ox + w * cs, hfHi, oz + h * cs);
+        var cfg = new RcConfig(false, 0, 0, 0, RcPartition.MONOTONE,
+            cs, chh,
+            agentMaxSlope: 60f, agentHeight: 1.9f, agentRadius: 0f, agentMaxClimb: 0.8f,
+            minRegionArea: 1f, mergeRegionArea: 1f,
+            edgeMaxLen: 12f, edgeMaxError: 1.3f, vertsPerPoly: 6,
+            detailSampleDist: 0f, detailSampleMaxError: 0f,
+            filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
+            walkableAreaMod: new RcAreaModification(RcRecast.RC_WALKABLE_AREA), buildMeshDetail: false);
+        var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
+        var result = new RcBuilder().Build(geom, new RcBuilderConfig(cfg, bmin, bmax), true);
+        var chf = result.CompactHeightfield ?? throw new InvalidOperationException("recast: no compact heightfield");
+
+        var levels = new List<float>[w * h];
+        var blocked = new bool[w * h];
+        for (var j = 0; j < Math.Min(h, chf.height); j++)
+        {
+            for (var i = 0; i < Math.Min(w, chf.width); i++)
+            {
+                var cell = chf.cells[i + chf.width * j];
+                List<float> lv = null;
+                for (var s = 0; s < cell.count; s++)
+                {
+                    var idx = cell.index + s;
+                    if (chf.areas[idx] == RcRecast.RC_NULL_AREA)
+                    {
+                        continue; // slope- or clearance-filtered: not standable
+                    }
+
+                    var span = chf.spans[idx];
+                    // DOTRECAST SPAN CONVENTION (the source, RcCompacts.BuildCompactHeightfield):
+                    // y = bot = the heightfield span's smax - the STANDABLE TOP; h = the open
+                    // clearance above, to the next span or RC_SPAN_MAX_HEIGHT when nothing is
+                    // above. (Classic Recast reads y as the bottom and h as the height - reading
+                    // DotRecast that way turned every open-sky span into a phantom level tens of
+                    // kilometres up.)
+                    var top = bmin.Y + span.y * chh;
+                    if (lv is { Count: > 0 } && top - lv[^1] <= 0.25f)
+                    {
+                        continue; // the same floor sampled twice
+                    }
+
+                    lv ??= new List<float>();
+                    lv.Add(top);
+                    if (lv.Count > MaxLevels)
+                    {
+                        lv.RemoveAt(0);
+                    }
+                }
+
+                levels[j * w + i] = lv;
+                blocked[j * w + i] = lv == null;
+            }
+        }
+
+        return (levels, blocked);
+    }
+
+    // THE COLUMN CLIP: intersect the triangle (v, o) with the cell's vertical column
+    // [bx,bx+c] x [bz,bz+c] (Sutherland-Hodgman over the four X/Z half-spaces, Y interpolated
+    // along clipped edges) and return its Y range there. Exact for every orientation: a flat
+    // floor yields its true local sheet; a vertical wall (zero XZ area - nothing point-based
+    // can see it) survives wherever its line crosses the column, boundary-riding or not (the
+    // hair of epsilon keeps the wall-on-tile-line case); a ceiling panel clips to ITS height
+    // over the cell instead of flattening its whole span onto the floor below (owner,
+    // 2026-10-11: "you have to do it at y levels"). The column is inflated by a hair so the
+    // boundary cases survive; hit=false when nothing survives.
+    private static ((float y0, float y1), bool hit) ClipColumn(float[] v, int o, double bx, double bz, double c)
+    {
+        const double e = 1e-9;
+        var cur = new[]
+        {
+            new[] { (double)v[o], (double)v[o + 1], (double)v[o + 2] },
+            new[] { (double)v[o + 3], (double)v[o + 4], (double)v[o + 5] },
+            new[] { (double)v[o + 6], (double)v[o + 7], (double)v[o + 8] },
+        };
+        var tmp = new double[7][];
+        var nxt = new double[7][];
+        for (var k = 0; k < 7; k++)
+        {
+            tmp[k] = new double[3];
+            nxt[k] = new double[3];
+        }
+
+        var n = 3;
+        n = ClipHalf(cur, tmp, n, 0, bx - e, bx + c + e);
+        n = ClipHalf(tmp, nxt, n, 2, bz - e, bz + c + e);
+        if (n == 0)
+        {
+            return ((0f, 0f), false);
+        }
+
+        n = ClipHalf(nxt, tmp, n, 0, bx - e, bx + c + e);
+        if (n == 0)
+        {
+            return ((0f, 0f), false);
+        }
+
+        n = ClipHalf(tmp, nxt, n, 2, bz - e, bz + c + e);
+        if (n == 0)
+        {
+            return ((0f, 0f), false);
+        }
+
+        float y0 = float.MaxValue, y1 = float.MinValue;
+        for (var k = 0; k < n; k++)
+        {
+            y0 = Math.Min(y0, (float)nxt[k][1]);
+            y1 = Math.Max(y1, (float)nxt[k][1]);
+        }
+
+        return ((y0, y1), true);
+    }
+
+    // One Sutherland-Hodgman pass: keep/clips the polygon src[0..n) against axis in [lo,hi]
+    // into dst; returns the new vertex count (at most n+1).
+    private static int ClipHalf(double[][] src, double[][] dst, int n, int axis, double lo, double hi)
+    {
+        const double e = 1e-9;
+        var m = 0;
+        for (var i = 0; i < n; i++)
+        {
+            var p = src[i];
+            var q = src[(i + 1) % n];
+            var pin = p[axis] >= lo && p[axis] <= hi;
+            var qin = q[axis] >= lo && q[axis] <= hi;
+            if (pin)
+            {
+                dst[m++] = p;
+                if (qin)
+                {
+                    continue;
+                }
+            }
+            else if (!qin)
+            {
+                continue; // both outside this half-strip: the edge contributes nothing
+            }
+
+            dst[m++] = LerpToPlane(p, q, axis, lo, hi); // the edge crosses a boundary: add the crossing
+        }
+
+        return m;
+    }
+
+    // The point on pq where it crosses the boundary plane lo or hi of the axis (whichever the
+    // edge actually passes).
+    private static double[] LerpToPlane(double[] p, double[] q, int axis, double lo, double hi)
+    {
+        var plane = p[axis] < lo || q[axis] < lo ? lo : hi;
+        var t = (plane - p[axis]) / (q[axis] - p[axis]);
+        return new[]
+        {
+            p[0] + t * (q[0] - p[0]),
+            p[1] + t * (q[1] - p[1]),
+            p[2] + t * (q[2] - p[2]),
+        };
     }
 }

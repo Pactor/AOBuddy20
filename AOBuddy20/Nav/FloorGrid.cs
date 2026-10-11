@@ -702,6 +702,7 @@ public sealed class FloorGrid : IWalkGrid
 
         var cellBlocked = new List<(int k, int count)>(); // world cells to block AFTER all rooms are in (which levels)
         var nbTileLevels = new Dictionary<int, List<double>>(); // per world cell: the TILE (heightfield) levels blitted into it - the datum fold below needs them
+        var firstBlitRoom = new Dictionary<int, int>(); // per world cell: the first room that wrote it - the later-room crop needs the order
 
         // THE RIGID ROOM (owner, 2026-10-10): every room's content moves as ONE body hung off
         // the server's doors - its tiles ride Pos (the pivot transform below) plus the chain's
@@ -867,14 +868,24 @@ public sealed class FloorGrid : IWalkGrid
                     // 14678642 room 10). Mesh levels exist only where the room's own chunks
                     // sampled flat-enough geometry, so the claim stays inside the room's
                     // own structures.
-                    // OWNERSHIP: the room's tiles claim, the portals claim, the room's own
-                    // sampled chunks claim - and the room's own TILE-LEVEL STAMPS claim (the
-                    // water surface stamped into untiled cells: the tile grid has no claim on
-                    // water by definition, and the old test dropped every stamped water cell
-                    // as atlas spill - dump 14678642 room 10, the deep-water crossing).
+                    // OWNERSHIP: the room's tiles claim, the portals claim, and the room's own
+                    // sampled chunks claim INSIDE THE TILE RECT (with a small overhang margin):
+                    // untiled cells inside the rect are the room's own water dips and arch
+                    // decks (the tile grid has no claim on water - dump 14678642 room 10).
+                    // Levels OUTSIDE the rect are ATLAS SPILL - the pool's neighbour content
+                    // continuing behind the walls in the template's own chunks - and must never
+                    // claim the cell: the spilled floor behind room 0's east wall let the bot
+                    // walk around the wall line (owner, 2026-10-11).
+                    var halfX = (pr.Rect[2] - pr.Rect[0] + 1) / 2.0 * pool.Cell + 1.0;
+                    var halfZ = (pr.Rect[3] - pr.Rect[1] + 1) / 2.0 * pool.Cell + 1.0;
+                    var inRect = Math.Abs(cx - pr.Pos[0]) <= halfX && Math.Abs(cz - pr.Pos[2]) <= halfZ;
+                    // the OWN COMPONENT (v14): cells flood-connected to the room's tiles across
+                    // standable steps - a room's entrance tube can run metres past its tile
+                    // rect, and connectivity (not the rectangle) separates it from the spill
+                    var isOwn = lat.Own is { Length: > 0 } && lat.Own[j * lat.W + i];
                     var owned = isPortal || !double.IsNaN(pool.FloorHeight(pr, cx, cz))
                                 || (ml is { Count: > 0 })
-                                || (levels is { Count: > 0 });
+                                || ((inRect || isOwn) && levels is { Count: > 0 });
                     if (!owned)
                     {
                         continue; // atlas spill: a cell neither the pool's tiles nor this room's
@@ -911,6 +922,36 @@ public sealed class FloorGrid : IWalkGrid
                         {
                             incoming.Add((float)(v + meshShift)); // pool mesh datum -> placed door level
                         }
+                    }
+
+                    // THE LATER-ROOM CROP (owner, 2026-10-11): the atlas tile rects are not
+                    // clipped at the room boundary, so a later-placed room's tiles land ON an
+                    // earlier room's plates - the double layer at room 5's door (20-30 cm apart,
+                    // StampHeadroom then blocks the lower and the door seals). The rule that
+                    // also set the socket snap: the FIRST-PLACED room is authoritative; a later
+                    // room CROPS it - the earlier room's plate levels within a step of the
+                    // incoming levels are removed, leaving one continuous floor. Beyond a step
+                    // (real two-storey overlaps) both stay.
+                    if (firstBlitRoom.TryGetValue(k, out var firstR) && firstR < mr.Index && _floors.TryGetValue(k, out var prevFl))
+                    {
+                        var keptPrev = prevFl.Where(o => !incoming.Any(iv => Math.Abs(iv - o) <= MissionStep)).ToArray();
+                        if (keptPrev.Length != prevFl.Length)
+                        {
+                            _floors[k] = keptPrev;
+                            if (nbTileLevels.TryGetValue(k, out var tlOld))
+                            {
+                                var tlKept = tlOld.Where(t => keptPrev.Any(o => Math.Abs(o - t) <= 0.005f)).ToList();
+                                if (tlKept.Count > 0)
+                                {
+                                    nbTileLevels[k] = tlKept;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!firstBlitRoom.ContainsKey(k))
+                    {
+                        firstBlitRoom[k] = mr.Index; // the first room to touch this cell
                     }
 
                     var fl = MergeInto(k, incoming, 0f);
@@ -989,6 +1030,40 @@ public sealed class FloorGrid : IWalkGrid
             }
         }
 
+        // THE TILE-TILE FOLD (owner, 2026-10-11, the room-5 seal): the atlas tile rects are not
+        // clipped at the room boundary - the game crops them when building, we don't - so a
+        // threshold cell can carry BOTH rooms' tile floor, heights differing by the rooms' own
+        // relief (20-30 cm at room 5's door in 14678642). The pair survives the merge and
+        // StampHeadroom blocks the lower - the transition level dies and the door seals. Two
+        // tile-stamped floors within a step of each other are the same plate measured twice:
+        // fold the lower into the higher.
+        foreach (var kv in nbTileLevels)
+        {
+            if (!_floors.TryGetValue(kv.Key, out var fl) || fl.Length < 2)
+            {
+                continue;
+            }
+
+            var kept = new List<float>(fl.Length);
+            for (var f = 0; f < fl.Length; f++)
+            {
+                // every level here came from the blit (the cell is in nbTileLevels); two
+                // consecutive levels within a step are the same plate measured twice
+                var closeToPrevious = f > 0 && fl[f] - fl[f - 1] <= MissionStep;
+                if (closeToPrevious)
+                {
+                    continue; // the lower of two close plates: folded into the higher
+                }
+
+                kept.Add(fl[f]);
+            }
+
+            if (kept.Count < fl.Length)
+            {
+                _floors[kv.Key] = kept.ToArray();
+            }
+        }
+
         // THE THRESHOLD FOLD: doorway flanks are untiled in BOTH rooms' data ("it belongs to
         // the wall"), so their cells carry only collision-sampled levels - the same floor at
         // two sampling heights (sill 5.0, tile-side 5.8). With no tile level to anchor the
@@ -1046,14 +1121,16 @@ public sealed class FloorGrid : IWalkGrid
         }
 
         // THE SILL RULE (owner, 2026-10-10): a keep-open box's floor IS the server's door
-        // level. Two failures it cures: (1) a keep-open cell NO blit gave a floor - the
+        // level. Three failures it cures: (1) a keep-open cell NO blit gave a floor - the
         // threshold strip between rooms is untiled in both and the collision may not reach
         // (dump 14678613: room 17 sealed behind a void seam across its door line) - it gets
-        // the sill stamped in. (2) a PURE THRESHOLD cell whose every level sits within 1.0 m
-        // of the sill - the same floor measured twice (the sill 5.0 and the tile-side 5.85;
-        // MissionStep 0.8 refused the 0.85 climb and sealed the doorway to one walking
-        // direction) - it walks flat at the sill. Cells with levels beyond the sill +1.0 keep
-        // their stack: that is real interior relief, not noise.
+        // the sill stamped in. (2) a threshold cell carrying the same floor twice (the sill
+        // 5.0 and the tile-side 5.85; MissionStep 0.8 refused the 0.85 climb). (3) since the
+        // column clip (v12) the CLOSED DOOR LEAF's runs are caught exactly in the box - its
+        // top made the old all-Near check give up and leave the leaf in the stack, and the
+        // leaf's triangles then killed every A* edge into the doorway. The box walks flat at
+        // the sill: keep the sill plus real relief within 1.0 m of it, drop everything above
+        // (the door opens at runtime - its geometry is not a wall).
         foreach (var kv in _doorwaySill)
         {
             var sill = (float)kv.Value;
@@ -1068,23 +1145,25 @@ public sealed class FloorGrid : IWalkGrid
                 continue;
             }
 
-            var allNear = true;
+            var kept = new List<float> { sill };
             foreach (var v in fl)
             {
-                if (Math.Abs(v - sill) > 1.0f)
+                var d = Math.Abs(v - sill);
+                if (d <= 1.0f && d > 0.005f)
                 {
-                    allNear = false;
-                    break;
+                    kept.Add(v); // real low relief beside the sill (the tube's 0.35 step)
                 }
             }
 
-            if (allNear && (fl.Length > 1 || Math.Abs(fl[0] - sill) > 0.005f))
+            kept.Sort();
+            if (kept.Count != fl.Length || Math.Abs(kept[^1] - fl[^1]) > 0.005f)
             {
-                _floors[kv.Key] = new[] { sill };
-                for (var f = 0; f < 8; f++)
-                {
-                    _blocked.Remove(kv.Key * 8 + f); // doorway cells are fully open by rule
-                }
+                _floors[kv.Key] = kept.ToArray();
+            }
+
+            for (var f = 0; f < 8; f++)
+            {
+                _blocked.Remove(kv.Key * 8 + f); // doorway cells are fully open by rule
             }
         }
 
