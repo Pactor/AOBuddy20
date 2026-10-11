@@ -150,6 +150,7 @@ public static class NanoLibrary
                 var nano = new NanoProfile
                 {
                     NanoId = id, Stats = stats, Actions = actions, Modifies = events.Modifies,
+                    ModifyTargets = events.ModifyTargets,
                     Casts = events.Casts, TargetsOthers = events.TargetsOthers,
                     SummonPets = events.SummonPets
                         .Select(sp => new NanoSummonPet { Args = sp.Args, Requirements = sp.Reqs })
@@ -236,6 +237,10 @@ public static class NanoLibrary
     private sealed class EventData
     {
         public readonly Dictionary<int, int> Modifies = new();
+        // Per-modified-stat effect target: User(1)/Wearer(2)=self, Target(3)=others. The accurate
+        // self/other signal for THAT skill (the formula-wide TargetsOthers can be tripped by an
+        // unrelated side-effect function, e.g. a self skill buff that also disables statel collision).
+        public readonly Dictionary<int, int> ModifyTargets = new();
         public readonly List<(int Func, int NanoId)> Casts = new();
         public readonly List<(IReadOnlyList<int> Args, IReadOnlyList<NanoRequirement> Reqs)> SummonPets = new();
         public bool TargetsOthers;
@@ -309,6 +314,7 @@ public static class NanoLibrary
                 if (functionType == FuncModifyStat && ints.Count >= 2)
                 {
                     capture.Modifies[ints[0]] = capture.Modifies.TryGetValue(ints[0], out var had) ? had + ints[1] : ints[1];
+                    capture.ModifyTargets[ints[0]] = target; // self (User/Wearer) vs others (Target) for THIS skill
                 }
 
                 // ANY direct landing effect (ModifyStat/Hit/Skill/absorb/...) that targets the cast TARGET

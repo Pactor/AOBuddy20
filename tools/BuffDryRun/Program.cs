@@ -97,6 +97,23 @@ internal static class Program
                 {
                     WriteJson(ctx, AllGates());
                 }
+                else if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url.AbsolutePath == "/solve")
+                {
+                    using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+                    WriteJson(ctx, Solve(reader.ReadToEnd()));
+                }
+                else if (ctx.Request.Url.AbsolutePath == "/item")
+                {
+                    WriteJson(ctx, DumpItems(ctx.Request.QueryString["ids"]));
+                }
+                else if (ctx.Request.Url.AbsolutePath == "/modifiers")
+                {
+                    WriteJson(ctx, ModifiersFor(ctx.Request.QueryString["stat"], ctx.Request.QueryString["prof"]));
+                }
+                else if (ctx.Request.Url.AbsolutePath == "/nanoinfo")
+                {
+                    WriteJson(ctx, NanoInfo(ctx.Request.QueryString["id"]));
+                }
                 else
                 {
                     WriteHtml(ctx, Page);
@@ -135,7 +152,7 @@ internal static class Program
 
     // ---- the plan ----------------------------------------------------------------------
 
-    private sealed class CharReq
+    private class CharReq
     {
         public string name { get; set; } = "Testdummy";
         public string profession { get; set; } = "Engineer";
@@ -287,6 +304,327 @@ internal static class Program
     };
 
     private static string StatName(int id) => Enum.IsDefined(typeof(Stat), id) ? ((Stat)id).ToString() : id.ToString();
+
+    // ---- the solver: target + character -> best buffs in NCU, and if short, +NCU to reach it ----
+    private sealed class SolveReq : CharReq { public int itemId { get; set; } public int nanoId { get; set; } }
+
+    private sealed class Cand
+    {
+        public int Id; public string Name; public int Strain; public int Ncu; public string Deliver;
+        public Dictionary<int, int> Adds = new(); // required-stat -> +amount
+        public int Total(IEnumerable<int> stats) => stats.Sum(s => Adds.TryGetValue(s, out var v) ? v : 0);
+    }
+
+    private static string Solve(string body)
+    {
+        var req = JsonSerializer.Deserialize<SolveReq>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new SolveReq();
+        var me = BuildStub(req, out var profId);
+
+        // 1) target required skills + fixed gates (equip item uses action 8; a nano uses UseCriteria).
+        var required = new Dictionary<int, int>();
+        int reqProf = 0, reqLevel = 0, reqSpec = 0, reqExp = 0;
+        string targetName = "?";
+        if (req.itemId > 0)
+        {
+            if (!ItemData.Find<DummyItem>(req.itemId, out var it) || it == null)
+                return JsonSerializer.Serialize(new { error = $"item {req.itemId} not in ItemData" });
+            targetName = it.Name;
+            // action 8 = wield/equip criteria
+            if (it.Criteria != null)
+                foreach (var kv in it.Criteria)
+                    if ((int)kv.Key == 8)
+                        foreach (var c in kv.Value)
+                            Classify(c.Param1, c.Operator, c.Param2, required, ref reqProf, ref reqLevel, ref reqSpec, ref reqExp);
+        }
+        else if (req.nanoId > 0)
+        {
+            if (!ItemData.Find<NanoItem>(req.nanoId, out var nano) || nano == null)
+                return JsonSerializer.Serialize(new { error = $"nano {req.nanoId} not in ItemData" });
+            targetName = nano.Name;
+            if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+                foreach (var c in use)
+                    Classify(c.Param1, c.Operator, c.Param2, required, ref reqProf, ref reqLevel, ref reqSpec, ref reqExp);
+        }
+        else return JsonSerializer.Serialize(new { error = "pass itemId or nanoId" });
+
+        // 2) fixed gates - no buff can satisfy these.
+        var blockers = new List<string>();
+        if (reqProf != 0 && reqProf != profId) blockers.Add($"profession {reqProf} required (you are {profId})");
+        if (reqLevel != 0 && req.level < reqLevel) blockers.Add($"level {reqLevel} required");
+        if (reqSpec != 0 && (me.GetStat(Stat.Specialization) & reqSpec) == 0) blockers.Add($"specialization flag {reqSpec} required");
+        if (reqExp != 0 && (me.GetStat(Stat.Expansion) & reqExp) == 0) blockers.Add($"expansion flag {reqExp} required");
+
+        // 3) per-skill gaps
+        var gaps = new Dictionary<int, (int req, int cur, int gap)>();
+        foreach (var kv in required)
+        {
+            int cur = me.GetStat((Stat)kv.Key);
+            if (kv.Value - cur > 0) gaps[kv.Key] = (kv.Value, cur, kv.Value - cur);
+        }
+
+        var reqSkillsOut = required.ToDictionary(kv => StatName(kv.Key), kv => new { required = kv.Value, current = me.GetStat((Stat)kv.Key) });
+
+        if (blockers.Count > 0)
+            return JsonSerializer.Serialize(new { target = targetName, verdict = "BLOCKED (fixed gate - no buff helps)", blockers, requiredSkills = reqSkillsOut }, Pretty);
+        if (gaps.Count == 0)
+            return JsonSerializer.Serialize(new { target = targetName, verdict = "EQUIPPABLE NOW - no buffs needed", requiredSkills = reqSkillsOut }, Pretty);
+
+        // 4) gather receivable candidate buffs for the gapped skills, best per strain.
+        var gapStats = gaps.Keys.ToHashSet();
+        var byStrain = new Dictionary<int, Cand>();
+        foreach (var id in ItemData.AllNanoIds())
+        {
+            if (!ItemData.Find<NanoItem>(id, out var nano) || nano == null) continue;
+            if (nano.Modifiers == null || !nano.Modifiers.TryGetValue(SpellListType.Use, out var mods)) continue;
+            if (mods.Values.Any(v => v < 0)) continue; // has a debuff component - not a clean buff
+            // Must be DIRECTLY CASTABLE: a real buff has a cast gate. The landed effect-nanos
+            // (a wrangle's result, a Trader transfer's result like Divest 275032) carry the +skill
+            // but have NO use-criteria - you never request those directly; you request the castable
+            // nano whose gate names who can cast it. Exclude gateless effect-nanos.
+            bool hasGate = nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var uc) && uc.Count > 0;
+            if (!hasGate) continue;
+
+            var adds = new Dictionary<int, int>();
+            foreach (var s in gapStats) if (mods.TryGetValue((Stat)s, out var a) && a > 0) adds[s] = a;
+            if (adds.Count == 0) continue;
+
+            // The buff's OWN spec/expansion gate must be met by the character (a froob can't get an SL buff).
+            int bSpec = 0, bExp = 0, bProfTmp = 0, bLvlTmp = 0; var bSkills = new Dictionary<int, int>();
+            if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var bc))
+                foreach (var cc in bc) Classify(cc.Param1, cc.Operator, cc.Param2, bSkills, ref bProfTmp, ref bLvlTmp, ref bSpec, ref bExp);
+            if (bSpec != 0 && (me.GetStat(Stat.Specialization) & bSpec) == 0) continue;
+            if (bExp != 0 && (me.GetStat(Stat.Expansion) & bExp) == 0) continue;
+
+            var np = NanoLibrary.Find(id);
+            int strain = np?.Stat(75) ?? 0;
+            int ownerProf = ReadReqsProf(nano);
+            // deliver: others if the buff for a gapped skill lands on the cast target; else self.
+            bool others = adds.Keys.Any(s => np?.ModifyTargetsOthers(s) ?? false);
+            bool canSelf = (ownerProf == 0 || ownerProf == profId) && SafeMeets(nano, me);
+            if (!others && !canSelf) continue; // not receivable: foreign self-only buff
+            string deliver = others ? "others" : "self";
+
+            var c = new Cand { Id = id, Name = nano.Name, Strain = strain, Ncu = nano.NCU, Deliver = deliver, Adds = adds };
+            if (!byStrain.TryGetValue(strain, out var best) || c.Total(gapStats) > best.Total(gapStats)
+                || (c.Total(gapStats) == best.Total(gapStats) && c.Ncu < best.Ncu))
+                byStrain[strain] = c;
+        }
+
+        // cap to the most efficient strains to keep the subset search small
+        var cands = byStrain.Values.Where(c => c.Total(gapStats) > 0)
+            .OrderByDescending(c => c.Total(gapStats) / (double)Math.Max(1, c.Ncu)).Take(16).ToList();
+
+        int budget = Math.Max(0, req.maxNcu);
+        var bestInBudget = BestSubset(cands, gapStats, gaps, budget, requireAll: false);
+        var goalSet = BestSubset(cands, gapStats, gaps, int.MaxValue, requireAll: true);
+
+        object Report(List<Cand> set) => set == null ? null : new
+        {
+            ncu = set.Sum(c => c.Ncu),
+            buffs = set.OrderByDescending(c => c.Total(gapStats)).Select(c => new { c.Name, c.Strain, c.Deliver, c.Ncu, adds = c.Adds.ToDictionary(kv => StatName(kv.Key), kv => kv.Value) }),
+            resultingSkills = gaps.Keys.ToDictionary(StatName, s => gaps[s].cur + set.Sum(c => c.Adds.TryGetValue(s, out var v) ? v : 0))
+        };
+
+        bool goalFits = goalSet != null;
+        bool nowWithBudget = bestInBudget != null && gaps.Keys.All(s => gaps[s].cur + bestInBudget.Sum(c => c.Adds.TryGetValue(s, out var v) ? v : 0) >= gaps[s].req);
+
+        string verdict;
+        object nextStep = null;
+        if (nowWithBudget) verdict = "EQUIPPABLE WITH BUFFS (within current NCU)";
+        else if (goalFits)
+        {
+            int need = goalSet.Sum(c => c.Ncu) - budget;
+            verdict = "SHORT ON NCU - buffs exist but need more NCU to hold them";
+            nextStep = new
+            {
+                extraNcuNeeded = Math.Max(0, need),
+                thenHold = Report(goalSet),
+                cheapRoute = $"buy ~{(int)Math.Ceiling(Math.Max(0, need) / 3.0)} low-QL NCU memory chip(s) (+3 NCU each) from a shop - bounded by free belt slots",
+                lastResort = "implants/gear add the skill directly (no NCU) but cost credits - compare price to the NCU chips"
+            };
+        }
+        else verdict = "NOT REACHABLE with available buffs - needs implants/gear or higher level";
+
+        return JsonSerializer.Serialize(new
+        {
+            target = targetName,
+            requiredSkills = reqSkillsOut,
+            gaps = gaps.ToDictionary(kv => StatName(kv.Key), kv => new { kv.Value.req, kv.Value.cur, kv.Value.gap }),
+            currentNcuBudget = budget,
+            verdict,
+            bestWithinNcu = Report(bestInBudget),
+            nextStep
+        }, Pretty);
+    }
+
+    private static readonly JsonSerializerOptions Pretty = new() { WriteIndented = true };
+
+    // exact small knapsack over best-per-strain candidates (<=16): min-NCU subset, optionally requiring all gaps closed.
+    private static List<Cand> BestSubset(List<Cand> cands, HashSet<int> stats, Dictionary<int, (int req, int cur, int gap)> gaps, int budget, bool requireAll)
+    {
+        List<Cand> best = null; int bestScore = -1, bestNcu = int.MaxValue;
+        int n = cands.Count;
+        for (int mask = 0; mask < (1 << n); mask++)
+        {
+            int ncu = 0; var set = new List<Cand>();
+            for (int i = 0; i < n; i++) if ((mask & (1 << i)) != 0) { ncu += cands[i].Ncu; set.Add(cands[i]); }
+            if (ncu > budget) continue;
+            bool all = stats.All(s => gaps[s].cur + set.Sum(c => c.Adds.TryGetValue(s, out var v) ? v : 0) >= gaps[s].req);
+            if (requireAll)
+            {
+                if (all && ncu < bestNcu) { bestNcu = ncu; best = set; }
+            }
+            else
+            {
+                int closed = stats.Count(s => gaps[s].cur + set.Sum(c => c.Adds.TryGetValue(s, out var v) ? v : 0) >= gaps[s].req);
+                int score = closed * 100000 + stats.Sum(s => Math.Min(gaps[s].req, gaps[s].cur + set.Sum(c => c.Adds.TryGetValue(s, out var v) ? v : 0)));
+                if (score > bestScore || (score == bestScore && ncu < bestNcu)) { bestScore = score; bestNcu = ncu; best = set; }
+            }
+        }
+        return best;
+    }
+
+    private static void Classify(int stat, UseCriteriaOperator op, int val, Dictionary<int, int> skills, ref int prof, ref int level, ref int spec, ref int exp)
+    {
+        if (op == UseCriteriaOperator.And || op == UseCriteriaOperator.Or) return;
+        int plus1 = op == UseCriteriaOperator.GreaterThan ? val + 1 : val;
+        switch ((Stat)stat)
+        {
+            case Stat.Profession: prof = val; break;
+            case Stat.Level: level = Math.Max(level, plus1); break;
+            case Stat.Specialization: spec |= val; break;
+            case Stat.Expansion: exp |= val; break;
+            case Stat.Cash: break; // money, not a buffable skill
+            default:
+                if (op == UseCriteriaOperator.GreaterThan) skills[stat] = Math.Max(skills.TryGetValue(stat, out var h) ? h : 0, plus1);
+                break;
+        }
+    }
+
+    private static int ReadReqsProf(NanoItem nano)
+    {
+        if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+            foreach (var c in use) if (c.Param1 == (int)Stat.Profession && c.Operator == UseCriteriaOperator.EqualTo) return c.Param2;
+        return 0;
+    }
+
+    private static bool SafeMeets(NanoItem nano, LocalPlayer me)
+    {
+        try { return nano.MeetsUseReqs(me, true, false); } catch { return false; } // ignoreTargetReqs: self-cast check
+    }
+
+    // ---- probe: FULL nano record from nanos.ocp vs ItemData's criteria (extraction audit) --
+    private static string NanoInfo(string idStr)
+    {
+        if (!int.TryParse(idStr, out var id)) return JsonSerializer.Serialize(new { error = "bad id" });
+
+        // nanos.ocp (NanoLibrary)
+        var np = NanoLibrary.Find(id);
+        object pack = null;
+        if (np != null)
+        {
+            pack = new
+            {
+                np.TargetsOthers,
+                stats = np.Stats.ToDictionary(kv => StatName(kv.Key), kv => kv.Value),
+                actions = np.Actions.Select(a => new
+                {
+                    actionType = a.ActionType,
+                    requirements = a.Requirements.Select(r => $"{StatName(r.Stat)} op{r.Operator} {r.Value} (target {r.Target})").ToList()
+                }).ToList(),
+                modifies = np.Modifies.ToDictionary(kv => StatName(kv.Key), kv => kv.Value),
+                modifyTargets = np.ModifyTargets.ToDictionary(kv => StatName(kv.Key), kv => kv.Value + " (" + (kv.Value == 3 ? "others" : "self") + ")")
+            };
+        }
+
+        // ItemData.bin (what the other probes read)
+        object itemData = null;
+        if (ItemData.Find<NanoItem>(id, out var nano) && nano != null)
+        {
+            var crits = new List<string>();
+            if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
+                foreach (var c in use) crits.Add($"{StatName(c.Param1)} {OpSym(c.Operator)} {c.Param2}");
+            itemData = new { name = nano.Name, nano.NCU, useCriteria = crits };
+        }
+
+        return JsonSerializer.Serialize(new { id, fromNanosOcp = pack, fromItemDataBin = itemData },
+            new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    // ---- probe: every nano that BUFFS a given skill, optionally gated to a profession ---
+    private static string ModifiersFor(string statName, string profStr)
+    {
+        if (!Enum.TryParse<Stat>(statName, true, out var stat))
+            return JsonSerializer.Serialize(new { error = $"unknown stat '{statName}'" });
+        int prof = int.TryParse(profStr, out var p) ? p : 0;
+
+        var rows = new List<object>();
+        foreach (var id in ItemData.AllNanoIds())
+        {
+            if (!ItemData.Find<NanoItem>(id, out var nano) || nano == null) continue;
+            if (nano.Modifiers == null || !nano.Modifiers.TryGetValue(SpellListType.Use, out var mods)) continue;
+            if (!mods.TryGetValue(stat, out var amount) || amount == 0) continue;
+
+            var (_, _, allReqs, profReq, levelReq, _, _) = ReadReqs(nano);
+            // keep: generic (no prof gate) or gated to the requested profession
+            if (prof != 0 && profReq != 0 && profReq != prof) continue;
+
+            var np = NanoLibrary.Find(id);
+            int strain = np?.Stat(75) ?? 0;        // NanoStrain = the stacking/overwrite group
+            int stackingOrder = np?.Stat(551) ?? 0; // who supersedes within the strain
+            // self/other for THIS skill: the target of its own ModifyStat effect (not the formula-wide flag)
+            bool skillOnOthers = np?.ModifyTargetsOthers((int)stat) ?? false;
+            string cast = skillOnOthers ? "others" : "self";
+            string owner = profReq != 0 ? ProfName(profReq) : "(no lock)";
+
+            rows.Add(new { id, name = nano.Name, amount, ncu = nano.NCU, strain, stackingOrder,
+                profession = owner, profId = profReq, cast,
+                nanoLine = nano.NanoLine.ToString(), levelReq, reqs = allReqs });
+        }
+        return JsonSerializer.Serialize(new
+        {
+            stat = stat.ToString(), prof,
+            count = rows.Count,
+            buffs = rows.OrderByDescending(r => (int)r.GetType().GetProperty("amount").GetValue(r))
+        }, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    // ---- probe: what does ItemData actually hold for a non-nano item (weapon/gear)? -----
+    private static string DumpItems(string idsCsv)
+    {
+        var ids = (idsCsv ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => int.TryParse(s.Trim(), out var v) ? v : 0).Where(v => v > 0).ToList();
+
+        var outp = new List<object>();
+        foreach (var id in ids)
+        {
+            ItemBase it = null;
+            try
+            {
+                if (ItemData.Find<DummyItem>(id, out var dummy) && dummy != null) it = dummy;
+                else if (ItemData.Find<NanoItem>(id, out var nano) && nano != null) it = nano;
+            }
+            catch (Exception ex)
+            {
+                outp.Add(new { id, found = false, error = ex.GetType().Name });
+                continue;
+            }
+
+            if (it == null) { outp.Add(new { id, found = false }); continue; }
+
+            var actions = new List<object>();
+            if (it.Criteria != null)
+                foreach (var kv in it.Criteria)
+                    actions.Add(new
+                    {
+                        action = kv.Key.ToString(),
+                        criteria = kv.Value.Select(c => $"{StatName(c.Param1)} {OpSym(c.Operator)} {c.Param2}").ToList()
+                    });
+
+            outp.Add(new { id, name = it.Name, type = it.GetType().Name, actions });
+        }
+        return JsonSerializer.Serialize(outp, new JsonSerializerOptions { WriteIndented = true });
+    }
 
     // ---- dump EVERY nano's real UseCriteria (cast gates) from ItemData ------------------
     private static string AllGates()
@@ -449,8 +787,21 @@ internal static class Program
 
         // The "wants" are treated as learned so the planner considers them castable.
         me.SpellList = req.wants?.ToArray() ?? Array.Empty<int>();
+
+        // Register the stub as the local player so ReqChecker (which evaluates Self/User criteria
+        // against DynelManager.LocalPlayer) tests OUR character, not a null live player. Without this
+        // every self-cast requirement (profession/PM/SI) fails and self-buffs never become candidates.
+        LocalPlayerProxy.LocalPlayer = me;
         return me;
     }
+
+    private static string ProfName(int id) => id switch
+    {
+        1 => "Soldier", 2 => "MartialArtist", 3 => "Engineer", 4 => "Fixer", 5 => "Agent",
+        6 => "Adventurer", 7 => "Trader", 8 => "Bureaucrat", 9 => "Enforcer", 10 => "Doctor",
+        11 => "NanoTechnician", 12 => "Metaphysicist", 14 => "Keeper", 15 => "Shade",
+        _ => $"prof{id}"
+    };
 
     private static int ProfessionId(string name) => (name ?? "").Trim().ToLowerInvariant() switch
     {

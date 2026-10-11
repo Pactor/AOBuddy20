@@ -377,6 +377,16 @@ public sealed class MovementController : IPacketConsumer
     private volatile int _ownerInstance;
     private long _ownerLastMoveAt = long.MinValue;
 
+    // OWNER "moving" = his reported spot actually ADVANCED (AOBuddy10's displacement rule), not merely
+    // that a movement packet arrived. A standing owner still streams stop/position packets; counting
+    // those as motion skipped the login settle and snap-armed the mirror, bolting the bot on login
+    // (owner 2026-10-11; the 10-vs-20 diff). Measured on the update thread in PublishSnapshot.
+    private const float OwnerMoveSampleMeters = 0.5f; // must advance at least this to count as moving
+    private const long OwnerMoveGraceMs = 600;        // stays "moving" this long after, to ride his sparse stream
+    private const float OwnerTeleportMeters = 50f;    // a jump past this is a zone/SetPos, not a step
+    private Vector3? _ownerSamplePos;                 // last spot we measured his displacement from
+    private long _ownerMovingUntilMs;                 // he counts as moving until this (TickCount64)
+
     /// <summary>Follow mode: when on and no goal wants the body, stack on the owner and mirror him.</summary>
     public void SetFollow(bool on)
     {
@@ -916,7 +926,37 @@ public sealed class MovementController : IPacketConsumer
         }
 
         _ownerInstance = owner?.Identity.Instance ?? 0;
-        var moveFresh = owner != null && Environment.TickCount64 - Interlocked.Read(ref _ownerLastMoveAt) < 600;
+
+        // Displacement-based "moving" (see the fields above): mark him moving only when his spot really
+        // advanced, with a short grace to ride the gaps between his packets. A fresh login simply seeds
+        // the reference (no prev sample -> not moving), so a standing owner never reads as moving.
+        if (owner != null)
+        {
+            var op = owner.Transform.Position;
+            if (_ownerSamplePos is Vector3 prev)
+            {
+                var moved = Vector3.Distance(op, prev);
+                if (moved >= OwnerMoveSampleMeters && moved < OwnerTeleportMeters)
+                {
+                    _ownerMovingUntilMs = Environment.TickCount64 + OwnerMoveGraceMs;
+                    _ownerSamplePos = op;
+                }
+                else if (moved >= OwnerTeleportMeters)
+                {
+                    _ownerSamplePos = op; // a zone/teleport jump: re-anchor, do not count it as a step
+                }
+            }
+            else
+            {
+                _ownerSamplePos = op;
+            }
+        }
+        else
+        {
+            _ownerSamplePos = null;
+        }
+
+        var moveFresh = owner != null && Environment.TickCount64 < _ownerMovingUntilMs;
 
         _snap = new Snapshot
         {
