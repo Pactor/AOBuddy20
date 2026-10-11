@@ -58,6 +58,10 @@ public sealed class FollowController
     private const float OwnerConfirmRadius = 5f;
     private const double OwnerConfirmSeconds = 1.0;
 
+    // When the owner vanishes and we are within this of his last-seen spot, we were stacked on him -
+    // hold, never run-to-spot-and-push (that bolt-then-resnap is the "warp" the owner forbids).
+    private const float StackedHoldMeters = 3f;
+
     private readonly ILogger _logger;
     private readonly Movement _movement;
     private readonly int _sendIntervalMs;
@@ -272,6 +276,19 @@ public sealed class FollowController
             if (!_sawHim)
             {
                 _movement.Hold(me, _sendIntervalMs); // never saw him this playfield: nothing to chase
+                return;
+            }
+
+            // Were we STACKED on him when he vanished? If we're already on his last-seen spot, the
+            // dynel just blinked (stream gap) or he crossed from the very spot we share - either way,
+            // running to a spot we're already on and then lunging 10 m along a stale heading is a bolt,
+            // and the mirror snapping us back when he reappears is the "warp" the owner forbids (owner,
+            // 2026-10-11: we walk or run, never warp; a stacked, still bot must never bolt). Hold; the
+            // approach re-stacks him (walking any small gap) on return, and a real zone from a shared
+            // spot zones us with him. Only PUSH when we were actually TRAILING him (a real gap behind).
+            if (Movement.Flat(pos, _lastSeenPos) <= StackedHoldMeters)
+            {
+                _movement.Hold(me, _sendIntervalMs);
                 return;
             }
 
