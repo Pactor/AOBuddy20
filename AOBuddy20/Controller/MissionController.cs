@@ -889,16 +889,19 @@ public sealed class MissionController : IPacketConsumer
                 continue; // another building's, or already open
             }
 
-            if (_pickLost.TryGetValue(DoorKey(d.room, d.adjoining, d.pos), out var lostAt) && now - lostAt < 180)
+            if ((d.flags & 0x40) != 0)
             {
-                continue;
-            }
+                if (_pickLost.TryGetValue(DoorKey(d.room, d.adjoining, d.pos), out var lostAt) && now - lostAt < 180)
+                {
+                    continue;
+                }
 
-            var dist = Movement.Flat(goal, d.pos);
-            if (dist <= 8f && dist < bestDist)
-            {
-                bestDist = dist;
-                best = (d.room, d.adjoining, d.pos, d.flags);
+                var dist = Movement.Flat(goal, d.pos);
+                if (dist <= 8f && dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = (d.room, d.adjoining, d.pos, d.flags);
+                }
             }
         }
 
@@ -2591,7 +2594,7 @@ public sealed class MissionController : IPacketConsumer
             var shut = ShutDoorNear(_goalPos);
             if (shut.HasValue)
             {
-                StartPicking(shut.Value);
+                StartPicking(shut.Value);   
                 return;
             }
 
