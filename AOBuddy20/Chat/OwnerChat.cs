@@ -22,6 +22,8 @@ using AOSharp.Clientless.Chat;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
 using Serilog.Events;
+using SmokeLounge.AOtomation.Messaging.GameData;
+using SmokeLounge.AOtomation.Messaging.Messages.N3Messages;
 
 namespace AOBuddy20.Chat;
 
@@ -36,6 +38,8 @@ namespace AOBuddy20.Chat;
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class OwnerChat
 {
+    private System.Threading.Timer? _logoutTimer; // the clean camp-logout watch (exits when the server closes the link)
+
     private readonly AccountInfo _config;
     private readonly BrainBank _brains;
     private readonly Dictionary<string, Action<Action<string>, string[]>> _commands;
@@ -596,6 +600,40 @@ public sealed class OwnerChat
             _movement.SetFollow(false); // a sit ends follow: standing up later must not resume it (owner, 2026-10-01)
             _movement.SitNow();
             reply("Sitting down - follow off, goals cleared. 'come' or 'goto' stands me up.");
+        };
+
+        // CLEAN CAMP-LOGOUT (ported from AOBuddy10, wire-proven over 50 retail captures): the retail
+        // client logs out by SITTING, sending CharacterAction Logout (0x78), then holding the link until
+        // the SERVER closes it (~30 s) - and that saves the character's position. Killing the process
+        // does NOT log out cleanly. Stop the bot with this command so it camps and the next login places
+        // it where it camped. Nothing else runs while we wait; we exit when the server drops us or 45 s.
+        t["logout"] = t["camp"] = (reply, p) =>
+        {
+            if (_logoutTimer != null)
+            {
+                reply("Already logging out.");
+                return;
+            }
+
+            _movement.SetFollow(false);
+            _movement.SitNow();
+            Client.Send(new CharacterActionMessage { Action = CharacterActionType.Logout });
+            reply("Camping out (sat + logout sent); I'll drop when the server closes the link (~30 s).");
+            _logger.LogInformation("LOGOUT: sat and sent CharacterAction Logout; waiting for the server to close the link (~30 s).");
+
+            var sentAt = DateTime.UtcNow;
+            _logoutTimer = new System.Threading.Timer(_ =>
+            {
+                if (Client.InPlay && (DateTime.UtcNow - sentAt).TotalSeconds <= 45)
+                {
+                    return; // still logged in and inside the window: keep waiting for the server to close it
+                }
+
+                _logger.LogInformation(Client.InPlay
+                    ? "LOGOUT: link still open after 45 s - exiting anyway."
+                    : "LOGOUT: the server closed the link - exiting.");
+                Environment.Exit(0);
+            }, null, 500, 500);
         };
 
         return t;
