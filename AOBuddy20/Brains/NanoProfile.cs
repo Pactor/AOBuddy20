@@ -38,6 +38,13 @@ public sealed class NanoProfile
     /// </summary>
     public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>();
 
+    /// <summary>Per-modified-stat effect target: User(1)/Wearer(2)=self, Target(3)=others. The accurate
+    /// self/other signal for a specific skill, unlike the formula-wide TargetsOthers.</summary>
+    public IReadOnlyDictionary<int, int> ModifyTargets = new Dictionary<int, int>();
+
+    /// <summary>True when the buff to <paramref name="statId"/> lands on the cast TARGET (others); false = self.</summary>
+    public bool ModifyTargetsOthers(int statId) => ModifyTargets.TryGetValue(statId, out var t) && t == 3;
+
     /// <summary>
     ///     The nanos this formula CASTS, as (FunctionType, TargetNanoId) pairs: CastNano (53051, on SELF),
     ///     TeamCastNano (53066, on the whole TEAM) and AreaCastNano (53087, on others in an area). A Fixer
