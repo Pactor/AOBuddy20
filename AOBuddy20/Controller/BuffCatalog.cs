@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: BuffCatalog.cs
 //
-// Last modified: 2026-10-05
+// Last modified: 2026-10-11
 // Created:       2026-10-05
 //
 // Long live OmniCell and AOBuddy
@@ -57,8 +57,10 @@ public sealed class BuffCatalog
         // never a parsed effect string. 0 / empty when the nano is not in the pack.
         public int Strain; // NanoStrain (stat 75): the OVERWRITE group - two buffs sharing a strain do
         // not stack (the higher StackingOrder wins), so the planner never requests two of one strain.
-        public int ReceiverLevel; // minimum RECEIVER level (target=18 Level> gate, +1); 0 = no level gate.
-        public bool NeedsSl; // receiver must own Shadowlands (target=18 Expansion 389 BitAnd 2).
+        public int ReceiverLevel; // minimum RECEIVER level - the landed nano's TARGET-tagged Level> gate
+                                  // (+1), or its own use-req gate when team-delivered; 0 = no level gate.
+        public bool NeedsSl; // receiver must own Shadowlands (TARGET-tagged Expansion 389 BitAnd 2, or the
+                             // landed nano's use req when team-delivered).
         public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>(); // stat -> flat amount added.
 
         // Self-vs-others DELIVERY (AOBuddy10's method, from the pack's cast-function type / effect target,
@@ -263,13 +265,30 @@ public sealed class BuffCatalog
 
     // Fold the pack-verified facts (strain / receiver gate / flat modifiers) onto each entry, so every
     // equation reads from nanos.ocp rather than a parsed effect string. The receiver gate is read per
-    // nano by <see cref="ReceiverGate" /> (it auto-detects whose level a Level> gate belongs to).
+    // nano by <see cref="ReceiverGate" /> (the landed nano's TARGET-tagged criteria; team-delivered
+    // landed nanos fold in their own use gate).
     private void Enrich()
     {
         if (!NanoLibrary.Loaded)
         {
             _logger.LogWarning("BUFFS: nano pack not loaded - catalog keeps JSON data only (no strain/gate/modifiers).");
             return;
+        }
+
+        // One reverse pass over the pack: every landed nano any TeamCastNano wrapper delivers. Those
+        // are the TEAM buffs - for them the landed nano's own use requirements are checked against
+        // each receiving member (see the team-delivery fold below), which is where a receiver level
+        // gate can hide on a SELF-tagged use requirement.
+        var teamLanded = new HashSet<int>();
+        foreach (var n in NanoLibrary.Nanos)
+        {
+            foreach (var c in n.Casts)
+            {
+                if (c.Func == FuncTeamCastNano)
+                {
+                    teamLanded.Add(c.NanoId);
+                }
+            }
         }
 
         foreach (var b in _buffs)
@@ -320,6 +339,15 @@ public sealed class BuffCatalog
 
             b.Strain = rep.Stat(75);
             b.RepNanoId = rep.NanoId;
+
+            // THE RECEIVER'S GATE (owner, 2026-10-11: "use requirements are for the caster, not the
+            // target"): a use requirement gates whoever CASTS the nano - Dr Hack 'n Quack (162734)
+            // demands a Fixer with MatMet 779 / BioMet 589 / TS 589 / Level 195, all tagged SELF, and
+            // the MP receiver clears none of it while still taking the buff. What gates a RECEIVER
+            // are the landed nano's TARGET-tagged criteria: the Level> gate (Improved Essence of
+            // Behemoth: TARGET Level > 214) and the expansion flag (Composite Mochams: TARGET
+            // Expansion BitAnd 2 = "Target has Expansion Shadowlands"). Beyond these and the free
+            // NCU there is no receiver restriction.
             var (level, sl) = ReceiverGate(rep);
             b.ReceiverLevel = level;
             b.NeedsSl = sl;
@@ -336,28 +364,26 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = casts.Any(c => c.Func == FuncTeamCastNano);
                 b.CanCastOnOthers = casts.Any(c => c.Func is FuncTeamCastNano or FuncAreaCastNano);
-                b.ReceiverLevel = casts.Max(x =>
-                {
-                    var nn = NanoLibrary.Find(x.NanoId);
-                    if (nn != null)
-                    {
-                        return ReceiverGate(nn).Level;
-                    }
-
-                    throw new KeyNotFoundException($"Nano {x.NanoId} not found???");
-                });
             }
             else
             {
                 b.NeedsTeam = false;
                 b.CanCastOnOthers = rep.TargetsOthers;
-                // ReceiverLevel stays the REP nano's own receiver gate (set above from
-                // ReceiverGate(rep)): a single-target buff's target-level restriction lives on
-                // the landed nano (Improved Essence of Behemoth: Level > 215 - wiping it made
-                // the comfort fill request buffs that can never land on a low-level receiver).
             }
 
-            
+            // TEAM DELIVERY (owner, 2026-10-11): when the landed nano reaches the receiver through a
+            // TeamCastNano wrapper, the game checks the LANDED nano's own use requirements against
+            // each member - on a team cast WE are the user of the nano that lands on us. That is the
+            // Fixer NCU compressor ladder: every tier carries one SELF-tagged "Level > 24 / 49 / 74 /
+            // 124 / 134 / 164 / 184 / 214" use gate (nanos 162994..275044) and that gate - the tier
+            // for target level 25/50/75/125/135/165/185/215 - is what we must meet. The wrapper's own
+            // gates stay out of it: they gate the bot, not us.
+            if (teamLanded.Contains(rep.NanoId))
+            {
+                var (useLevel, useSl) = UseGate(rep);
+                b.ReceiverLevel = Math.Max(b.ReceiverLevel, useLevel);
+                b.NeedsSl |= useSl;
+            }
         }
     }
 
@@ -426,14 +452,48 @@ public sealed class BuffCatalog
         return Math.Max(0, max - used);
     }
 
-    // The RECEIVER's own gate on a nano - the Level we must meet and the Shadowlands flag. A buff cast on
-    // others carries BOTH gates on the landed nano's criteria: the CASTER's level (the higher one - the bot
-    // must be that high to cast it) and the RECEIVER's "to use/affect" level (the lower one - what WE must
-    // be). The pack puts both on the Self slot with identical child operators, so they cannot be told apart
-    // structurally; the receiver requirement is the LOWEST Level> gate (owner, 2026-10-05: Composite Mochams
-    // 8h reads caster 219 / receiver 209 this way). A single-gate nano (every NCU tier, most buffs) is
-    // unchanged. SL is read from any Expansion BitAnd-2 gate (caster or target).
+    // The RECEIVER's gate on a nano - the Level we must meet and the Shadowlands flag. NOT the use
+    // requirements: those gate the CASTER (owner, 2026-10-11 - the old min-of-all-gates read made an
+    // MP receiver fail Dr Hack 'n Quack on its Fixer-caster Level 195). The receiver's restrictions
+    // are the landed nano's TARGET-tagged (18) criteria: "Level > N" (AO's GreaterThan is inclusive
+    // of N+1) and the expansion flag "Expansion 389 BitAnd 2" (Shadowlands). Several TARGET level
+    // gates all must pass, so the binding one is the HIGHEST.
     private static (int Level, bool NeedsSl) ReceiverGate(NanoProfile nano)
+    {
+        var level = 0;
+        var needsSl = false;
+        foreach (var act in nano.Actions)
+        {
+            if (act.ActionType != ActionToUse)
+            {
+                continue;
+            }
+
+            foreach (var req in act.Requirements)
+            {
+                if (req.Target != TargetReceiver)
+                {
+                    continue; // SELF-tagged: the caster's use requirement, not the receiver's
+                }
+
+                if (req.Stat == StatLevel && req.Operator == OpGreaterThan)
+                {
+                    level = Math.Max(level, req.Value + 1); // GreaterThan N is inclusive of N+1
+                }
+                else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0)
+                {
+                    needsSl = true;
+                }
+            }
+        }
+
+        return (level, needsSl);
+    }
+
+    // The same walk over ALL use requirements, tag ignored - for a TEAM-delivered landed nano, whose
+    // use requirements the game checks against each receiving member (on a team cast we are the user
+    // of the nano that lands on us; see the team-delivery fold in <see cref="Enrich" />).
+    private static (int Level, bool NeedsSl) UseGate(NanoProfile nano)
     {
         var level = 0;
         var needsSl = false;
@@ -448,8 +508,7 @@ public sealed class BuffCatalog
             {
                 if (req.Stat == StatLevel && req.Operator == OpGreaterThan)
                 {
-                    var lv = req.Value + 1; // GreaterThan N is inclusive of N+1
-                    level = level == 0 ? lv : Math.Min(level, lv); // the receiver gate is the LOWER of caster/receiver
+                    level = Math.Max(level, req.Value + 1); // GreaterThan N is inclusive of N+1
                 }
                 else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0)
                 {
