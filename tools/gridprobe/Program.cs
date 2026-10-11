@@ -127,6 +127,354 @@ if (args.Length > 2 && args[1] == "northbound")
     return 0;
 }
 
+if (args.Length > 2 && args[1] == "seams")
+{
+    // gridprobe <pluginDir> seams <poolPf> [roomName] - THE INTERVAL-MODEL VERIFICATION (the
+    // owner's raycast proposal, 2026-10-11): per pool room, every triangle whose XZ bbox
+    // covers a 20 cm cell contributes a solid Y interval - flat faces the plane range over
+    // the cell, steep faces their full vertical span - the runs merge, and they answer:
+    //   V4  the mesh->tile datum: per-socket offset vs the mode vote (must be one constant)
+    //   V1  socket-less wall lines: do runs block the body band along the tile perimeter?
+    //   V2  door sockets: does frame geometry block the socket box (keep-open stays needed)?
+    //   V3  dips: do they carry a wading floor (runs at the tile height)?
+    var invS = System.Globalization.CultureInfo.InvariantCulture;
+    int sPf = int.Parse(args[2], invS);
+    var sWant = args.Length > 3 ? args[3] : null;
+    var sNav = AOBuddyNav.Load(args[0], sPf) ?? throw new Exception($"no pool data for pf {sPf}");
+    var sPool = sNav.Dungeon ?? throw new Exception($"pf {sPf} has no dungeon rooms");
+    var sFolder = AOBuddyNav.FolderFor(args[0], sPf);
+    List<List<float[]>> ReadBinS(string file)
+    {
+        var byRoom = new List<List<float[]>>();
+        foreach (var c in NavCollision.Read(System.IO.Path.Combine(sFolder, file)).Chunks)
+        {
+            var idx = c.Instance & 0xFFFF;
+            while (byRoom.Count <= idx) byRoom.Add(null);
+            (byRoom[idx] ??= new List<float[]>()).Add(c.Verts);
+        }
+        return byRoom;
+    }
+
+    var sCollision = ReadBinS("collision.bin");
+    var sWalls = ReadBinS("walls.bin");
+    const float SC = 0.2f, SBodyLow = 0.3f, SBodyHigh = 1.9f, SWalkNy = 0.5f;
+
+    foreach (var pr in sPool.Rooms)
+    {
+        if (sWant != null && (pr.Name == null || !pr.Name.Contains(sWant, StringComparison.OrdinalIgnoreCase))) continue;
+        var cols = pr.Index < sCollision.Count ? sCollision[pr.Index] : null;
+        var wls = pr.Index < sWalls.Count ? sWalls[pr.Index] : null;
+        if ((cols == null || cols.Count == 0) && (wls == null || wls.Count == 0)) continue;
+
+        // the lattice frame, same bounds rule as NorthboundBuilder.Build (bins + tile rect)
+        float mnx = float.MaxValue, mnz = float.MaxValue, mxx = float.MinValue, mxz = float.MinValue;
+        void TakeS(float[] v)
+        {
+            for (int o = 0; o + 2 < v.Length; o += 3)
+            {
+                mnx = Math.Min(mnx, v[o]); mxx = Math.Max(mxx, v[o]);
+                mnz = Math.Min(mnz, v[o + 2]); mxz = Math.Max(mxz, v[o + 2]);
+            }
+        }
+
+        foreach (var v in cols ?? new List<float[]>()) TakeS(v);
+        foreach (var v in wls ?? new List<float[]>()) TakeS(v);
+        if (pr.Pos != null && pr.Rect != null)
+        {
+            double smx = (pr.Rect[0] + pr.Rect[2] + 1) / 2.0, smz = (pr.Rect[1] + pr.Rect[3] + 1) / 2.0;
+            TakeS(new[] { (float)(pr.Pos[0] + (pr.Rect[0] - smx) * sPool.Cell), 0f, (float)(pr.Pos[2] + (pr.Rect[1] - smz) * sPool.Cell) });
+            TakeS(new[] { (float)(pr.Pos[0] + (pr.Rect[2] + 1 - smx) * sPool.Cell), 0f, (float)(pr.Pos[2] + (pr.Rect[3] + 1 - smz) * sPool.Cell) });
+        }
+
+        if (mnx > mxx) continue;
+        var sOx = (float)(Math.Floor(mnx / SC) - 2) * SC;
+        var sOz = (float)(Math.Floor(mnz / SC) - 2) * SC;
+        int sW = (int)Math.Ceiling((mxx - sOx) / SC) + 2, sH = (int)Math.Ceiling((mxz - sOz) / SC) + 2;
+        int SX(float x) => (int)Math.Floor((x - sOx) / SC);
+        int SZ(float z) => (int)Math.Floor((z - sOz) / SC);
+
+        // per cell: solid intervals straight from the triangles (MESH datum - the tiles join
+        // separately, absolute, and the two only unify through the V4 offset)
+        var runsMesh = new List<(float y0, float y1)>[sW * sH];
+        void Contribute(float[] v)
+        {
+            for (int o = 0; o + 8 < v.Length; o += 9)
+            {
+                float ux = v[o + 3] - v[o], uy = v[o + 4] - v[o + 1], uz = v[o + 5] - v[o + 2];
+                float wx = v[o + 6] - v[o], wy = v[o + 7] - v[o + 1], wz = v[o + 8] - v[o + 2];
+                var ny = uz * wx - ux * wz;
+                var len = (float)Math.Sqrt(ux * ux + uy * uy + uz * uz) * (float)Math.Sqrt(wx * wx + wy * wy + wz * wz);
+                if (len < 1e-9f) continue;
+                var asSpan = ny / len < SWalkNy; // steep/vertical: the full span; flat: the plane over the cell
+                var ymin = Math.Min(v[o + 1], Math.Min(v[o + 4], v[o + 7]));
+                var ymax = Math.Max(v[o + 1], Math.Max(v[o + 4], v[o + 7]));
+                int i0 = SX(v[o]), i1 = Math.Max(SX(v[o + 3]), SX(v[o + 6]));
+                int j0 = SZ(v[o + 2]), j1 = Math.Max(SZ(v[o + 5]), SZ(v[o + 8]));
+                for (var j = Math.Max(0, j0); j <= Math.Min(sH - 1, j1); j++)
+                {
+                    for (var i = Math.Max(0, i0); i <= Math.Min(sW - 1, i1); i++)
+                    {
+                        float y0, y1;
+                        if (asSpan)
+                        {
+                            y0 = ymin; y1 = ymax;
+                        }
+                        else
+                        {
+                            double bx = sOx + i * SC, bz = sOz + j * SC;
+                            var ca = PlaneYS(v, o, bx, bz);
+                            var cb = PlaneYS(v, o, bx + SC, bz);
+                            var cc = PlaneYS(v, o, bx, bz + SC);
+                            var cd = PlaneYS(v, o, bx + SC, bz + SC);
+                            y0 = (float)Math.Min(Math.Min(ca, cb), Math.Min(cc, cd));
+                            y1 = (float)Math.Max(Math.Max(ca, cb), Math.Max(cc, cd));
+                        }
+
+                        (runsMesh[j * sW + i] ??= new List<(float, float)>()).Add((y0, y1));
+                    }
+                }
+            }
+        }
+
+        foreach (var v in cols ?? new List<float[]>()) Contribute(v);
+        foreach (var v in wls ?? new List<float[]>()) Contribute(v);
+
+        // the tile floor per lattice cell (absolute datum) - thin sheets, the floor source
+        // where the mesh is silent (the Startroom's centre carries not one mesh triangle)
+        var runsTile = new List<(float y0, float y1)>[sW * sH];
+        var tileH = new float[sW * sH];
+        var tiledS = new bool[sW * sH];
+        var perim = new bool[sW * sH]; // lattice cells of PERIMETER tiles (the wall ring's inner edge)
+        bool TileValid(int tr, int tc) =>
+            tr >= 0 && tc >= 0 && tr < pr.Tile.Length && pr.Tile[tr] != null && tc < pr.Tile[tr].Length && pr.Tile[tr][tc] != 0;
+        if (pr.Tile != null && pr.Height != null && pr.Rect != null && pr.Pos != null)
+        {
+            int x1 = pr.Rect[0], z1 = pr.Rect[1];
+            double tmx = (pr.Rect[0] + pr.Rect[2] + 1) / 2.0, tmz = (pr.Rect[1] + pr.Rect[3] + 1) / 2.0;
+            for (int tr = 0; tr < pr.Tile.Length; tr++)
+            {
+                if (pr.Tile[tr] == null) continue;
+                for (int tc = 0; tc < pr.Tile[tr].Length; tc++)
+                {
+                    if (!TileValid(tr, tc) || pr.Height[tr] == null || tc >= pr.Height[tr].Length) continue;
+                    double wxp = pr.Pos[0] + (x1 + tc - tmx) * sPool.Cell;
+                    double wzp = pr.Pos[2] + (z1 + tr - tmz) * sPool.Cell;
+                    var th = (float)(pr.Pos[1] + (pr.Height[tr][tc] - pr.HeightBase) * sPool.HeightScale);
+                    bool edge = !TileValid(tr - 1, tc) || !TileValid(tr + 1, tc) || !TileValid(tr, tc - 1) || !TileValid(tr, tc + 1);
+                    int i0 = SX((float)(wxp - sPool.Cell / 2)), i1 = SX((float)(wxp + sPool.Cell / 2));
+                    int j0 = SZ((float)(wzp - sPool.Cell / 2)), j1 = SZ((float)(wzp + sPool.Cell / 2));
+                    for (var j = Math.Max(0, j0); j <= Math.Min(sH - 1, j1); j++)
+                    {
+                        for (var i = Math.Max(0, i0); i <= Math.Min(sW - 1, i1); i++)
+                        {
+                            var idx = j * sW + i;
+                            tiledS[idx] = true;
+                            tileH[idx] = th;
+                            if (edge) perim[idx] = true;
+                            (runsTile[idx] ??= new List<(float, float)>()).Add((th - 0.05f, th + 0.05f)); // the tile sheet
+                        }
+                    }
+                }
+            }
+        }
+
+        // V4: the mesh->tile datum. Per socket: the mesh's lowest walkable run-top within 1 m
+        // (mesh datum) vs the tile floor there (absolute) - one offset per socket; a rigid
+        // mesh shows the SAME offset at every socket.
+        var doorways = AOBuddyNav.DoorwaysFromField(pr);
+        var offsets = new List<float>();
+        var sockCells = new bool[sW * sH];
+        for (var di = 0; di < doorways.Count; di++)
+        {
+            var dw = doorways[di];
+            int i0 = SX((float)(dw.X - 1.25)), i1 = SX((float)(dw.X + 1.25));
+            int j0 = SZ((float)(dw.Z - 1.25)), j1 = SZ((float)(dw.Z + 1.25));
+            float? tileAt = null;
+            float meshSill = float.MaxValue;
+            for (var j = Math.Max(0, j0); j <= Math.Min(sH - 1, j1); j++)
+            {
+                for (var i = Math.Max(0, i0); i <= Math.Min(sW - 1, i1); i++)
+                {
+                    var idx = j * sW + i;
+                    sockCells[idx] = true;
+                    if (tiledS[idx] && (tileAt == null || Math.Abs(tileH[idx] - tileAt.Value) > 0.05f && tileH[idx] < tileAt)) tileAt = tileH[idx];
+                    var m = runsMesh[idx]; // raw mesh runs - the tile sheets are not in here
+                    if (m == null) continue;
+                    foreach (var (y0, y1) in m)
+                    {
+                        if (y1 < meshSill) meshSill = y1; // the lowest mesh surface in the box
+                    }
+                }
+            }
+
+            if (tileAt != null && meshSill < float.MaxValue)
+            {
+                offsets.Add(tileAt.Value - meshSill);
+                if (di < 4)
+                {
+                    Console.WriteLine($"    socket {di}: tile {tileAt:0.00} mesh-sill {meshSill:0.00} offset {tileAt - meshSill:+0.00;-0.00} ({dw.Nx:0.##},{dw.Nz:0.##}{(dw.Inner ? " inner" : "")})");
+                }
+            }
+        }
+
+        // THE ANCHOR OFFSET: the first socket's vote (the same rule the placement chain uses -
+        // the first door defines the level); the mesh shifts by it, then everything merges in
+        // the tile frame.
+        var off = offsets.Count > 0 ? offsets[0] : 0f;
+        var merged = new List<(float y0, float y1)>[sW * sH];
+        for (var c = 0; c < sW * sH; c++)
+        {
+            List<(float y0, float y1)> l = new();
+            if (runsMesh[c] != null)
+            {
+                l.AddRange(runsMesh[c].Select(rr => (rr.y0 + off, rr.y1 + off))); // mesh -> tile frame
+            }
+
+            if (runsTile[c] != null)
+            {
+                l.AddRange(runsTile[c]);
+            }
+
+            if (l.Count == 0) continue;
+            l.Sort((a, b) => a.y0.CompareTo(b.y0));
+            var m = new List<(float y0, float y1)> { l[0] };
+            for (var k = 1; k < l.Count; k++)
+            {
+                if (l[k].y0 <= m[^1].y1 + 0.01f)
+                {
+                    m[^1] = (m[^1].y0, Math.Max(m[^1].y1, l[k].y1));
+                }
+                else
+                {
+                    m.Add(l[k]);
+                }
+            }
+
+            merged[c] = m;
+        }
+
+        // the mode votes, as the cross-check (mesh tops raw; tile floors raw)
+        var tileModeV = new Dictionary<float, int>();
+        var meshModeV = new Dictionary<float, int>();
+        for (var c = 0; c < sW * sH; c++)
+        {
+            if (!tiledS[c]) continue;
+            var k = (float)Math.Round(tileH[c] * 2f) / 2f;
+            tileModeV[k] = tileModeV.TryGetValue(k, out var n) ? n + 1 : 1;
+            var m = runsMesh[c];
+            if (m == null) continue;
+            foreach (var (y0, y1) in m)
+            {
+                if (y1 - y0 < SBodyLow) continue; // thin sheets are floors, not structures
+                var km = (float)Math.Round(y1 * 2f) / 2f;
+                meshModeV[km] = meshModeV.TryGetValue(km, out var n2) ? n2 + 1 : 1;
+            }
+        }
+
+        var tileMode = tileModeV.OrderByDescending(kv => kv.Value).FirstOrDefault().Key;
+        var meshMode = meshModeV.OrderByDescending(kv => kv.Value).FirstOrDefault().Key;
+        var spread = offsets.Count > 0 ? offsets.Max() - offsets.Min() : float.NaN;
+        Console.WriteLine($"room {pr.Index,3} {pr.Name}: {sW}x{sH}, sockets {doorways.Count}, V4 offsets n={offsets.Count} spread {spread:0.00} (first {off:+0.00;-0.00}) | mode vote tile {tileMode:0.0} mesh {meshMode:0.0} -> {tileMode - meshMode:+0.0;-0.0}");
+
+        bool Standable(int idx, float level)
+        {
+            var m = merged[idx];
+            if (m == null) return false;
+            var hasFloor = false;
+            foreach (var (y0, y1) in m)
+            {
+                if (y1 >= level - 0.3f && y1 <= level + 0.3f) hasFloor = true; // a run top at the level
+                if (y1 > level + SBodyLow && y0 < level + SBodyHigh) return false; // a run in the body band
+            }
+
+            return hasFloor;
+        }
+
+        int v1t = 0, v1b = 0, v1e = 0, v2t = 0, v2b = 0, v3t = 0, v3w = 0, v4t = 0, v4b = 0;
+        var dipSamples = new List<string>();
+        for (var c = 0; c < sW * sH; c++)
+        {
+            if (tiledS[c])
+            {
+                var lvl = tileH[c]; // the runs are unified (mesh shifted), the level is the tile floor itself
+                var blockedAt = !Standable(c, lvl);
+                if (perim[c] && !sockCells[c])
+                {
+                    v1t++;
+                    if (blockedAt) v1b++;
+                }
+
+                if (sockCells[c])
+                {
+                    v2t++;
+                    if (blockedAt) v2b++;
+                }
+
+                if (tileH[c] < tileMode - 1.0f)
+                {
+                    v3t++;
+                    if (!blockedAt)
+                    {
+                        v3w++;
+                        if (dipSamples.Count < 3)
+                        {
+                            var i2 = c % sW;
+                            dipSamples.Add($"({sOx + (i2 + 0.5f) * SC:0.0},{sOz + (c / sW + 0.5f) * SC:0.0})@{tileH[c]:0.00}");
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            // V1, THE UNTILED WALL RING: lattice cells outside the tile footprint but within
+            // 2 cells of one - the wall assembly's own band. A template whose wall line is
+            // built shows runs blocking the body band at the neighbouring floor level here.
+            int ci1 = c % sW, cj1 = c / sW;
+            float nearFloor = float.MaxValue;
+            var near = false;
+            for (var dj = -2; dj <= 2 && !near; dj++)
+            {
+                for (var di2 = -2; di2 <= 2; di2++)
+                {
+                    var ni = ci1 + di2;
+                    var nj = cj1 + dj;
+                    if (ni < 0 || nj < 0 || ni >= sW || nj >= sH) continue;
+                    var n = nj * sW + ni;
+                    if (!tiledS[n]) continue;
+                    near = true;
+                    nearFloor = Math.Max(nearFloor == float.MaxValue ? tileH[n] : nearFloor, tileH[n]);
+                    break;
+                }
+            }
+
+            if (!near) continue;
+            v4t++;
+            if (merged[c] == null || merged[c].Count == 0)
+            {
+                v1e++; // no geometry at all: a hole in the wall line
+                continue;
+            }
+
+            if (!Standable(c, nearFloor)) v4b++;
+        }
+
+        Console.WriteLine($"  V1 tiled perimeter sans sockets: {v1b}/{v1t} blocked | V2 socket cells: {v2b}/{v2t} blocked at tile floor | V3 dips (tile < mode-1): {v3w}/{v3t} standable{(dipSamples.Count > 0 ? "  e.g. " + string.Join(" ", dipSamples) : "")} | V4 UNTILED wall ring (<=2 cells out): {v4b}/{v4t} blocked at the neighbour floor, {v1e} with NO geometry");
+    }
+
+    return 0;
+
+    static double PlaneYS(float[] v, int o, double px, double pz)
+    {
+        double ax = v[o], ay = v[o + 1], az = v[o + 2];
+        double ux = v[o + 3] - ax, uy = v[o + 4] - ay, uz = v[o + 5] - az;
+        double wx = v[o + 6] - ax, wy = v[o + 7] - ay, wz = v[o + 8] - az;
+        double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+        if (Math.Abs(ny) < 1e-9) return ay;
+        return ay - (nx * (px - ax) + nz * (pz - az)) / ny;
+    }
+}
+
 if (args.Length > 4 && args[1] == "trail")
 {
     // gridprobe <pluginDir> trail <poolPf> <layout.txt> <trailfile> - replay a captured walk
@@ -138,7 +486,7 @@ if (args.Length > 4 && args[1] == "trail")
     NorthboundPool tNorth = null;
     var tNorthPath = System.IO.Path.Combine(AOBuddyNav.FolderFor(args[0], tPf), "poolgrid.northbound");
     if (System.IO.File.Exists(tNorthPath)) tNorth = NorthboundPool.Load(tNorthPath);
-    var tGrid = FloorGrid.Build(args[0], 14624428, AOBuddyNav.ComposeMission(args[0], tLayout), s => Console.WriteLine("  [grid] " + s), tNorth);
+    var tGrid = FloorGrid.Build(args[0], tPf, AOBuddyNav.ComposeMission(args[0], tLayout), s => Console.WriteLine("  [grid] " + s), tNorth);
     if (tGrid == null) { Console.WriteLine("grid build failed"); return 1; }
 
     int tOk = 0, tBad = 0;

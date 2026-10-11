@@ -867,8 +867,14 @@ public sealed class FloorGrid : IWalkGrid
                     // 14678642 room 10). Mesh levels exist only where the room's own chunks
                     // sampled flat-enough geometry, so the claim stays inside the room's
                     // own structures.
+                    // OWNERSHIP: the room's tiles claim, the portals claim, the room's own
+                    // sampled chunks claim - and the room's own TILE-LEVEL STAMPS claim (the
+                    // water surface stamped into untiled cells: the tile grid has no claim on
+                    // water by definition, and the old test dropped every stamped water cell
+                    // as atlas spill - dump 14678642 room 10, the deep-water crossing).
                     var owned = isPortal || !double.IsNaN(pool.FloorHeight(pr, cx, cz))
-                                || (ml is { Count: > 0 });
+                                || (ml is { Count: > 0 })
+                                || (levels is { Count: > 0 });
                     if (!owned)
                     {
                         continue; // atlas spill: a cell neither the pool's tiles nor this room's

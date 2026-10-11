@@ -21,7 +21,7 @@ namespace AOBuddy20.Nav;
 public sealed class NorthboundPool
 {
     public const string Magic = "NBGR"; // file signature
-    public const int Version = 6; // v6: the height layer's surface stamps over untiled water dips (the Mine rooms' bridge crossings); v5: MissionStep surface cutoff; v4: portal mesh-level candidate lists // v5: the surface cutoff derives from MissionStep (76 deg) - the arch bridges' decks walk; v4: portal mesh-level candidate lists; v3: OmniCell socket decode // bump when the binary layout OR the decode changes (v4: portal mesh-level candidate lists; v3: OmniCell socket decode; Load refuses other versions)
+    public const int Version = 10; // v10: the interval model - solid Y runs per cell (flat faces plane-range, steep faces full span), walkable = run top with BodyHigh open above; tile sheets join in the SAME frame (mesh-vs-tile offset verified +0.01 spread 0.00); portals restore the tile floor over the template's closed-door leaf // v9: the band test = solid overlap with a level's knee-to-head band (the step-side exemption removed: wall tops are sampled levels, every face would qualify as a climbable step) // v8: the band test applied after the tile stamp; v7: the steep-span band test (unbuilt door sockets seal); v6: the height layer's surface stamps over untiled water dips; v5: MissionStep surface cutoff; v4: portal mesh-level candidate lists; v3: OmniCell socket decode // bump when the binary layout OR the decode changes (Load refuses other versions)
 
     public float Cell = 0.2f; // lattice resolution: the 20 cm the whole design hangs on
     public int PoolPf; // the pool playfield the lattices were rasterized from
@@ -386,18 +386,21 @@ public sealed class NorthboundPortal
 }
 
 /// <summary>
-///     Rasterizes one pool room's collision/walls chunks into its northbound lattice. Floors:
-///     collision.bin triangles flatter than ~41 degrees (WalkNy), sampled at every 20 cm cell
-///     centre their projection covers (barycentric), plane-interpolated - a ramp becomes a
-///     slope. Blockers: every steeper triangle (walls.bin plus collision's 41-60 degree band)
-///     whose body at the cell centre crosses the standing band [level+BodyLow, level+BodyHigh]
-///     of one of the cell's levels - a lintel over the passage stays, a pillar or table blocks.
-///     Headroom: two levels closer than BodyHigh block the lower (the table-top rule). The
-///     door portals are marked last and cleared - doors are walkable by default.
+///     Builds one pool room's northbound lattice from its collision/walls chunks with the
+///     INTERVAL MODEL (the owner's raycast proposal, 2026-10-11, discretised): every triangle
+///     whose footprint covers a 20 cm cell contributes a solid Y interval - flat faces their
+///     plane range over the cell, steep faces their full vertical span - and the merged runs
+///     answer walkability by topology alone. A walkable level is the top of a solid run with
+///     at least BodyHigh of open space above it; inside a wall there is no such run, a
+///     chest-high bar leaves too little headroom, a lintel enough, an arch deck adds an upper
+///     level. The tile heightfield joins as thin sheets in the same frame (the mesh-vs-tile
+///     offset verified +0.01/spread 0.00 across pools 341 and 351), carrying the floor where
+///     the mesh is silent. Door portals are marked last: their keep-open boxes are unblocked
+///     and their tile floor restored (the template's door leaf sits IN the passage; the
+///     server opens it at runtime).
 /// </summary>
 public static class NorthboundBuilder
 {
-    private const float MaxStepRise = 0.8f; // = FloorGrid.MissionStep: the rise a walk step climbs
     private const float WalkNy = 0.5f;   // the extractor's own walkable cutoff: flatter than 60 deg
                                          // is a surface - cave shell floors are 41-60 degree slopes (the bow
                                          // bridges' decks at ny 0.40-0.45 are crossed ON THE WATER instead -
@@ -462,225 +465,136 @@ public static class NorthboundBuilder
         };
         r.W = (int)Math.Ceiling((maxx - r.Ox) / cell) + 2;
         r.H = (int)Math.Ceiling((maxz - r.Oz) / cell) + 2;
-        var levels = new List<float>[r.W * r.H];        // tile-sourced, absolute
-        var mesh = new List<float>[r.W * r.H];          // mesh-sourced, pool-mesh datum
+        var runs = new List<(float y0, float y1)>[r.W * r.H]; // per cell: the solid Y intervals collected from every covering triangle
+        var levels = new List<float>[r.W * r.H];        // the walkable run tops per cell, ABSOLUTE - the mesh chunks sit in the tile frame (verified 2026-10-11: the mesh-vs-tile offset is +0.01 with spread 0.00 at every socket of every room in pools 341 and 351; the old "pool mesh datum" was rim sampling at the portals)
         var blocked = new bool[r.W * r.H];
+        var tileH = new float[r.W * r.H];               // the tile height per lattice cell (the keep-open restore needs it)
         var tiled = new bool[r.W * r.H];                // the room's own tile footprint (the wall ring's inner edge)
         var portalCells = new HashSet<int>();           // doorway cells: exempt from the wall ring
+        var flatProbes = new (double, double)[] { (0.5, 0.5), (0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85) }; // the old Surface's five inner probes
+        var edgeProbes = new (double, double)[] { (0.5, 0.5), (0.5, 0.0), (0.5, 1.0), (0.0, 0.5), (1.0, 0.5) }; // centre + edge midpoints, for thin wall faces
 
-        // A steep triangle (Rasterize sends everything flatter-than-WalkNy fails, plus all of
-        // walls.bin here) marks the cells it would crash a standing body into.
-        //
-        // THE TEST, per cell: a walker standing on floor level `lv` occupies the body band
-        // [lv + BodyLow, lv + BodyHigh] = [lv + 0.3, lv + 1.9] metres - knees to head; below
-        // 0.3 is foot/ground clearance, above 1.9 is over the head. This triangle occupies the
-        // vertical span [yMin, yMax] somewhere over the cell. The two intervals OVERLAP when
-        //
-        //     yMax >= lv + BodyLow   (the wall reaches up past the body's knees)   AND
-        //     yMin <= lv + BodyHigh  (the wall reaches down below the body's head),
-        //
-        // and then the body cannot cross this cell at that level: blocked. The everyday cases
-        // fall out correctly: a lintel whose whole span sits above lv + 1.9 fails the second
-        // test (walked under); a sill below lv + 0.3 fails the first (stepped over); a pillar
-        // or wall face spanning both crosses the band (blocked).
-        //
-        // DELIBERATE COARSENESS - this is the offline lattice, it can afford to over-block:
-        //  * The Y span is the triangle's WHOLE [yMin, yMax], not the plane height at the cell
-        //    centre: a tall slanted wall whose top leans out over neighbouring cells blocks
-        //    those too. For walls, blocking too much just routes the A* around; blocking too
-        //    little walks the bot into geometry.
-        //  * The projection test is the cell CENTRE alone (InXZ at the centre). A steep
-        //    triangle clipping only a cell corner is not seen. Surfaces use five probes (see
-        //    Surface) because a missed floor punches a hole in the map; a missed wall sliver
-        //    merely leaves a cell open, and real walls are wide against a 20 cm cell.
-        //
-        // GRANULARITY: blocked is ONE bool per cell (unlike FloorGrid's per-(cell,floor)
-        // verdicts). The first level whose band the triangle crosses seals the cell at ALL its
-        // levels; the blit (FloorGrid.UseNorthbound) then blocks every level the merged world
-        // cell ends up with. Doorway cells are un-blocked again afterwards by the portal pass
-        // below - the door frame's own triangles must never seal the threshold they belong to.
-        //
-        // ORDERING: Blocker only ever runs inside the two Rasterize passes, BEFORE the tile
-        // stamp fills `levels` - so in practice `l` is null at every call and the band test
-        // judges the triangle-sampled (mesh) levels; the read of `levels` keeps the helper
-        // general. Tile floors join later and stand or fall by the wall-ring seeds, the
-        // portals and the blit-time headroom rule instead.
-        void Blocker(float[] v, int o)
-        {
-            // the triangle's vertical span: the Y coordinate of each vertex (offset +1 in every
-            // vertex triplet within the flat array)
-            var (yMin, yMax) = MinMax(v, o + 1);
-            // the cell bounding box to visit. The LOW bound rides on vertex A alone, the HIGH
-            // bound on max(B, C): valid for the bins' vertex order, where A is the min corner.
-            // (The visited range must cover the triangle - a too-narrow range would silently
-            // skip cells, since InXZ never runs outside it; too wide only wastes iterations.)
-            int i0 = XCell(v[o]), i1 = Math.Max(XCell(v[o + 3]), XCell(v[o + 6]));
-            int j0 = ZCell(v[o + 2]), j1 = Math.Max(ZCell(v[o + 5]), ZCell(v[o + 8]));
-            for (int j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++) // clamped to the lattice
-            {
-                for (int i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
-                {
-                    double cx = r.Ox + (i + 0.5f) * cell, cz = r.Oz + (j + 0.5f) * cell; // the cell's centre, pool world
-                    if (!InXZ(v, o, cx, cz))
-                    {
-                        continue; // the projection misses this cell's centre: the wall is not over this cell
-                    }
-
-                    var l = levels[j * r.W + i]; // tile levels (still null during the raster passes - see ORDERING)
-                    var m = mesh[j * r.W + i];   // triangle-sampled levels, filling as the collision pass runs
-                    if (l == null && m == null)
-                    {
-                        continue; // nothing to stand on here: nothing to block
-                    }
-
-                    // test every level the cell carries; one crossing is enough
-                    foreach (var lv in (l ?? Enumerable.Empty<float>()).Concat(m ?? Enumerable.Empty<float>()))
-                    {
-                        if (yMax >= lv + BodyLow && yMin <= lv + BodyHigh) // interval overlap: wall span vs body band
-                        {
-                            blocked[j * r.W + i] = true; // the wall's body crosses the standing band: cell sealed
-                            break;                        // per-cell verdict - no other level can change it
-                        }
-                    }
-                }
-            }
-        }
-
-        // A walkable triangle (Rasterize sends everything with normal Y >= WalkNy here): lay a
-        // floor level into every cell the triangle passes over, at the plane's own height
-        // there. This is what turns a ramp into a slope - one level per 20 cm of run - instead
-        // of a single flat 2 m tile step.
-        //
-        // WHICH LIST, and why: everything triangle-sampled lands in the MESH list,
-        // collision.bin surfaces included - "mesh" here means "heights in the pool mesh's own
-        // datum", which sits metres off the tile datum (grey_mh4: floor 13.1 over a 5.0 base).
-        // The blit shifts the whole list onto the placed door level before merging
-        // (FloorGrid.UseNorthbound). The tile stamp further down fills the separate,
-        // never-shifted `levels` list; the two are only reconciled at blit time.
-        //
-        // NO HEADROOM RULE HERE: two levels closer than BodyHigh are not detected in the
-        // builder - the table-top rule runs on the merged world stacks at blit time
-        // (FloorGrid.StampHeadroom), once both sources have contributed.
-        void Surface(float[] v, int o)
-        {
-            // the cell bounding box to visit - same vertex-order-dependent box as Blocker
-            // (A is the min corner in the bins' vertex order; the visited range must cover the
-            // triangle or cells are silently skipped)
-            int i0 = XCell(v[o]), i1 = Math.Max(XCell(v[o + 3]), XCell(v[o + 6]));
-            int j0 = ZCell(v[o + 2]), j1 = Math.Max(ZCell(v[o + 5]), ZCell(v[o + 8]));
-            for (int j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++) // clamped to the lattice
-            {
-                for (int i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
-                {
-                    double bx = r.Ox + i * cell, bz = r.Oz + j * cell; // the cell's MIN CORNER, pool world
-                    // conservative coverage: centre + 4 inner corners - a cell centre alone falls
-                    // in the seams between coplanar triangles and the floor map comes out
-                    // Swiss-cheese (the static grid hit exactly that, Neutral Supermarket).
-                    // (0.5, 0.5) is the centre; the 0.15/0.85 quartet probes well inside the
-                    // cell, so a neighbour triangle's edge sliver cannot claim the cell while
-                    // the triangle that truly covers it misses all five probes.
-                    var hit = false;
-                    var y = 0.0;
-                    foreach (var (fx, fz) in new[]
-                             {
-                                 (0.5, 0.5), (0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85)
-                             })
-                    {
-                        double px = bx + fx * cell, pz = bz + fz * cell; // the probe point, pool world
-                        if (InXZ(v, o, px, pz))
-                        {
-                            hit = true;
-                            y = PlaneY(v, o, px, pz); // the plane's height AT that probe point; first hit wins (no averaging) -
-                            break;                    // for a slope this is the height at the spot, which is the point
-                        }
-                    }
-
-                    if (!hit)
-                    {
-                        continue; // none of the five probes sits over this triangle: it does not cover the cell
-                    }
-
-                    // insert the level into the cell's mesh list, ascending and deduped
-                    var idx = j * r.W + i;
-                    var l = mesh[idx] ??= new List<float>(); // first surface in a void cell: create the list
-                    if (l.Count > 0 && y - l[^1] <= MergeLevels && y >= l[^1])
-                    {
-                        continue; // ascending insert; the near neighbour above is the last
-                    }
-
-                    var pos = l.FindLastIndex(x => x < y) + 1; // the insert position that keeps the list ascending
-                    if (pos > 0 && y - l[pos - 1] <= MergeLevels)
-                    {
-                        continue; // a near-duplicate of the level just below: the same floor, sampled twice
-                    }
-
-                    l.Insert(pos, (float)y);
-                    if (l.Count > MaxLevels)
-                    {
-                        l.RemoveAt(0); // cap at MaxLevels (8): drop the LOWEST - decks above matter more than the deep stack below
-                    }
-                }
-            }
-        }
-
-        // per triangle: its own normal decides surface vs blocker (the bins arrive pre-split,
-        // but a misfiled triangle lands where its normal says). The classifier both raster
-        // passes below share: collision.bin goes through it FREE (every triangle judged by its
-        // own normal - the 41-60 degree cave-slope band and the walls hiding in collision.bin
-        // come out here), walls.bin FORCED (every triangle a blocker however it is wound -
-        // walls.bin carries no walkable truth by convention; the water crossings walk their
-        // dips ON THE WATER SURFACE instead - FloorGrid.UseNorthbound's water flood).
-        void Rasterize(float[] v, bool forceBlocker)
+        // THE INTERVAL MODEL (the owner's raycast proposal, 2026-10-11: "walk each x/z/y and
+        // cast rays up/down and north/south/east/west - if we're inside the geometry, the
+        // triangle winding says the point is not walkable"), discretised to interval
+        // arithmetic. Every triangle whose footprint covers a 20 cm cell contributes ONE solid
+        // Y interval to it:
+        //   * a FLAT face (normal Y >= WalkNy, the extractor's own 60-degree cutoff) contributes
+        //     the plane's height range over the cell - a floor sheet, a ramp its local slope;
+        //   * a STEEP face contributes its full vertical span - a wall, a column, the bow
+        //     bridges' 63-66 degree decks (their spans float far over the water crossing and
+        //     block nothing there).
+        // Merge the intervals and the cell reads as a column of SOLID RUNS with open gaps
+        // between them, and every question we ever band-tested falls out of the topology:
+        // inside a wall the runs span the full height (no open gap, no level); a chest-high
+        // bar leaves less than BodyHigh above the floor (no level at floor height); a lintel
+        // leaves BodyHigh underneath (walked under); an arch deck adds an upper run (walkable
+        // on it, the floor below still walkable under the gap). The winding/backface idea is
+        // honoured implicitly: a cell INSIDE a solid has run tops only at the solid's outer
+        // surfaces, never at the floor the walker needs.
+        void Contribute(float[] v)
         {
             for (int o = 0; o + 8 < v.Length; o += 9) // flat triangle triplets: 9 floats = A(x,y,z) B(x,y,z) C(x,y,z)
             {
-                // the two edge vectors u = B - A and w = C - A; their cross product is the face
-                // normal, but only its Y component matters here ("how flat is this triangle?"),
-                // so the X/Z components are never computed:
-                //     (u x w).y = uz*wx - ux*wz
-                // (the sign follows the winding: up-facing triangles yield positive ny)
+                // the face normal's Y - the same extractor formula the old Rasterize used, but
+                // it now decides only the CONTRIBUTION SHAPE (plane range vs full span), never
+                // walkability itself
                 float ux = v[o + 3] - v[o], uy = v[o + 4] - v[o + 1], uz = v[o + 5] - v[o + 2];
                 float wx = v[o + 6] - v[o], wy = v[o + 7] - v[o + 1], wz = v[o + 8] - v[o + 2];
-                var ny = uz * wx - ux * wz; // the normal's Y: 0 for a vertical face, maximal for a flat floor
+                var ny = uz * wx - ux * wz;
                 var len = (float)Math.Sqrt(ux * ux + uy * uy + uz * uz) * (float)Math.Sqrt(wx * wx + wy * wy + wz * wz);
-                // NOTE the denominator: |u|*|w|, NOT |u x w| (which is |u||w| * sin(apex angle)).
-                // This is exactly the extractor's own classification formula, so a triangle
-                // re-judged here at load lands in the same bucket the producer's pre-split put
-                // it in. For skinny triangles (small apex angle) it reads STRICTER than a true
-                // slope cosine - a near-vertical bias, the safe side for navigation.
                 if (len < 1e-9f)
                 {
-                    continue; // degenerate triangle (a zero-length edge): nothing to raster
+                    continue; // degenerate triangle (a zero-length edge)
                 }
 
-                if (!forceBlocker && ny / len >= WalkNy)
+                var flat = ny / len >= WalkNy; // cave shell floors at 41-60 degrees stay flat; steeper goes to the span
+                var ymin = Math.Min(v[o + 1], Math.Min(v[o + 4], v[o + 7]));
+                var ymax = Math.Max(v[o + 1], Math.Max(v[o + 4], v[o + 7]));
+                // the cell bounding box to visit. The LOW bound rides on vertex A alone, the
+                // HIGH bound on max(B, C): valid for the bins' vertex order, where A is the
+                // min corner. Too narrow would silently skip cells; too wide only wastes probes.
+                int i0 = XCell(v[o]), i1 = Math.Max(XCell(v[o + 3]), XCell(v[o + 6]));
+                int j0 = ZCell(v[o + 2]), j1 = Math.Max(ZCell(v[o + 5]), ZCell(v[o + 8]));
+                for (int j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++) // clamped to the lattice
                 {
-                    Surface(v, o); // flat enough (>= 0.5, i.e. flatter than ~60 degrees): walkable ground
-                }
-                else
-                {
-                    Blocker(v, o); // too steep (or walls.bin, forced): a wall
+                    for (int i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
+                    {
+                        double bx = r.Ox + i * cell, bz = r.Oz + j * cell; // the cell's MIN CORNER, pool world
+                        float y0, y1;
+                        var hit = false;
+                        if (flat)
+                        {
+                            // five probes well inside the cell (the Swiss-cheese rule from the
+                            // old Surface): the interval is the plane range over the probes
+                            // that hit - bounded by the true footprint, so no phantom sheets
+                            // extrapolate past a floor's edge
+                            y0 = float.MaxValue;
+                            y1 = float.MinValue;
+                            foreach (var (fx, fz) in flatProbes)
+                            {
+                                double px = bx + fx * cell, pz = bz + fz * cell;
+                                if (!InXZ(v, o, px, pz))
+                                {
+                                    continue;
+                                }
+
+                                var y = (float)PlaneY(v, o, px, pz); // the plane's height at that probe
+                                y0 = Math.Min(y0, y);
+                                y1 = Math.Max(y1, y);
+                                hit = true;
+                            }
+                        }
+                        else
+                        {
+                            // steep or vertical: the FULL span, on every cell the face actually
+                            // crosses. Centre + the four edge midpoints: a thin wall sliver
+                            // between two cell centres was the old Blocker's blind spot (its
+                            // centre-only InXZ missed it) - the false r1<->r18 connection of
+                            // dump 14678642 walked exactly through such a face.
+                            foreach (var (fx, fz) in edgeProbes)
+                            {
+                                double px = bx + fx * cell, pz = bz + fz * cell;
+                                if (!InXZ(v, o, px, pz))
+                                {
+                                    continue;
+                                }
+
+                                hit = true;
+                                break; // the span is the triangle's whole extent: one hit is enough
+                            }
+
+                            y0 = ymin;
+                            y1 = ymax;
+                        }
+
+                        if (!hit)
+                        {
+                            continue; // the triangle misses this cell entirely
+                        }
+
+                        (runs[j * r.W + i] ??= new List<(float y0, float y1)>()).Add((y0, y1));
+                    }
                 }
             }
         }
 
         foreach (var v in collision)
         {
-            Rasterize(v, forceBlocker: false); // collision classifies itself
+            Contribute(v); // collision classifies itself by its own normals
         }
 
         foreach (var v in walls)
         {
-            Rasterize(v, forceBlocker: true); // walls.bin is a wall by definition
+            Contribute(v); // walls.bin joins the same column - a wall is just tall solid runs
         }
 
-        // THE TILE FLOOR (StampRoomFloors, ported to the lattice): in these pools the walkable
-        // room floor exists ONLY as the heightfield - collision.bin carries just the structures
-        // above it (Startroom's centre: not one mesh triangle, tiles say 5.8). The tile heights
-        // are absolute, so they need no door anchoring; the mesh's own datum rides alongside as
-        // upper levels. Where a steep mesh band crosses a tile level's body band AND the mesh
-        // offers its own level within a step, the tile yields (the stairway-tread rule); a tile
-        // with no mesh alternative stands even under a lintel or an upper deck.
+        // THE TILE FLOOR as thin sheets in the same solid column: the heightfield is the room's
+        // floor where the mesh carries nothing at all (the Startroom's centre: not one mesh
+        // triangle, tiles say 5.8), and it merges with the mesh runs freely - ONE frame,
+        // verified (the probe found +0.01 with spread 0.00 at every socket of every room in
+        // pools 341 and 351; the old separate "pool mesh datum" was the portals sampling rim
+        // ledges as the floor, fixed by the MeshLevels candidate lists).
         if (pr.Tile != null && pr.Height != null && pr.Rect != null && pr.Pos != null)
         {
             int x1 = pr.Rect[0], z1 = pr.Rect[1];
@@ -709,81 +623,79 @@ public static class NorthboundBuilder
                     int i0 = XCell((float)(wxp - pool.Cell / 2)), i1 = XCell((float)(wxp + pool.Cell / 2));
                     int j0 = ZCell((float)(wzp - pool.Cell / 2)), j1 = ZCell((float)(wzp + pool.Cell / 2));
 
-                    if (trow[tc] == 0)
-                    {
-                        // THE WATER SURFACE (owner, 2026-10-10): the height layer carries the
-                        // walk/swim surface even where no tile is laid (the Mine rooms' water
-                        // dips: heightfield flat at base 5.0, the collision descending to -0.66
-                        // under it; the recorded walk crossed at constant y 5.0). Stamp the
-                        // surface into the covered lattice cells where the collision proves
-                        // geometry a step or more below the claim - the water signature. Real
-                        // wall interiors (collision at or above the claim) and geometry-free
-                        // cells stay untouched.
-                        for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
-                        {
-                            for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
-                            {
-                                var idx = j * r.W + i;
-                                var m = mesh[idx];
-                                if (m == null || m.Count == 0 || m[^1] > th - MaxStepRise)
-                                {
-                                    continue; // geometry-free, or the sampled floor reaches the claim: no water here
-                                }
-
-                                var l = levels[idx] ??= new List<float>();
-                                if (l.Count > 0 && Math.Abs(l[^1] - th) <= 0.3f)
-                                {
-                                    continue;
-                                }
-
-                                var pos = l.FindLastIndex(x => x < th) + 1;
-                                if (pos > 0 && th - l[pos - 1] <= 0.3f)
-                                {
-                                    continue; // near-duplicate of the level just below
-                                }
-
-                                l.Insert(pos, th);
-                                if (l.Count > MaxLevels)
-                                {
-                                    l.RemoveAt(0);
-                                }
-                            }
-                        }
-
-                        continue;
-                    }
-
-                    // the tile (pool.Cell metres square) covers these lattice sub-cells
                     for (var j = Math.Max(0, j0); j <= Math.Min(r.H - 1, j1); j++)
                     {
                         for (var i = Math.Max(0, i0); i <= Math.Min(r.W - 1, i1); i++)
                         {
                             var idx = j * r.W + i;
                             tiled[idx] = true; // the room's own tile: the wall ring's inner edge
-                            var l = levels[idx] ??= new List<float>();
-                            // MERGE: neighbouring heightfield cells differ by ~0.2 (5.0 vs 5.2) -
-                            // that is one floor, and an unmerged pair would let the headroom rule
-                            // block the lower half of the room's own floor
-                            if (l.Count > 0 && Math.Abs(l[^1] - th) <= 0.3f)
-                            {
-                                continue;
-                            }
-
-                            var pos = l.FindLastIndex(x => x < th) + 1; // keep the list ascending
-                            if (pos > 0 && th - l[pos - 1] <= 0.3f)
-                            {
-                                continue; // near-duplicate of the level just below
-                            }
-
-                            l.Insert(pos, th);
-                            if (l.Count > MaxLevels)
-                            {
-                                l.RemoveAt(0);
-                            }
+                            tileH[idx] = th; // the keep-open restore reads it back
+                            (runs[idx] ??= new List<(float y0, float y1)>()).Add((th - 0.05f, th + 0.05f)); // the sheet
                         }
                     }
                 }
             }
+        }
+
+        // MERGE the intervals per cell and read the walkable levels off the run stack: a
+        // walkable level is the TOP of a solid run that has at least BodyHigh of open space
+        // above it (the next run starts more than BodyHigh higher, or nothing is above at
+        // all). Runs are merged with a 1 cm touch tolerance - two samplings of the same floor
+        // (the tile sheet and the collision sheet) coalesce into one run.
+        for (var c = 0; c < r.W * r.H; c++)
+        {
+            var l = runs[c];
+            if (l == null || l.Count == 0)
+            {
+                continue; // geometry-free cell: void
+            }
+
+            l.Sort((a, b) => a.y0.CompareTo(b.y0));
+            var m = new List<(float y0, float y1)> { l[0] };
+            for (var k = 1; k < l.Count; k++)
+            {
+                if (l[k].y0 <= m[^1].y1 + 0.01f)
+                {
+                    m[^1] = (m[^1].y0, Math.Max(m[^1].y1, l[k].y1)); // touching/overlapping: extend the run
+                }
+                else
+                {
+                    m.Add(l[k]); // an open gap: the next solid run
+                }
+            }
+
+            List<float> lv = null;
+            for (var k = 0; k < m.Count; k++)
+            {
+                var top = m[k].y1;
+                if (k + 1 < m.Count && m[k + 1].y0 - top <= BodyHigh)
+                {
+                    continue; // a run too close above: no standing room (the chest-bar rule; also the table-top rule)
+                }
+
+                if (lv is { Count: > 0 } && top - lv[^1] <= MergeLevels)
+                {
+                    continue; // the same floor sampled twice (the tops ascend with the runs)
+                }
+
+                lv ??= new List<float>();
+                lv.Add(top);
+                if (lv.Count > MaxLevels)
+                {
+                    lv.RemoveAt(0); // cap at MaxLevels (8): drop the LOWEST - decks above matter more than the deep stack below
+                }
+            }
+
+            levels[c] = lv!; // null stays null: a cell with no standable level
+        }
+
+        // BLOCKED is the honest topology: a cell with no standable level at all - fully inside
+        // a wall, or filled solid to the ceiling. Cells whose only levels are wall tops keep
+        // those levels (the A* can never step up to them) and the hug pass paints the wall
+        // band from the untiled seeds, so no extra band test is needed anywhere.
+        for (var c = 0; c < r.W * r.H; c++)
+        {
+            blocked[c] = levels[c] == null;
         }
 
         // portals last: the door's keep-open box, cleared and levelled (doors are walkable by
@@ -806,17 +718,40 @@ public static class NorthboundBuilder
                         blocked[j * r.W + i] = false; // the door frame must never block its own threshold
                         portalCells.Add(j * r.W + i); // exempt from the hug wall ring below
                         var l = levels[j * r.W + i];
-                        var m = mesh[j * r.W + i];
-                        var level = l is { Count: > 0 } ? l[0] // the lowest tile level, else the lowest mesh level, else unknown
-                            : m is { Count: > 0 } ? m[0]
-                            : float.NaN;
-                        portal.Cells.Add((i, j, level));
-                        if (m is { Count: > 0 })
+                        // THE CLOSED-DOOR LEAF: in the template the door sits IN the passage (the
+                        // server opens it at runtime), so the leaf's solid run merges with the
+                        // sill sheet and the run top names the leaf top, not the floor. Restore
+                        // the tile floor - the level the bot actually crosses at. Untiled
+                        // threshold strips get theirs at blit (the threshold fold + the void
+                        // sill stamp over keep-open cells).
+                        if (tiled[j * r.W + i])
                         {
-                            // every distinct mesh level of the portal's cells: a cave socket
-                            // carries the sill AND ledges above it, and nearest-first ordering
-                            // made some portals anchor on a ledge metres above the sill
-                            foreach (var v in m)
+                            var th = tileH[j * r.W + i];
+                            if (l == null)
+                            {
+                                l = levels[j * r.W + i] = new List<float> { th };
+                            }
+                            else if (!l.Any(x => Math.Abs(x - th) <= MergeLevels))
+                            {
+                                var pos = l.FindLastIndex(x => x < th) + 1; // keep the list ascending
+                                l.Insert(pos, th);
+                                if (l.Count > MaxLevels)
+                                {
+                                    l.RemoveAt(0);
+                                }
+                            }
+                        }
+
+                        var level = l is { Count: > 0 } ? l[0] : float.NaN;
+                        portal.Cells.Add((i, j, level));
+                        if (l is { Count: > 0 })
+                        {
+                            // every distinct level of the portal's cells: a cave socket carries
+                            // the sill AND ledges above it, and nearest-first ordering made some
+                            // portals anchor on a ledge metres above the sill (grey_mh7: 8.10
+                            // over 5.01). The blit picks the candidate nearest the server's own
+                            // door level - the sill the server names.
+                            foreach (var v in l)
                             {
                                 if (!portal.MeshLevels.Any(x => Math.Abs(x - v) < 0.005f))
                                 {
@@ -826,7 +761,7 @@ public static class NorthboundBuilder
 
                             if (float.IsNaN(portal.MeshLevel))
                             {
-                                portal.MeshLevel = m[0]; // legacy single anchor: nearest-first
+                                portal.MeshLevel = l[0]; // legacy single anchor: nearest-first
                             }
                         }
                     }
@@ -909,7 +844,7 @@ public static class NorthboundBuilder
         }
 
         r.Levels = levels;
-        r.MeshLevels = mesh;
+        r.MeshLevels = new List<float>[r.W * r.H]; // single frame since the interval model: every level is absolute in Levels; the array stays for the file format and the blit's vestigial mesh path
         r.Blocked = blocked;
         r.Hug = hug;
         return r;
@@ -917,14 +852,6 @@ public static class NorthboundBuilder
         // world coordinate -> lattice cell index (local helpers over the frame set up above)
         int XCell(float x) => (int)Math.Floor((x - r.Ox) / cell);
         int ZCell(float z) => (int)Math.Floor((z - r.Oz) / cell);
-    }
-
-    // min/max of one coordinate over a triangle's three vertices (o strides in floats)
-    private static (float min, float max) MinMax(float[] v, int o)
-    {
-        var min = Math.Min(v[o], Math.Min(v[o + 3], v[o + 6]));
-        var max = Math.Max(v[o], Math.Max(v[o + 3], v[o + 6]));
-        return (min, max);
     }
 
     // Is (px, pz) inside the triangle's XZ projection? Three signed edge cross products: inside
