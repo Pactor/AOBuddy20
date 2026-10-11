@@ -48,7 +48,7 @@ public sealed class BuffCatalog
         public int? NanoId;
         public string Tell = "";
 
-        // The ids the receiver gate / modifiers actually live on. A plain buff lands as its own
+        // The ids the caster gate / modifiers actually live on. A plain buff lands as its own
         // nano, so this is just { NanoId }; a team-cast buff (NCU line, Umbral) lands via separate
         // "landIds", and the receiver requirement + the stat it adds live on THOSE (owner, 2026-10-05).
         public List<int> LandIds = new();
@@ -263,8 +263,8 @@ public sealed class BuffCatalog
         return entry;
     }
 
-    // Fold the pack-verified facts (strain / receiver gate / flat modifiers) onto each entry, so every
-    // equation reads from nanos.ocp rather than a parsed effect string. The receiver gate is read per
+    // Fold the pack-verified facts (strain / caster gate / flat modifiers) onto each entry, so every
+    // equation reads from nanos.ocp rather than a parsed effect string. The caster gate is read per
     // nano by <see cref="CasterGate" /> (the Level> use-gate of the formula).
     private void Enrich()
     {
@@ -452,7 +452,7 @@ public sealed class BuffCatalog
                 if (req.Stat == StatLevel && req.Operator == OpGreaterThan)
                 {
                     var lv = req.Value + 1; // GreaterThan N is inclusive of N+1
-                    level = level == 0 ? lv : Math.Min(level, lv); // the receiver gate is the LOWER of caster/receiver
+                    level = level == 0 ? lv : Math.Min(level, lv); // the caster gate: the lowest of the actions' requirements
                 }
                 else if (req.Stat == StatExpansion && req.Operator == OpBitAnd && (req.Value & 2) != 0)
                 {
