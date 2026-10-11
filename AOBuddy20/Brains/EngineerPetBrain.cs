@@ -60,6 +60,7 @@ public sealed class EngineerPetBrain : PetBrain
     private const double DecideEverySec = 1.0;
 
     private double _sinceDecide;
+    private bool _rezSickLogged; // the "holding the summon for rez sickness" line is logged once per episode
     private const double ShellDeleteCooldownSec = 5.0; // don't re-send a delete while the shell is still disappearing
 
     private readonly Dictionary<int, double> _summonAt = new();          // nanoId -> last cast (_clock)
@@ -169,6 +170,29 @@ public sealed class EngineerPetBrain : PetBrain
         if (SummonHeld)
         {
             return true;
+        }
+
+        // REZ SICKNESS: a resurrection leaves TemporarySkillReduction (stat 247) set, dragging MC/TS
+        // down while it lasts. Summoning now casts the best pet our DEPRESSED skills allow - a weaker
+        // robot than we could field once it clears, and it burns the 120 s nanoline lock doing it. So
+        // hold the summon until the reduction is gone (the same stat the Keeper's rez-sick-removal nano
+        // gates on, "TemporarySkillReduction > 1"). Owner 2026-10-11. Only the fresh summon waits - an
+        // up robot is driven/maintained by the branch above, untouched.
+        if (me.TryGetStat(Stat.TemporarySkillReduction, out var skillRed) && skillRed > 0)
+        {
+            if (!_rezSickLogged)
+            {
+                _rezSickLogged = true;
+                _logger.LogInformation($"PET: resurrection sickness up (TemporarySkillReduction {skillRed}) - holding the summon until it clears, so the best pet is cast from full skills.");
+            }
+
+            return true;
+        }
+
+        if (_rezSickLogged)
+        {
+            _rezSickLogged = false;
+            _logger.LogInformation("PET: resurrection sickness cleared - summoning now.");
         }
 
         // No robot: work on summoning one. Claim the task while establishing it so the bot gets its
