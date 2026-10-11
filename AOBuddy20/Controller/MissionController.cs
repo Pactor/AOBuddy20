@@ -2956,7 +2956,7 @@ public sealed class MissionController : IPacketConsumer
 
         foreach (var d in _serverDoors)
         {
-            if (d.pf != _missionPf || (d.flags & 0x80) != 0 || (d.flags & 0x40) == 0)
+            if (d.pf != _missionPf || (d.flags & 0x40) == 0)
             {
                 continue; // another building's, open, or merely shut (shut opens on approach)
             }
