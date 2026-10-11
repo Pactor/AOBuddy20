@@ -1195,7 +1195,13 @@ public static class NorthboundBuilder
             minRegionArea: 1f, mergeRegionArea: 1f,
             edgeMaxLen: 12f, edgeMaxError: 1.3f, vertsPerPoly: 6,
             detailSampleDist: 0f, detailSampleMaxError: 0f,
-            filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
+            filterLowHangingObstacles: true,
+            // filterLedgeSpans OFF: a floor passing UNDER a rim/ledge is flanked by columns
+            // whose only walkable span is the rim top metres up - the filter reads that as a
+            // deadly drop and nulls the corridor floor (the recorded walks crossed under
+            // grey_mh4's rim at y 5; the filter erased exactly those spans). The world grid's
+            // own step rules and hug judge real drops.
+            filterLedgeSpans: false, filterWalkableLowHeightSpans: true,
             walkableAreaMod: new RcAreaModification(RcRecast.RC_WALKABLE_AREA), buildMeshDetail: false);
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
         var result = new RcBuilder().Build(geom, new RcBuilderConfig(cfg, bmin, bmax), true);
