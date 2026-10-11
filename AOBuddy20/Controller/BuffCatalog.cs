@@ -57,7 +57,9 @@ public sealed class BuffCatalog
         // never a parsed effect string. 0 / empty when the nano is not in the pack.
         public int Strain; // NanoStrain (stat 75): the OVERWRITE group - two buffs sharing a strain do
         // not stack (the higher StackingOrder wins), so the planner never requests two of one strain.
-        public int ReceiverLevel; // minimum RECEIVER level (target=18 Level> gate, +1); 0 = no level gate.
+        public int CasterLevel; // the CASTER's own use-requirement gate (Level> on the formula's actions); 0 = none.
+        // Use requirements gate the CASTER - a target-level restriction would be marked TARGET in the
+        // requirements (owner, 2026-10-11: "use requirements are for the caster, not the target").
         public bool NeedsSl; // receiver must own Shadowlands (target=18 Expansion 389 BitAnd 2).
         public IReadOnlyDictionary<int, int> Modifies = new Dictionary<int, int>(); // stat -> flat amount added.
 
@@ -263,7 +265,7 @@ public sealed class BuffCatalog
 
     // Fold the pack-verified facts (strain / receiver gate / flat modifiers) onto each entry, so every
     // equation reads from nanos.ocp rather than a parsed effect string. The receiver gate is read per
-    // nano by <see cref="ReceiverGate" /> (it auto-detects whose level a Level> gate belongs to).
+    // nano by <see cref="CasterGate" /> (the Level> use-gate of the formula).
     private void Enrich()
     {
         if (!NanoLibrary.Loaded)
@@ -320,8 +322,8 @@ public sealed class BuffCatalog
 
             b.Strain = rep.Stat(75);
             b.RepNanoId = rep.NanoId;
-            var (level, sl) = ReceiverGate(rep);
-            b.ReceiverLevel = level;
+            var (level, sl) = CasterGate(rep);
+            b.CasterLevel = level;
             b.NeedsSl = sl;
             b.Modifies = rep.Modifies;
 
@@ -336,12 +338,12 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = casts.Any(c => c.Func == FuncTeamCastNano);
                 b.CanCastOnOthers = casts.Any(c => c.Func is FuncTeamCastNano or FuncAreaCastNano);
-                b.ReceiverLevel = casts.Max(x =>
+                b.CasterLevel = casts.Max(x =>
                 {
                     var nn = NanoLibrary.Find(x.NanoId);
                     if (nn != null)
                     {
-                        return ReceiverGate(nn).Level;
+                        return CasterGate(nn).Level;
                     }
 
                     throw new KeyNotFoundException($"Nano {x.NanoId} not found???");
@@ -351,10 +353,9 @@ public sealed class BuffCatalog
             {
                 b.NeedsTeam = false;
                 b.CanCastOnOthers = rep.TargetsOthers;
-                // ReceiverLevel stays the REP nano's own receiver gate (set above from
-                // ReceiverGate(rep)): a single-target buff's target-level restriction lives on
-                // the landed nano (Improved Essence of Behemoth: Level > 215 - wiping it made
-                // the comfort fill request buffs that can never land on a low-level receiver).
+                // CasterLevel stays the REP nano's own caster gate (set above from
+                // CasterGate(rep)): the formula's Level> use-requirement gates the CASTER -
+                // the target's level is irrelevant to it (owner, 2026-10-11).
             }
 
             
@@ -433,7 +434,9 @@ public sealed class BuffCatalog
     // structurally; the receiver requirement is the LOWEST Level> gate (owner, 2026-10-05: Composite Mochams
     // 8h reads caster 219 / receiver 209 this way). A single-gate nano (every NCU tier, most buffs) is
     // unchanged. SL is read from any Expansion BitAnd-2 gate (caster or target).
-    private static (int Level, bool NeedsSl) ReceiverGate(NanoProfile nano)
+    // The CASTER's Level> use-gate of a nano formula: the lowest of its actions' Level
+    // requirements (the actions normally carry the formula's one gate identically).
+    private static (int Level, bool NeedsSl) CasterGate(NanoProfile nano)
     {
         var level = 0;
         var needsSl = false;
@@ -463,7 +466,7 @@ public sealed class BuffCatalog
 
     /// <summary>Can THIS receiver take this buff: its level clears the gate and it owns SL if required.</summary>
     public static bool Castable(BuffEntry b, int myLevel, bool paid) =>
-        b.ReceiverLevel <= myLevel && (!b.NeedsSl || paid);
+        b.CasterLevel <= myLevel && (!b.NeedsSl || paid);
 
     /// <summary>
     ///     The cheapest single-skill rung that adds at least <paramref name="need" /> to a nano skill
@@ -1274,7 +1277,7 @@ public sealed class BuffCatalog
 
                 string why;
                 if (!Obtainable(b)) why = "not obtainable (self-only and not learned, or no tell)";
-                else if (b.ReceiverLevel > myLevel) why = $"receiver level {b.ReceiverLevel} > our {myLevel}";
+                else if (b.CasterLevel > myLevel) why = $"caster level {b.CasterLevel} > our {myLevel}";
                 else if (b.NeedsSl && !paid) why = "needs Shadowlands";
                 else
                 {
@@ -1453,7 +1456,7 @@ public sealed class BuffCatalog
         public string Tell = "";
         public int MaxNcuAdded; // +Max NCU the selected tier grants (e.g. +60 at L50)
         public int LandId; // the landed nano actually running on the receiver
-        public int ReceiverLevel; // the level that tier needs
+        public int CasterLevel; // the caster level that tier needs
         public bool NeedsTeam; // the tier is team-cast - we must be teamed with the caster to receive it
         public string Name = ""; // the tier's catalog name (for the dry-run trace)
     }
@@ -1469,7 +1472,7 @@ public sealed class BuffCatalog
     ///     catalog (Codedoc lists each tier as its own entry, Chewy as one laddered entry - either way every
     ///     +Max NCU buff is considered, not just the first), keeps only tiers that CAST ON OTHERS (a bot
     ///     cannot give us a self-only buff - this is what kept the +500 Firewalled Sync Compressor, a Fixer
-    ///     SELF buff, out), whose receiver level/SL gate we meet, and picks the largest +Max NCU. Requested
+    ///     SELF buff, out), whose caster level/SL gate we meet, and picks the largest +Max NCU. Requested
     ///     FIRST (it expands Max NCU so the rest of the stack fits). Null when none qualifies.
     /// </summary>
     public NcuPick? BestNcuBuff(LocalPlayer me, bool paid)
@@ -1485,7 +1488,7 @@ public sealed class BuffCatalog
         foreach (var b in _buffs)
         {
             var added = b.Adds(StatMaxNcu);
-            if (added <= 0 || !b.CanCastOnOthers || b.ReceiverLevel > myLevel || (b.NeedsSl && !paid))
+            if (added <= 0 || !b.CanCastOnOthers || b.CasterLevel > myLevel || (b.NeedsSl && !paid))
             {
                 continue; // not an NCU buff / self-only / above our level / SL we don't own
             }
@@ -1495,7 +1498,7 @@ public sealed class BuffCatalog
                 best = new NcuPick
                 {
                     Tell = b.Tell, MaxNcuAdded = added, LandId = b.RepNanoId,
-                    ReceiverLevel = b.ReceiverLevel, NeedsTeam = b.NeedsTeam, Name = b.Name,
+                    CasterLevel = b.CasterLevel, NeedsTeam = b.NeedsTeam, Name = b.Name,
                 };
             }
         }
