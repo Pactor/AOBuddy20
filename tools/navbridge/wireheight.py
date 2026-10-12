@@ -34,6 +34,7 @@ from collections import defaultdict
 import rdb
 
 DEFAULT_DB = r"F:\Testcellao\Aobetaclient\cd_image\data\db"
+NAV_DIR = r"F:\testcellao\AOBuddy20\AOBuddy20\AOBuddy20\GameData\Nav"
 
 N3_CHARDCMOVE = 0x54111123
 N3_SCFU = 0x271B3A6B
@@ -319,6 +320,79 @@ def _from_id(src, n3id, raw):
         yield from _from_raw(src, name, raw)
 
 
+# ── the collision side: AOCL (RDB 1000013 via the client's own reader) -> surface sampler ─
+
+class Collision:
+    """collision.bin for one playfield: the near-horizontal triangles of RDB 1000013, decoded
+    by the client's own N3.dll reader (AONavExtractor) and stored chunked as int16 centimetres
+    relative to a per-chunk origin. walls.bin is the same layout (steep tall triangles) and
+    loads too when asked - it blocks horizontally but adds little to a standing-Y query."""
+
+    def __init__(self, nav_dir, pf, files=("collision.bin",)):
+        import os
+        self.tris = []  # flat 9 floats per triangle, world coordinates
+        for name in files:
+            path = os.path.join(nav_dir, str(pf), name)
+            with open(path, "rb") as fh:
+                head = fh.read(20)
+            if head[:4] != b"AOCL":
+                raise ValueError("%s: not AOCL" % path)
+            _ver, _chunks, raw_len, z_len = struct.unpack_from("<iiii", head, 4)
+            with open(path, "rb") as fh:
+                fh.seek(20)
+                body = zlib.decompress(fh.read(z_len))
+            p = 0
+            while p + 32 <= raw_len and p + 32 <= len(body):
+                _inst, _tpf, _lt, _li = struct.unpack_from("<iiii", body, p)
+                ox, oy, oz = struct.unpack_from("<fff", body, p + 16)
+                cnt = struct.unpack_from("<i", body, p + 28)[0]
+                p += 32
+                tri_bytes = cnt * 18
+                for t in range(cnt):
+                    b = p + t * 18
+                    vs = []
+                    for k in range(9):
+                        vs.append(ox if k % 3 == 0 else (oy if k % 3 == 1 else oz))
+                    vals = struct.unpack_from("<9h", body, b)
+                    for k in range(9):
+                        vs[k] += vals[k] / 100.0
+                    self.tris.append(vs)
+                p += tri_bytes
+        # 2D hash grid over triangle bounding boxes
+        self.cell = 8.0
+        self.grid = defaultdict(list)
+        for idx, v in enumerate(self.tris):
+            xs = v[0::3]
+            zs = v[2::3]
+            x0, x1 = min(xs), max(xs)
+            z0, z1 = min(zs), max(zs)
+            for cx in range(int(x0 // self.cell), int(x1 // self.cell) + 1):
+                for cz in range(int(z0 // self.cell), int(z1 // self.cell) + 1):
+                    self.grid[(cx, cz)].append(idx)
+
+    def surfaces(self, x, z, eps=0.0):
+        """Plane y of EVERY collision triangle containing (x,z) - terrain, decks, ramps and
+        tree canopies alike. The caller matches the wire Y against all of them: walkable in
+        AO is not 'the top-most surface' (a body under a tree stands on the ground)."""
+        out = []
+        cand = self.grid.get((int(x // self.cell), int(z // self.cell)), [])
+        for idx in cand:
+            v = self.tris[idx]
+            ax, az, bx, bz, cx2, cz2 = v[0], v[2], v[3], v[5], v[6], v[8]
+            det = (bz - cz2) * (ax - cx2) + (cx2 - bx) * (az - cz2)
+            if abs(det) < 1e-9:
+                continue
+            l1 = ((bz - cz2) * (x - cx2) + (cx2 - bx) * (z - cz2)) / det
+            l2 = ((cz2 - az) * (x - cx2) + (ax - cx2) * (z - cz2)) / det
+            l3 = 1.0 - l1 - l2
+            if l1 < -eps or l2 < -eps or l3 < -eps:
+                continue
+            y = l1 * v[1] + l2 * v[4] + l3 * v[7]
+            if y == y:
+                out.append(y)
+        return out
+
+
 # ── the comparison ────────────────────────────────────────────────────────────────────────
 
 def fit(terr, pts, cell):
@@ -347,6 +421,8 @@ def main(argv):
     source_filter = "server"   # server-reported locations are the ask; 'all' adds the client's own
     csv_out = None
     verbose = False
+    no_collision = False
+    nav_dir = NAV_DIR
     it = iter(argv[1:])
     for a in it:
         if a == "--db":
@@ -361,6 +437,10 @@ def main(argv):
             source_filter = next(it)
         elif a == "--csv":
             csv_out = next(it)
+        elif a == "--no-collision":
+            no_collision = True
+        elif a == "--nav":
+            nav_dir = next(it)
         elif a == "--verbose":
             verbose = True
         else:
@@ -404,20 +484,45 @@ def main(argv):
     terr0 = Terrain(db, pf)
     rec = terr0.record_modulo
     modulos = [modulo] if modulo else ([rec, 256] if rec not in (0, 256) else [256])
+    # the second ground layer: RDB 1000013 near-horizontal triangles (decks, ramps, platforms,
+    # AND tree canopies - trees are walkable). There is no single 'top-most' answer: a body
+    # under a tree stands on terrain while a canopy floats above. So every wire point is
+    # judged against ALL surfaces at its x/z, and we report which layer explained it.
+    col = None
+    if not no_collision:
+        try:
+            col = Collision(NAV_DIR, pf)
+            print("collision: %d near-horizontal triangles (GameData/Nav/%s/collision.bin)" % (len(col.tris), pf))
+        except (OSError, ValueError) as e:
+            print("collision: unavailable (%s) - terrain only" % e)
+
+    def surfaces(terr, p, cell):
+        """(y, layer) for every surface at the point's x/z: terrain first, then collision."""
+        out = []
+        yt = terr.height(p[2], p[4], cell)
+        if yt == yt:
+            out.append((yt, "terrain"))
+        if col:
+            for y in col.surfaces(p[2], p[4]):
+                out.append((y, "collision"))
+        return out
+
     for mod in modulos:
         terr = terr0 if mod == rec else Terrain(db, pf, mod)
+        run = cap_files[0].replace("\\", "/").rsplit("/", 1)[-1].split(".")[0]
         if csv_out and mod == modulos[0]:
-            run = cap_files[0].replace("\\", "/").rsplit("/", 1)[-1].split(".")[0]
             n = 0
             with open(csv_out, "w", encoding="utf8") as fh:
-                fh.write("run,source,kind,x,z,y_server,y_rdb,delta\n")
+                fh.write("run,source,kind,x,z,y_wire,y_terrain,y_surface,delta,layer\n")
                 for p in points:
-                    t = terr.height(p[2], p[4])
-                    if t != t:
+                    surfs = surfaces(terr, p, terr.cell)
+                    if not surfs:
                         continue
+                    y, layer = min(surfs, key=lambda s: abs(p[3] - s[0]))
+                    yt = surfs[0][0]
                     n += 1
-                    fh.write("%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%.2f\n" % (
-                        run, p[0], p[1], p[2], p[4], p[3], t, p[3] - t))
+                    fh.write("%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%s\n" % (
+                        run, p[0], p[1], p[2], p[4], p[3], yt, y, p[3] - y, layer))
             print("csv: %d rows -> %s" % (n, csv_out))
         print("rdb pf %s '%s': %dx%d samples, cell=%g hscale=%g P=%d bits=%d modulo=%d -> world %gx%g m" % (
             pf, terr.name, terr.w, terr.h, terr.cell, terr.hscale, terr.P, terr.bits, terr.modulo,
@@ -428,26 +533,35 @@ def main(argv):
             label = "cell=%g%s" % (cell, " (record)" if cell == terr.cell else " (override)")
             bykind = defaultdict(list)
             for p in points:
-                t = terr.height(p[2], p[4], cell)
-                if t == t:
-                    bykind[p[1]].append((p, t))
-            print("\n-- %s" % label)
+                surfs = surfaces(terr, p, cell)
+                if not surfs:
+                    continue
+                y, layer = min(surfs, key=lambda s: abs(p[3] - s[0]))
+                bykind[p[1]].append((p, y, layer))
+            print("\n-- %s%s" % (label, " (terrain + collision)" if col else ""))
             allerr = []
             for kind in sorted(bykind):
-                errs = sorted(p[3] - t for p, t in bykind[kind])
+                errs = sorted(p[3] - y for p, y, _ in bykind[kind])
                 med = errs[len(errs) // 2]
                 near = 100 * sum(1 for e in errs if abs(e) < 3) // len(errs)
+                tight = 100 * sum(1 for e in errs if abs(e) < 1) // len(errs)
+                lay = defaultdict(int)
+                for _, _, l in bykind[kind]:
+                    lay[l] += 1
+                layers = " ".join("%s %d" % (k, v) for k, v in sorted(lay.items()))
                 allerr += errs
-                f = fit(terr, [p for p, _ in bykind[kind]], cell)
-                fitx = "fit wireY=%+.3f*terrain%+.2f" % (f[0], f[1]) if f else ""
-                print("   %-7s n=%-5d median err=%+7.2f m   |err|<3m: %3d%%   %s" % (kind, len(errs), med, near, fitx))
+                print("   %-7s n=%-5d median |d|=%5.2f m   <1m: %3d%%  <3m: %3d%%   [%s]" % (
+                    kind, len(errs), abs(med), tight, near, layers))
                 if verbose:
-                    for p, t in bykind[kind][:12]:
-                        print("        %-7s (%9.1f,%9.1f) wireY=%7.2f terrain=%7.2f err=%+7.2f" % (p[0], p[2], p[4], p[3], t, p[3] - t))
+                    for p, y, l in bykind[kind][:12]:
+                        print("        %-7s (%9.1f,%9.1f) wireY=%7.2f nearest=%7.2f (%s) delta=%+7.2f" % (
+                            p[0], p[2], p[4], p[3], y, l, p[3] - y))
             if allerr:
                 allerr.sort()
-                print("   ALL     n=%-5d median err=%+7.2f m   |err|<3m: %3d%%" % (
-                    len(allerr), allerr[len(allerr) // 2], 100 * sum(1 for e in allerr if abs(e) < 3) // len(allerr)))
+                tight = 100 * sum(1 for e in allerr if abs(e) < 1) // len(allerr)
+                print("   ALL     n=%-5d median |d|=%5.2f m   <1m: %3d%%  <3m: %3d%%" % (
+                    len(allerr), abs(allerr[len(allerr) // 2]), tight,
+                    100 * sum(1 for e in allerr if abs(e) < 3) // len(allerr)))
     return 0
 
 
