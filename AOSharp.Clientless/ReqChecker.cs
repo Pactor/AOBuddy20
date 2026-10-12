@@ -173,12 +173,12 @@ internal class ReqChecker
                 case UseCriteriaOperator.HasNotRunningNano:
                     metReq = _criteriaSource.Char.Buffs.All(x => x.Id != criterion.Param2);
                     break;
-                //case UseCriteriaOperator.HasPerk:
-                //    metReq = N3EngineClientAnarchy_t.HasPerk(N3Engine_t.GetInstance(), criterion.Param2);
-                //    break;
-                //case UseCriteriaOperator.HasNotPerk:
-                //    metReq = !N3EngineClientAnarchy_t.HasPerk(N3Engine_t.GetInstance(), criterion.Param2);
-                //    break;
+                case UseCriteriaOperator.HasPerk:
+                    metReq = HasTrainedPerk(criterion.Param2);
+                    break;
+                case UseCriteriaOperator.HasNotPerk:
+                    metReq = !HasTrainedPerk(criterion.Param2);
+                    break;
                 case UseCriteriaOperator.IsPerkUnlocked:
                     metReq = true;
                     break;
@@ -258,6 +258,21 @@ internal class ReqChecker
         }
 
         return metReq;
+    }
+
+    // A perk gate's Param2 is the Perks.xml PacketID - the SAME id FullCharacter.Perks[].SkillId
+    // carries (verified against nano-gates: 240 = Cartographer 1, 699 = Sublime Rapport 10). So a
+    // trained-perk check is a direct id compare against the wire perk list, no name resolution.
+    // Trained perks are on the wire ONLY for the local player; a remote target's perks are not in
+    // our data, so a perk gate whose source is not us cannot be confirmed and reads as "not trained".
+    private bool HasTrainedPerk(int packetId)
+    {
+        if (_criteriaSource.Char is not LocalPlayer lp || lp.Perks == null)
+        {
+            return false;
+        }
+
+        return lp.Perks.Any(p => p.SkillId == packetId);
     }
 
     private bool HasFreePetSlot(int param2)
