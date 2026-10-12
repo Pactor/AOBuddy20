@@ -262,6 +262,9 @@ internal class Program
         // SYSTEM LINES: the always-on record of the server's feedback (FormatFeedback/Feedback),
         // logged whatever run is active; the mmdb-formatted text is the point.
         services.AddSingleton<SystemFeedback>();
+        // DIAGNOSTIC MODE ('diagnostic on|off'): every packet on the wire, raw, into
+        // diag-packets.log (overwritten per capture). Off until the owner turns it on.
+        services.AddSingleton<PacketRecorder>();
         services.AddSingleton<Awareness>();
         services.AddSingleton<MovementController>();
         services.AddSingleton<BotLoop>();
@@ -279,6 +282,7 @@ internal class Program
             provider.GetService<MovementController>()?.RegisterPackets(router);
             provider.GetService<ResupplyController>()?.RegisterPackets(router);
             provider.GetService<MissionController>()?.RegisterPackets(router);
+            provider.GetService<PacketRecorder>()?.RegisterPackets(router);
             provider.GetService<TeamController>()?.RegisterPackets(router); // the routed team invite
             provider.GetService<BuffBotController>()?.RegisterPackets(router);
         }

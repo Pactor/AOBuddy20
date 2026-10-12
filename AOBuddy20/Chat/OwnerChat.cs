@@ -15,6 +15,7 @@ using AOBuddy20.Configuration;
 using AOBuddy20.Controlling;
 using AOBuddy20.Enums;
 using AOBuddy20.Nav;
+using AOBuddy20.Network;
 using AOBuddy20.Storage;
 using AOBuddy20.Utils;
 using AOSharp.Clientless;
@@ -51,6 +52,7 @@ public sealed class OwnerChat
     private readonly SellController _sell;
     private readonly HuntController _hunt;
     private readonly BuffBotController _buffBot;
+    private readonly PacketRecorder _recorder;
 
     private bool _greeted;
     private bool _running;
@@ -62,7 +64,7 @@ public sealed class OwnerChat
 
     public OwnerChat(MovementController movement, ResupplyController resupply, SellController sell,
         MissionController mission, BrainBank brains, LootBagStore lootBags, HuntController hunt,
-        BuffBotController buffBot, AccountInfo config, ILogger<OwnerChat> logger)
+        BuffBotController buffBot, PacketRecorder recorder, AccountInfo config, ILogger<OwnerChat> logger)
     {
         _movement = movement;
         _resupply = resupply;
@@ -72,6 +74,7 @@ public sealed class OwnerChat
         _lootBags = lootBags;
         _hunt = hunt;
         _buffBot = buffBot;
+        _recorder = recorder;
         _config = config;
         _logger = logger;
         _commands = BuildCommands();
@@ -423,7 +426,7 @@ public sealed class OwnerChat
 
         t["help"] = (reply, p) =>
         {
-            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|clear [on|off]|status|roll|list|accept n|buybags n|want ...] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | buffs [start|pet|stop|status] | nanoreset | pet [attack|follow] | stop | sit | stand | navdata | help." +
+            reply("Commands: follow | stay | pos | status | goto x [y] z | goto x z [pf] | come | travel pf | travel x z [pf] | resupply [stop|status|forget|machines|bags n] | sell [stop|status] | lootbag [list|add N|remove N] | mission [run|stop|clear [on|off]|status|roll|list|accept n|buybags n|want ...] | brain | hunt [on|off|radius N|maxlevel N|faction auto|on|off|blacklist add|remove|list] | buffs [start|pet|stop|status] | nanoreset | pet [attack|follow] | diagnostic [on|off] | stop | sit | stand | navdata | help." +
                   " follow stacks me on you and mirrors your movement; goto/come walk at priority Travel and hand me back to follow on arrival;" +
                   " travel crosses playfields by zone lines, doors, whompas and pads (id or name); resupply shops for stims and rechargers by my own skills (bags n buys bags);" +
                   " sell sells the bag contents to a shop terminal (NODROP and main inventory untouched);" +
@@ -446,6 +449,10 @@ public sealed class OwnerChat
         t["nanoreset"] = (reply, p) => { NanoResetCommand(reply); };
         // PET: point the pets at the owner's target and hold them on it, or stand them down.
         t["pet"] = (reply, p) => { _hunt.CommandPet(p, reply); };
+
+        // DIAGNOSTIC: the packet capture ('diagnostic on|off') - every packet, raw, into
+        // diag-packets.log next to the exe, overwritten each time the mode turns on.
+        t["diagnostic"] = (reply, p) => { _recorder.Command(p, reply); };
 
         // LOOTBAGS: the bags of the packs, numbered; add/remove (de)signates by number. The
         // designation lives in the LootBagStore (per-character JSON); loot logic consumes it later.
