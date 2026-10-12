@@ -8,6 +8,7 @@
 // Long live OmniCell and AOBuddy
 // ---------------------------------------------------------------------------------------
 
+using System.Globalization;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
@@ -59,6 +60,7 @@ public sealed class PacketRecorder
         router.Register(DoorHandler, N3MessageType.DoorFullUpdate, 0);
         router.Register(DoorStatusHandler, N3MessageType.DoorStatusUpdate, 0);
         router.Register(ZoneHandler, N3MessageType.PlayfieldAnarchyF, 0);
+        router.Register(DynelHandler, N3MessageType.SimpleCharFullUpdate, 0);
     }
 
     // ── the mode ('diagnostic on|off|status') ──────────────────────────────────────────────
@@ -221,11 +223,33 @@ public sealed class PacketRecorder
         }
 
         Line($";DOOR {d.Owner} room={d.Room} adj={d.AdjoiningRoom} " +
-             $"pos=({d.Coordinate.X:0.0},{d.Coordinate.Y:0.0},{d.Coordinate.Z:0.0}) pf={d.Playfield} " +
+             $"pos=({Inv(d.Coordinate.X)},{Inv(d.Coordinate.Y)},{Inv(d.Coordinate.Z)}) pf={d.Playfield} " +
              $"flags=0x{flags:X}{((flags & 0x40) != 0 ? " LOCKED" : "")}{((flags & 0x80) != 0 ? " OPEN" : "")} " +
              $"lockdiff={d.LockDifficulty} name='{d.Name}'");
         return false;
     }
+
+    // Every spawn/re-stream of every dynel: identity, world spot, facing and the wire flags.
+    // The mission entrance (ACGEntrance) is one of these - its heading names the side the
+    // entry works from, which is the question the captures are here to answer.
+    private bool DynelHandler(AOMessage arg)
+    {
+        if (arg.Body is not SimpleCharFullUpdateMessage c)
+        {
+            return false;
+        }
+
+        Line($";DYNEL {c.Identity} " +
+             $"pos=({Inv(c.Position.X)},{Inv(c.Position.Y)},{Inv(c.Position.Z)}) " +
+             $"heading=({Inv3(c.Heading.X)},{Inv3(c.Heading.Y)},{Inv3(c.Heading.Z)},{Inv3(c.Heading.W)}) " +
+             $"flags=0x{(int)c.Flags:X} name='{c.Name}'");
+        return false;
+    }
+
+    // Invariant decimals: the host runs a comma locale, and 'pos=(35,0,5,0,245,0)' cannot be
+    // told apart from a list of six integers when the file is parsed later.
+    private static string Inv(float v) => v.ToString("0.0", CultureInfo.InvariantCulture);
+    private static string Inv3(float v) => v.ToString("0.000", CultureInfo.InvariantCulture);
 
     private bool DoorStatusHandler(AOMessage arg)
     {
@@ -246,7 +270,7 @@ public sealed class PacketRecorder
         }
 
         Line($";ZONE {z.PlayfieldId1} " +
-             $"pos=({z.CharacterCoordinates.X:0.0},{z.CharacterCoordinates.Y:0.0},{z.CharacterCoordinates.Z:0.0})");
+             $"pos=({Inv(z.CharacterCoordinates.X)},{Inv(z.CharacterCoordinates.Y)},{Inv(z.CharacterCoordinates.Z)})");
         return false;
     }
 }
