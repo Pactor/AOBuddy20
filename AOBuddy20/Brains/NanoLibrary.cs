@@ -152,6 +152,7 @@ public static class NanoLibrary
                     NanoId = id, Stats = stats, Actions = actions, Modifies = events.Modifies,
                     ModifyTargets = events.ModifyTargets,
                     Casts = events.Casts, TargetsOthers = events.TargetsOthers,
+                    Effects = events.Effects,
                     SummonPets = events.SummonPets
                         .Select(sp => new NanoSummonPet { Args = sp.Args, Requirements = sp.Reqs })
                         .ToList(),
@@ -243,12 +244,14 @@ public static class NanoLibrary
         public readonly Dictionary<int, int> ModifyTargets = new();
         public readonly List<(int Func, int NanoId)> Casts = new();
         public readonly List<(IReadOnlyList<int> Args, IReadOnlyList<NanoRequirement> Reqs)> SummonPets = new();
+        public readonly List<NanoEffect> Effects = new();
         public bool TargetsOthers;
     }
 
-    // Read the effect events, CAPTURING the flat ModifyStat functions, the cast-nano functions (self/team/
-    // area) and the "lands on the target" flag. Everything else is still walked past; advancement is
-    // unchanged from the old SkipEvents.
+    // Read the effect events, CAPTURING every function in full (into EventData.Effects) plus the digested
+    // views the current brains consume - the flat ModifyStat buffs, the cast-nano functions (self/team/
+    // area), the pet summons and the "lands on the target" flag. Nothing is walked past uncaptured now;
+    // non-stat mechanics (heals/absorbs/teleports/...), durations and per-effect targets are all kept.
     private static EventData ReadEvents(BinaryReader reader, int version)
     {
         var data = new EventData();
@@ -272,22 +275,25 @@ public static class NanoLibrary
     {
         var functionType = reader.ReadInt32();
         var target = reader.ReadInt32(); // User(1)/Wearer(2)=self, Target(3)=the cast target (another char)
-        reader.ReadInt32(); // tick count
-        reader.ReadInt32(); // tick interval
-        reader.ReadBoolean(); // dolocalstats
+        var tickCount = reader.ReadInt32();
+        var tickInterval = reader.ReadInt32();
+        var doLocalStats = reader.ReadBoolean();
         var reqs = ReadRequirements(reader);
 
         var argCount = reader.ReadInt32();
-        var ints = new List<int>(2);
+        var args = new List<NanoArg>(argCount);
+        var ints = new List<int>(2); // the int-tagged args, in order - what ModifyStat/cast/summon read
         for (var a = 0; a < argCount; a++)
         {
             switch (reader.ReadByte())
             {
                 case 1:
-                    ints.Add(reader.ReadInt32());
+                    var iv = reader.ReadInt32();
+                    ints.Add(iv);
+                    args.Add(NanoArg.OfInt(iv));
                     break;
-                case 2: reader.ReadSingle(); break;
-                case 3: reader.ReadString(); break;
+                case 2: args.Add(NanoArg.OfFloat(reader.ReadSingle())); break;
+                case 3: args.Add(NanoArg.OfString(reader.ReadString())); break;
                 default:
                     throw new InvalidDataException("unsupported function argument tag");
             }
@@ -295,6 +301,20 @@ public static class NanoLibrary
 
         if (capture != null)
         {
+            // Keep the WHOLE function, uninterpreted - heals, absorbs, reflects, teleports, drains, nukes,
+            // stuns, durations and per-effect targets all live here. The digested views below are just the
+            // handful the current brains already consume, derived from these same values.
+            capture.Effects.Add(new NanoEffect
+            {
+                FunctionType = functionType,
+                Target = target,
+                TickCount = tickCount,
+                TickInterval = tickInterval,
+                DoLocalStats = doLocalStats,
+                Requirements = reqs,
+                Args = args,
+            });
+
             if (functionType is FuncCastNano or FuncTeamCastNano or FuncAreaCastNano)
             {
                 // Casts ANOTHER nano - the delivery signal (self/team/area), judged by function type, not target.

@@ -73,11 +73,111 @@ public sealed class NanoProfile
     /// </summary>
     public bool TargetsOthers;
 
+    /// <summary>
+    ///     EVERY effect function this formula runs when it lands, in record order - the complete behaviour,
+    ///     not just the digested views above. The convenience fields (<see cref="Modifies" />,
+    ///     <see cref="Casts" />, <see cref="SummonPets" />, <see cref="TargetsOthers" />) are derived from
+    ///     this same list; read it directly when you need what they drop:
+    ///     <list type="bullet">
+    ///       <item>NON-stat effects - heals (53002/53012...), damage shields/absorbs/reflects, teleports,
+    ///       drains, nukes, stuns: everything that is not ModifyStat (53045). This is the raw material for
+    ///       ranking SURVIVAL buffs (best max-health / absorb / reflect for a level).</item>
+    ///       <item>DURATION - <see cref="NanoEffect.TickCount" /> x <see cref="NanoEffect.TickInterval" />
+    ///       per effect (see <see cref="NanoEffect.DurationRaw" />): how long the effect lasts, the input to
+    ///       "when does our buff expire / need refreshing". UNIT not yet calibrated - see that field.</item>
+    ///       <item>PER-EFFECT target and gate - <see cref="NanoEffect.Target" /> (self vs the cast target,
+    ///       which may be you, your pet, or another player) and <see cref="NanoEffect.Requirements" /> (the
+    ///       effect's own leaves): the raw signal for pet-only vs pet+you vs pet+you+others.</item>
+    ///     </list>
+    /// </summary>
+    public IReadOnlyList<NanoEffect> Effects = Array.Empty<NanoEffect>();
+
     /// <summary>A stat's raw value, 0 when the record does not carry it (most stats are sparse).</summary>
     public int Stat(int statId) => Stats.TryGetValue(statId, out var v) ? v : 0;
 
     /// <summary>How much this formula modifies a stat when it lands, 0 if it does not touch it.</summary>
     public int Modify(int statId) => Modifies.TryGetValue(statId, out var v) ? v : 0;
+
+    /// <summary>
+    ///     The longest-lived effect's raw lifetime (max TickCount x TickInterval over the effects). For a
+    ///     buff this is its own timer - the number to compare against elapsed time when deciding a refresh.
+    ///     UNIT IS NOT YET CALIBRATED: the cast-time convention elsewhere is centiseconds
+    ///     (HealController reads Stat(210)/100 = seconds), so this is PROBABLY centiseconds, but that must be
+    ///     confirmed against one observed in-game buff timer (a sniff / the buff icon countdown) before any
+    ///     refresh math trusts it. 0 = instant / no timed effect.
+    /// </summary>
+    public int DurationRaw => Effects.Count == 0
+        ? 0
+        : Effects.Select(e => e.DurationRaw).DefaultIfEmpty(0).Max();
+}
+
+/// <summary>How a function argument was tagged in the pack: 1 = int32, 2 = float, 3 = string.</summary>
+public enum NanoArgKind { Int = 1, Float = 2, String = 3 }
+
+/// <summary>One effect-function argument, keeping its original tag and order (ModifyStat is
+/// [Int stat, Int amount]; a percent heal/absorb carries a Float; some carry a String).</summary>
+public readonly struct NanoArg
+{
+    public readonly NanoArgKind Kind;
+    public readonly int Int;
+    public readonly double Float;
+    public readonly string? Str;
+
+    private NanoArg(NanoArgKind kind, int i, double f, string? s)
+    {
+        Kind = kind;
+        Int = i;
+        Float = f;
+        Str = s;
+    }
+
+    public static NanoArg OfInt(int i) => new(NanoArgKind.Int, i, 0, null);
+    public static NanoArg OfFloat(double f) => new(NanoArgKind.Float, 0, f, null);
+    public static NanoArg OfString(string s) => new(NanoArgKind.String, 0, 0, s);
+}
+
+/// <summary>
+///     One effect function of a formula (the client's spell-function record), captured in full. The
+///     function TYPE is the mechanic (53045 ModifyStat, 53051/53066/53087 cast-nano self/team/area,
+///     53167 SummonPet, and every other: heals, absorbs, reflects, teleports, drains, nukes, stuns -
+///     uninterpreted here, exposed raw). <see cref="Target" /> is who it lands on; <see cref="Args" />
+///     the parameters; <see cref="Requirements" /> the effect's own gate leaves.
+/// </summary>
+public sealed class NanoEffect
+{
+    public int FunctionType;
+
+    /// <summary>User(1)/Wearer(2) = the caster (self); Target(3) = the cast target - which may be you,
+    /// your pet, or another player depending on how the nano is cast and its receiver gates.</summary>
+    public int Target;
+
+    /// <summary>Number of times the effect applies. 1 = a single application (most stat buffs).</summary>
+    public int TickCount;
+
+    /// <summary>Raw time between ticks, in the client's own unit (see <see cref="DurationRaw" />).</summary>
+    public int TickInterval;
+
+    public bool DoLocalStats;
+
+    /// <summary>The effect's own requirement leaves (gates on THIS effect, e.g. target-type checks),
+    /// distinct from the formula's cast actions in <see cref="NanoProfile.Actions" />.</summary>
+    public IReadOnlyList<NanoRequirement> Requirements = Array.Empty<NanoRequirement>();
+
+    /// <summary>Every argument, original tag and order preserved. ModifyStat = [Int stat, Int amount].</summary>
+    public IReadOnlyList<NanoArg> Args = Array.Empty<NanoArg>();
+
+    /// <summary>Lands on the caster (self).</summary>
+    public bool OnSelf => Target is 1 or 2;
+
+    /// <summary>Lands on the cast target (you/pet/other), not the caster.</summary>
+    public bool OnTarget => Target == 3;
+
+    /// <summary>This effect's raw lifetime: TickCount x TickInterval, in the client's time unit. See
+    /// <see cref="NanoProfile.DurationRaw" /> for the unit caveat (not yet calibrated).</summary>
+    public int DurationRaw => TickCount * TickInterval;
+
+    /// <summary>The i-th argument as an int, or null when absent / not int-tagged.</summary>
+    public int? IntArg(int i) => i >= 0 && i < Args.Count && Args[i].Kind == NanoArgKind.Int ? Args[i].Int : null;
 }
 
 /// <summary>One cast action of a formula (ToUse/...), with its requirement list.</summary>
