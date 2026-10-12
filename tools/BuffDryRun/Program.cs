@@ -293,6 +293,42 @@ internal static class Program
         return (mc, ts, parts.Count == 0 ? "(no use reqs)" : string.Join(", ", parts), prof, level, spec, exp);
     }
 
+    // The froob/expansion gate of a nano can live on its CRYSTAL, not its program: SL nanos of the
+    // Umbral type carry only skill/level reqs on the program, while the uploadable crystal
+    // ("Nano Crystal (<program name>)", a DummyItem) carries the real "Expansion BitAnd <bit>" use-crit
+    // that blocks a froob (Expansion stat 0). The client refuses the upload; the program alone looks
+    // froob-castable. Map program name -> OR of crystal Expansion bits, built once. (Verified over the
+    // pack: 148 "hidden SL" nanos gated only on the crystal, e.g. Umbral Wrangler program 235058 /
+    // crystal 235280; froob families like Skill Wrangler have no crystal Expansion crit.)
+    private static Dictionary<string, int> _crystalExp;
+
+    private static int CrystalExpansion(string programName)
+    {
+        if (_crystalExp == null)
+        {
+            _crystalExp = new Dictionary<string, int>(StringComparer.Ordinal);
+            const string prefix = "Nano Crystal (";
+            foreach (var id in ItemData.AllDummyItemIds())
+            {
+                if (!ItemData.Find<DummyItem>(id, out var d) || d?.Name == null)
+                    continue;
+                if (!d.Name.StartsWith(prefix, StringComparison.Ordinal) || !d.Name.EndsWith(")", StringComparison.Ordinal))
+                    continue;
+                var inner = d.Name.Substring(prefix.Length, d.Name.Length - prefix.Length - 1);
+                if (d.Criteria == null || !d.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var uc))
+                    continue;
+                var exp = 0;
+                foreach (var c in uc)
+                    if (c.Param1 == (int)Stat.Expansion)
+                        exp |= c.Param2; // any Expansion-BitAnd bit a froob lacks blocks the upload
+                if (exp != 0)
+                    _crystalExp[inner] = _crystalExp.TryGetValue(inner, out var had) ? had | exp : exp;
+            }
+        }
+
+        return programName != null && _crystalExp.TryGetValue(programName, out var e) ? e : 0;
+    }
+
     private static double Ratio(int cur, int req) => req <= 0 ? 1.0 : cur / (double)req;
 
     private static string OpSym(UseCriteriaOperator op) => op switch
@@ -344,6 +380,7 @@ internal static class Program
             if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var use))
                 foreach (var c in use)
                     Classify(c.Param1, c.Operator, c.Param2, required, ref reqProf, ref reqLevel, ref reqSpec, ref reqExp);
+            reqExp |= CrystalExpansion(nano.Name); // the SL gate may be on the crystal, not the program
         }
         else return JsonSerializer.Serialize(new { error = "pass itemId or nanoId" });
 
@@ -392,6 +429,7 @@ internal static class Program
             int bSpec = 0, bExp = 0, bProfTmp = 0, bLvlTmp = 0; var bSkills = new Dictionary<int, int>();
             if (nano.Criteria != null && nano.Criteria.TryGetValue(ItemActionInfo.UseCriteria, out var bc))
                 foreach (var cc in bc) Classify(cc.Param1, cc.Operator, cc.Param2, bSkills, ref bProfTmp, ref bLvlTmp, ref bSpec, ref bExp);
+            bExp |= CrystalExpansion(nano.Name); // SL gate may live only on the crystal (the Umbral case)
             if (bSpec != 0 && (me.GetStat(Stat.Specialization) & bSpec) == 0) continue;
             if (bExp != 0 && (me.GetStat(Stat.Expansion) & bExp) == 0) continue;
 

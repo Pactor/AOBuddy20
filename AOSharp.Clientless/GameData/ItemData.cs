@@ -88,6 +88,28 @@ public static class ItemData
         return _offsets.Where(kv => kv.Value >= NANOITEM_START_OFFSET).Select(kv => kv.Key).ToList();
     }
 
+    /// <summary>
+    ///     All DUMMY-item ids in the offline data (offsets in the dummy section, before the nano
+    ///     section). Nano CRYSTALS (the uploadable "Nano Crystal (&lt;name&gt;)" items) are dummy items -
+    ///     use with Find&lt;DummyItem&gt; to read a crystal's own UseCriteria (e.g. the froob/expansion
+    ///     gate a Shadowlands nano carries on its crystal rather than on the program).
+    /// </summary>
+    public static IReadOnlyList<int> AllDummyItemIds()
+    {
+        if (_offsets == null)
+        {
+            LoadOffsets();
+        }
+
+        if (_offsets == null)
+        {
+            return new List<int>();
+        }
+
+        return _offsets.Where(kv => kv.Value >= DUMMYITEM_START_OFFSET && kv.Value < NANOITEM_START_OFFSET)
+            .Select(kv => kv.Key).ToList();
+    }
+
     private static void LoadOffsets()
     {
         _offsets = new Dictionary<int, long>();

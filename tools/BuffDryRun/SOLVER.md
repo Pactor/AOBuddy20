@@ -1,8 +1,8 @@
 # BuffDryRun — OE / Equip Solver (design + status)
 
 Status 2026-10-08. The solver answers "how do I equip/cast X at level Y" as a **path**, never "you can't."
-Core pipeline works; candidate *classification* has 3 precise open bugs (below). Nothing in the bot is
-changed — this is the offline dry-run tool (`tools/BuffDryRun`, http://localhost:9090).
+Core pipeline works; candidate *classification* had 3 precise bugs — #1 and #2 now FIXED, #3 open (below).
+Nothing in the bot is changed — this is the offline dry-run tool (`tools/BuffDryRun`, http://localhost:9090).
 
 ## The answer model (verified with the owner — this is the contract)
 
@@ -36,6 +36,45 @@ Lever order for closing a skill gap to equip/cast something:
   gate) carry the numbers but have NO criteria. Exclude gateless effect-nanos from candidates.
 - `>` N means the real threshold is N+1 (auno `>= 61` == data `> 60`).
 
+## Lock / signal reference — everything the nano lib reads (the data contract)
+
+This is the complete set of gates and signals the library (`NanoLibrary` → `NanoProfile`, from the
+client-extracted `nanos.ocp` + `ItemData.bin`) exposes, and where each lives. All of it is client truth
+(extracted from the 18.8.62 RDB), not OmniCell logic.
+
+**Requirement triples** — every nano's `Actions[].Requirements` (and an item's `Criteria`) is a raw
+`{Stat, Operator, Target, Value}`. The **Target** field is what separates a **caster gate** from a
+**receiver/target gate** — the same stat (e.g. Level) can gate who may CAST vs who may RECEIVE. Captured:
+
+- **Profession lock** — `Profession (368) == <id>` on the caster. No such crit = no hard class lock.
+- **Level lock, caster** — `Level (54) > N` targeting the caster (N+1 real).
+- **Level lock, receiver** — `Level > N` with the TARGET-tagged target: the buff's target must be ≥ N
+  (Alg's receiver-gate work keys on exactly this; use-reqs gate the caster, target-tagged crits gate the
+  receiver).
+- **Specialization lock** — `Specialization (182) BitAnd <bits>`; froob/low-spec fails the bit.
+- **Expansion / froob lock** — `Expansion (389) BitAnd <bit>` (2 = Shadowlands, also 16, 32). **Lives on
+  the nano PROGRAM *or* on its CRYSTAL** (`"Nano Crystal (<name>)"` DummyItem). 148 SL nanos (Umbral type)
+  carry it ONLY on the crystal — the program looks froob-castable; the client blocks the upload. The solver
+  checks both (`CrystalExpansion`). A froob owns no expansion bits, so ANY Expansion-BitAnd crit blocks them.
+- **Skill minimums** — `MC/TS/…` > N: the soft gaps buffs can close.
+
+**Self vs others (per skill)** — `NanoProfile.ModifyTargets[stat]` / `ModifyTargetsOthers(stat)`: the
+per-ModifyStat effect target (User(1)/Wearer(2) = self, Target(3) = others). This is the accurate
+"can this skill-buff land on another player?" signal. The formula-wide `TargetsOthers` is unreliable (an
+unrelated side-effect trips it) — use the per-skill target.
+
+**Delivery / team-required** — `NanoProfile.Casts` function type of a wrapper nano: `CastNano (53051)` =
+self only, `TeamCastNano (53066)` = **must be in a team** to receive, `AreaCastNano (53087)` = others in area.
+
+**Stacking** — `NanoStrain (75)`: same strain never stacks (higher `StackingOrder (551)` wins); different
+strains stack. All wrangles share strain 220 → one wrangle only.
+
+**Directly castable vs landed-effect** — a real castable buff has a non-empty UseCriteria (a cast gate).
+Gateless effect-nanos (a wrangle's landed result, a Trader transfer result) carry the numbers but no gate —
+excluded from candidates (you request the gated caster nano, not its landed effect).
+
+`>` N means the real threshold is N+1 (auno `>= 61` == data `> 60`).
+
 ## Endpoints
 
 - `POST /solve` — the solver (below).
@@ -63,9 +102,16 @@ Input: character (profession, level, maxNcu, skills{}, spec, expansion) + `itemI
    every self-cast requirement (profession/PM/SI) failed. Fix: `BuildStub` now sets
    `LocalPlayerProxy.LocalPlayer = me`. Verified: froob lvl-15 Keeper → Ofab Wolf best-in-NCU now =
    Impartiality (self +29) + Brawl Expertise → 2hEdged 106 (was 97).
-2. **SL buffs not excluded for froob.** Umbral Wrangler is offered to an expansion=0 character. Its
-   Shadowlands gating is NOT in the UseCriteria `Expansion BitAnd` field (the current filter checks that),
-   so it slips through. Need the real SL signal for these nanos (nano school? a different flag? the crystal?).
+2. ~~**SL buffs not excluded for froob.**~~ **FIXED 2026-10-12.** The SL signal lives on the nano
+   **CRYSTAL**, not the program: the uploadable `"Nano Crystal (<name>)"` DummyItem carries
+   `Expansion BitAnd <bit>` in its UseCriteria (Param1=389, Op=22 BitAnd, Param2=2 Shadowlands / also 16, 32),
+   which a froob (Expansion=0) fails, so the client refuses the upload. The program alone looks
+   froob-castable. Verified over the pack: 148 "hidden SL" nanos gated only on the crystal (Umbral
+   Wrangler program 235058 / crystal 235280; Intense Nano Net 218814+, Fearbringer 226059+, Shock 226301+);
+   zero false positives vs classic froob families. (My earlier guesses - Flags bit 1, requirement
+   "target 19" - were both coincidences and are disproven.) Fix: `ItemData.AllDummyItemIds()` + the
+   solver's `CrystalExpansion(programName)` map OR'd into the candidate filter AND the target-nano gate -
+   a nano is froob-locked if its program OR its crystal has an `Expansion BitAnd` the character lacks.
 3. **Goal-set picks implausible mega-buffs.** With #1/#2 unfixed, the min-NCU "goal set" grabs a single huge
    wrangle (Umbral Premium +153 @53 NCU) instead of a realistic small stack (Keeper self + composites + small
    wrangle ≈ 15-18 NCU). Fixing #1/#2 should largely fix this; also consider capping per-buff amount sanity.
