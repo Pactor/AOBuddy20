@@ -21,10 +21,9 @@ namespace AOBuddy20.Network;
 ///     one line each into diag-packets.log next to the host exe. The file is OVERWRITTEN each
 ///     time the mode turns on - one file is one capture; a bot restart (the mode is not
 ///     persisted) or a fresh 'diagnostic on' starts clean.
-///
 ///     Line shape, built for grep first and offline decode second:
-///         #000042 2026-10-12 14:25:36.479 S N3/DoorFullUpdate len=64 hex=....
-///         ;DOOR (ACGEntrance:C02A0227) room=1 adj=-1 pos=(1736.8,24.4,2500.9) ...
+///     #000042 2026-10-12 14:25:36.479 S N3/DoorFullUpdate len=64 hex=....
+///     ;DOOR (ACGEntrance:C02A0227) room=1 adj=-1 pos=(1736.8,24.4,2500.9) ...
 ///     '#' lines are the raw wire: the full bytes of EVERY packet (the raw tap in
 ///     NetworkSession raises before any parsing, so the ones the stock serializer cannot
 ///     parse are recorded too). ';' lines are what the typed readers made of the door /
@@ -33,13 +32,13 @@ namespace AOBuddy20.Network;
 public sealed class PacketRecorder
 {
     private const string FileName = "diag-packets.log";
+    private readonly object _lock = new object();
 
     private readonly ILogger<PacketRecorder> _logger;
-    private readonly object _lock = new();
-    private StreamWriter? _writer;
+    private long _count; // packets captured this capture (the status reply reads it after Stop)
     private string _path = "";
     private long _seq;
-    private long _count; // packets captured this capture (the status reply reads it after Stop)
+    private StreamWriter? _writer;
 
     public PacketRecorder(ILogger<PacketRecorder> logger)
     {
