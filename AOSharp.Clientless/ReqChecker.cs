@@ -40,7 +40,11 @@ internal class ReqChecker
             // pushed a spurious false and every nano with target criteria failed on a real target.)
             if (GetNextCriteriaSource(criterion.Operator, out var newCriteriaSource))
             {
-                if (newCriteriaSource == CriteriaSource.User)
+                if (newCriteriaSource == CriteriaSource.Self)
+                {
+                    _criteriaSource = (CriteriaSource.Self, DynelManager.LocalPlayer);
+                }
+                else if (newCriteriaSource == CriteriaSource.User)
                 {
                     _criteriaSource = (CriteriaSource.User, DynelManager.LocalPlayer);
                 }
@@ -237,10 +241,15 @@ internal class ReqChecker
                 //        metReq = !_criteriaSource.Char.IsAttacking && !DynelManager.Characters.Any(x => x.FightingTarget != null && (x.FightingTarget.Identity == _criteriaSource.Char.Identity || x.FightingTarget.Identity == DynelManager.LocalPlayer.Identity));
                 //    }
                 //    break;
-                //case UseCriteriaOperator.IsOwnPet:
-                //    metReq = DynelManager.LocalPlayer.Pets.Contains(_criteriaSource.Char.Identity);
-
-                //    break;
+                case UseCriteriaOperator.IsOwnPet:
+                    // The char under test is one of my controlled pets. Resolved from pet-ownership
+                    // on the wire (LocalPlayer.Pets = DynelManager NPCs whose Owner is me), the data
+                    // the clientless engine has - not the client-engine pet list the old comment used.
+                    // This is the "cast on your own pet" gate (e.g. pet heals/buffs): without it those
+                    // nanos fell through to default:false and read as uncastable.
+                    metReq = DynelManager.LocalPlayer != null &&
+                             DynelManager.LocalPlayer.Pets.Any(p => p.Identity == _criteriaSource.Char.Identity);
+                    break;
                 default:
                     //Chat.WriteLine($"Unknown Criteria -- Param1: {param1} - Param2: {criterion.Param2} - Op: {op}");
                     metReq = false;
@@ -335,7 +344,11 @@ internal class ReqChecker
     {
         criteriaSource = CriteriaSource.Self;
 
-        if (op == UseCriteriaOperator.OnUser)
+        if (op == UseCriteriaOperator.OnSelf)
+        {
+            criteriaSource = CriteriaSource.Self;
+        }
+        else if (op == UseCriteriaOperator.OnUser)
         {
             criteriaSource = CriteriaSource.User;
         }
@@ -348,7 +361,8 @@ internal class ReqChecker
             criteriaSource = CriteriaSource.FightingTarget;
         }
 
-        return op == UseCriteriaOperator.OnUser || op == UseCriteriaOperator.OnTarget || op == UseCriteriaOperator.OnFightingTarget;
+        return op == UseCriteriaOperator.OnSelf || op == UseCriteriaOperator.OnUser ||
+               op == UseCriteriaOperator.OnTarget || op == UseCriteriaOperator.OnFightingTarget;
     }
 
     private enum CriteriaSource
