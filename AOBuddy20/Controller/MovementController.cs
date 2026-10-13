@@ -118,10 +118,12 @@ public sealed class MovementController : IPacketConsumer
     // wandering to the neighbours.
     private const float PadReach = 0.3f;
 
-    // The head-on pad approach: the standoff this far out on the line from where we stand to the
-    // pad (the exit data carries no facing - our own approach line is the front), walked to this
-    // loosely (any point within the radius straightens the final leg).
-    private const float PadApproach = 4f;
+    // The head-on pad approach: the standoff this far out from the pad, walked to this loosely
+    // (any point within the radius straightens the final leg). 2 m (owner, 2026-10-13: "2 m in
+    // front, perpendicular to the zone line") - the old 4 m on the bot's own line landed inside
+    // Newland's Borealis whompah arch when approached from the side, and the arch's sealed mesh
+    // cells made the standoff unplannable.
+    private const float PadApproach = 2f;
     private const float PadApproachReach = 1f;
     private const float ObjectReach = 2.5f;
 
@@ -136,6 +138,7 @@ public sealed class MovementController : IPacketConsumer
     // because its zone load takes just as long. Hold the walk this long after every playfield
     // switch; bookkeeping (travel legs, proxy origin) still runs.
     private const double ZoneSettleSeconds = 3.0;
+    private const double ProxySettleSeconds = 20.0; // the crossing drag ran 20+ s (07:16:59-07:18:45)
 
     // And after a YANK the server has just corrected us - walking on immediately re-collects the
     // same rejection. Hold briefly, then try the re-planned route.
@@ -229,6 +232,38 @@ public sealed class MovementController : IPacketConsumer
     private double _giveUpAt = -1;
     private bool _driftHeld; // the drift guard is holding the body
     private double _holdWalkUntil = -1; // post-zone / post-yank: no walking before this (wet clock)
+    private double _zoneSettleUntil = -1; // proxy-crossing drag window: SetPos placements are the server
+                                          // WALKING US through the crossing, not refusals (Andromeda 2026-10-13)
+
+    // THE FALL (wire protocol, 2026-10-12 tree/column): mid-air the client sends NOTHING - x/z
+    // freeze at takeoff, silence for sqrt(2h/25), then one landing announcement. The server does
+    // no gravity on clientless bodies, so silence is safe and the landing is accepted as-is.
+    private double _fallUntil = -1;
+    private Vector3? _fallLanding;
+    private const float FallStartMeters = 4f; // a step down under this is walking, not falling
+    private const double FallGravity = 25.0; // measured: 47.48 m in 1.950 s fits sqrt(2h/g) to 1 ms
+
+    // A server SetPos mid-fall RE-ANCHORS the fall: its y is the truth about where the body is.
+    // Still above the floor -> keep falling from there (recomputed drop, fresh countdown, the
+    // x/z move to the server's). Seated on ground -> the fall is over, walk on.
+    private void ReanchorFall(Vector3 pos)
+    {
+        if (!_fallLanding.HasValue)
+        {
+            return;
+        }
+
+        var floor = RawFloorY(pos.X, pos.Y, pos.Z);
+        if (float.IsNaN(floor) || pos.Y - floor <= FallStartMeters)
+        {
+            _fallLanding = null; // seated on ground: the fall is over
+            return;
+        }
+
+        var drop = pos.Y - floor;
+        _fallUntil = _wetClock.Elapsed.TotalSeconds + Math.Sqrt(2.0 * drop / FallGravity);
+        _fallLanding = new Vector3(pos.X, floor, pos.Z);
+    }
 
     // The playfield's nav data and walk grid, built off every loop thread (NavGridCache). Nav supplies
     // the Y of every dictated step - without it the walk holds the login Y and floats (owner, 2026-10-01).
@@ -1079,6 +1114,8 @@ public sealed class MovementController : IPacketConsumer
 
             _pf = snap.Playfield;
             _holdWalkUntil = now + ZoneSettleSeconds; // the post-zone movement lock (see the constant)
+            _zoneSettleUntil = now + ProxySettleSeconds; // and the drag window: placements here are the server walking us through
+            _pins = 0; // the last zone's pin chain must not leak into this zone's escalation
             _movement.Stop(me, SendIntervalMs);
             _movement.Reset();
             _follow.Reset();
@@ -1155,6 +1192,17 @@ public sealed class MovementController : IPacketConsumer
                 _driftHeldSince = now;
                 _seated = true;
                 SendStandUp(me, "the walk is held with no server movement - seated?");
+            }
+            else if (_seated && now - _driftHeldSince > DriftHoldSeatedSeconds)
+            {
+                // STILL no truth after the stand-up: the silence is a state, not a refusal - the
+                // proxy teleport out of the Andromeda crossing went quiet right after placing us
+                // (2026-10-13 07:18) and the walk froze here forever. AOBuddy10's rule applies:
+                // the clientless controller owns its position. Resume the walk on the data floor;
+                // a real rejection still surfaces later as a SetPos rubberband, which re-seats us.
+                _driftHeld = false;
+                _driftHeldSince = -1;
+                _logger.LogInformation("Movement: no server truth while held - resuming the walk on the data floor.");
             }
 
             return;
@@ -1455,6 +1503,21 @@ public sealed class MovementController : IPacketConsumer
     private void WalkStep(LocalPlayer me, Snapshot snap, Vector3 target, double dt)
     {
         var pos = me.MovementComponent.Position;
+
+        // MID-FALL: hold the x/z, hold the silence, land when the clock runs out. A server SetPos
+        // (ApplyPendingCorrection above) already re-seated us and cleared the state if it disagreed.
+        if (_fallLanding.HasValue)
+        {
+            if (_wetClock.Elapsed.TotalSeconds < _fallUntil)
+            {
+                return; // silence IS the falling state
+            }
+
+            Movement.SetPose(me, _fallLanding.Value, me.MovementComponent.Heading);
+            _movement.Advance(me, _fallLanding.Value, me.MovementComponent.Heading, run: true, dt, SendIntervalMs); // the landing announcement
+            _fallLanding = null;
+            return; // the walk resumes next tick from solid ground
+        }
         var dist = Movement.Flat(pos, target);
         var delta = target - pos;
         var flat = new Vector3(delta.X, 0f, delta.Z);
@@ -1485,6 +1548,24 @@ public sealed class MovementController : IPacketConsumer
         }
 
         var inWater = !double.IsNaN(plane);
+        // THE FALL TRIGGER: the floor under the next position is FallStartMeters below us and we
+        // are not in water - walked off the canopy edge, or a Scotty warp sat us on a column.
+        // x/z freeze (measured: horizontal velocity zeroes at fall start), silence, landing.
+        if (!inWater)
+        {
+            var fallFloor = RawFloorY(pos.X, pos.Y, pos.Z);
+            if (!float.IsNaN(fallFloor) && pos.Y - fallFloor > FallStartMeters)
+            {
+                var drop = pos.Y - fallFloor;
+                _fallUntil = _wetClock.Elapsed.TotalSeconds + Math.Sqrt(2.0 * drop / FallGravity);
+                _fallLanding = new Vector3(pos.X, fallFloor, pos.Z);
+                _logger.LogInformation(
+                    $"Movement: FALL {drop:0.0} m at ({pos.X:0.0},{pos.Z:0.0}) -> landing {_fallLanding.Value.Y:0.0} in " +
+                    $"{Math.Sqrt(2.0 * drop / FallGravity):0.00} s (silence, then announce).");
+                return; // silence IS the falling state
+            }
+        }
+
         var speed = inWater ? RunVelocity(snap) * SwimSpeedFactor : RunVelocity(snap);
         var step = Movement.CappedStep(speed, dt, MaxStep, dist);
         var nx = pos.X + dir.X * step;
@@ -1630,20 +1711,62 @@ public sealed class MovementController : IPacketConsumer
             }
         }
 
+        // Crossing cells survive the body unseal below (owner, 2026-10-13): the wompah
+        // passages ARE road junctions - walking past a crossing put the body within the
+        // unseal radius, the pad disc reopened for that plan, and the route led straight
+        // through the passage and across the zone line ("took a wompah where he shouldn't").
+        // The body can still leave: its non-crossing neighbours stay unsealed - but no
+        // route may lead THROUGH a crossing that isn't this leg's own.
+        var crossing = new HashSet<int>();
         foreach (var e in Zoning.ExitsFrom(_pf))
         {
             if (e.Kind == ExitKind.ZoneLine)
             {
-                if (!ReferenceEquals(e, passLine))
+                if (!SameExit(e, passLine))
                 {
                     grid.CellsAlong(e.A, e.B, 2f, extra);
+                    grid.CellsAlong(e.A, e.B, 2f, crossing);
                 }
             }
             else if ((e.Kind == ExitKind.Line || e.Kind == ExitKind.Proxy || e.Kind == ExitKind.Teleport) &&
+                     !SameExit(e, passLine) &&
                      Movement.Flat(e.A, goalPos) > 1.5f &&
                      Movement.Flat(e.A, from) > 3.5f)
             {
-                grid.CellsAlong(e.A, e.A, 3f, extra);
+                // THE PAD'S POINT, NOT ITS YARD (owner: "no unwalkable cells surrounding it"):
+                // only the pad cell itself stays hard-blocked for a non-target pad - the trigger
+                // is the spot, a metre and a half wide - while the yard is the 9 m toll's
+                // business (expensive, walkable). The old 5 m hard disc, re-added as a crossing
+                // over the body's unseal, bricked the body whenever an escape parked it inside
+                // a neighbour's yard (Tir 20:10: "expanded 1 nodes" - every neighbour blocked).
+                grid.CellsAlong(e.A, e.A, 1.5f, extra);
+                grid.CellsAlong(e.A, e.A, 1.5f, crossing);
+            }
+        }
+
+        // THE CLEARANCE TOLL (owner, 2026-10-13: "modify the cost so this doesn't happen
+        // anymore. Just slightly"): the blocks above stop a route from CROSSING another exit,
+        // but the body still ran metres from lines the game can fire on a hair (the 2 m
+        // corridor's edge, a passage rim). So ground near a non-target exit COSTS - never
+        // blocks: a route hugging the band pays per cell (the grid's pricey weight) and a
+        // small detour out wins, while tight streets or the body's own position still pay
+        // through. The band reaches 6 m from a zone line and 9 m round a pad (the block plus
+        // ~4 m of priced apron). Before the unseal below: ground right where we stand stays
+        // free - standing near a line must not tax leaving it.
+        foreach (var e in Zoning.ExitsFrom(_pf))
+        {
+            if (SameExit(e, passLine))
+            {
+                continue;
+            }
+
+            if (e.Kind == ExitKind.ZoneLine)
+            {
+                grid.CellsAlong(e.A, e.B, 6f, pricey);
+            }
+            else if (e.Kind == ExitKind.Line || e.Kind == ExitKind.Proxy || e.Kind == ExitKind.Teleport)
+            {
+                grid.CellsAlong(e.A, e.A, 9f, pricey);
             }
         }
 
@@ -1660,9 +1783,63 @@ public sealed class MovementController : IPacketConsumer
         grid.CellsAlong(from, from, 3f, unseal);
         extra.ExceptWith(unseal);
         pricey.ExceptWith(unseal);
+        extra.UnionWith(crossing); // crossings never reopen - not even from the body's unseal
 
-        var route = grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out var why, pricey) ??
-                    grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out _, pricey);
+        // THE WHOMPAH'S DOOR CONE (owner: "open the wompahs in exit direction, from mid
+        // zoneline in a 90° cone outwards for lets say 4m"): for the leg's own pad, measure
+        // the door (the direction whose ground at the pad's level runs out farthest - the
+        // tube's one open face) and open a 90° cone, 4 m out, as WALKABLE-FOR-THE-PLAN. The
+        // tube's rim seals those cells in the mesh (only the rim's 13 m level survives there);
+        // MeshGrid lends them a floor at the body's level when searching, and the walker
+        // claims its own level through them anyway. Own-pad crossings are the goal, so the
+        // cone may cut through the crossing set - nothing accidental can zone here.
+        HashSet<int> cone = null;
+        if (passLine is { } pl && grid is MeshGrid mesh)
+        {
+            if (pl.Kind == ExitKind.Line || pl.Kind == ExitKind.Proxy || pl.Kind == ExitKind.Teleport)
+            {
+                var door = DoorDir(pl.A);
+                if (door != Vector3.Zero)
+                {
+                    cone = new HashSet<int>();
+                    var px = (int)pl.A.X;
+                    var pz = (int)pl.A.Z;
+                    for (var dz = -5; dz <= 5; dz++)
+                    {
+                        for (var dx = -5; dx <= 5; dx++)
+                        {
+                            var x = px + dx;
+                            var z = pz + dz;
+                            var ox = x + 0.5f - pl.A.X;
+                            var oz = z + 0.5f - pl.A.Z;
+                            var d = MathF.Sqrt(ox * ox + oz * oz);
+                            if (d > 4.5f || ox * door.X + oz * door.Z < 0.7071f * d)
+                            {
+                                continue; // outside the 4 m reach or off the door's ±45°
+                            }
+
+                            cone.Add(z * mesh.CellsX + x);
+                        }
+                    }
+
+                    extra.ExceptWith(cone); // the cone is open ground for this plan - last word
+                    _logger.LogDebug(
+                        $"TRAVEL: the door cone opened for the pad at ({pl.A.X:0.0} {pl.A.Z:0.0}) - " +
+                        $"{cone.Count} cells toward ({door.X:+0.0;-0.0}, {door.Z:+0.0;-0.0}).");
+                }
+            }
+        }
+
+        string why = "";
+        var route = grid switch
+        {
+            MeshGrid m => m.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out why, pricey, cone),
+            _ => grid.FindPath(from, goalPos, extra, SnapMeters, GoalReach, out why, pricey),
+        } ?? grid switch
+        {
+            MeshGrid m => m.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out why, pricey, cone),
+            _ => grid.FindPath(from, goalPos, extra, SnapMeters, WideGoalReach, out why, pricey),
+        };
 
         // THE WAY OUT IS A WALKED ROAD (AOBuddy10 TryRoadOut, ported 2026-10-03): no way on the grid -
         // or a way that runs over RoadOutSnaps remembered pull-backs - and a recorded road starts
@@ -1905,17 +2082,51 @@ public sealed class MovementController : IPacketConsumer
             case ExitKind.Line:
             {
                 // HEAD-ON PADS (owner, 2026-10-09: "don't enter whompas from the side or the
-                // backside"): the exit data carries no facing, so the approach line IS the front -
-                // a standoff a few metres out on the line from where we stand to the pad, then
-                // the final metres straight in (TravelTick advances the stage on the standoff).
-                // A retry re-stages: a fresh head-on walk, not another stand at the same spot.
+                // backside"): the exit data carries no facing, so the front is MEASURED - a
+                // whompah is a tube with one open face, DoorDir finds it by ground-run depth,
+                // and the standoff sits PadApproach metres out along it (TravelTick advances
+                // the stage on the standoff; PlanRoute opens the door's cone for the search).
+                // A retry re-stages: a fresh head-on walk.
                 t.LegStage = 0;
-                var dir = hop.A - CurrentPosition;
-                dir.Y = 0;
-                var standoff = dir.Magnitude > 0.5f ? hop.A - dir.Normalize() * PadApproach : hop.A;
-                t.LegGoal = standoff;
-                SetDesiredGoal(standoff, _pf, ControlPriority.Travel, PadApproachReach);
-                _logger.LogInformation($"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - the pad at ({hop.A.X:0.0} {hop.A.Z:0.0}), standing off {PadApproach:0} m first for a head-on entry.");
+                var pad = hop.A;
+                var toPad = pad - CurrentPosition;
+                toPad.Y = 0;
+                Vector3 standoffPt;
+                if (toPad.Magnitude <= 0.5f)
+                {
+                    standoffPt = pad; // standing on the pad already: no standoff to stage
+                }
+                else
+                {
+                    // THE FRONT IS THE DOOR, MEASURED (owner: a whompah is a tube with one open
+                    // face - enter perpendicular to it). DoorDir marches outward from the pad on
+                    // the body's level along the 8 compass points: the doorway's run continues
+                    // out onto the plaza while the walled sides end on the rim within metres -
+                    // the deepest run IS the door. The standoff goes 2 m out along it, and
+                    // PlanRoute opens that same door's cone for the search. No bot-relative
+                    // sweep: a door measured east stays east no matter where we come from (Tir
+                    // 19:42: the relative sweep staged the WEST rim while the door measured east,
+                    // and the goal cell held only the rim's 13 m level - unreachable at 8).
+                    var baseDir = -toPad.Normalize();
+                    var front = DoorDir(pad);
+                    if (front == Vector3.Zero)
+                    {
+                        front = baseDir; // no open face in the 8 directions: the honest default
+                    }
+
+                    if (Movement.Flat(front, baseDir) > 0.7f)
+                    {
+                        _logger.LogInformation(
+                            $"TRAVEL: the pad at ({pad.X:0.0} {pad.Z:0.0}) is walled off on our side (the arch) - its front is toward ({front.X:+0.0;-0.0}, {front.Z:+0.0;-0.0}).");
+                    }
+
+                    standoffPt = pad + front * PadApproach;
+                }
+
+                t.LegGoal = standoffPt;
+                SetDesiredGoal(standoffPt, _pf, ControlPriority.Travel, PadApproachReach);
+                _logger.LogInformation(
+                    $"TRAVEL: leg to {Zoning.Name(hop.ToPf)} - the pad at ({pad.X:0.0} {pad.Z:0.0}), standing off {PadApproach:0} m at ({standoffPt.X:0.0} {standoffPt.Z:0.0}) for a head-on entry.");
                 break;
             }
             case ExitKind.Scotty:
@@ -2340,6 +2551,92 @@ public sealed class MovementController : IPacketConsumer
 
     // ── floor sampling (AOBuddy10 OverlandController's FloorY/StepFloor, verbatim rules) ──
 
+    // THE TUBE BOTTOM (owner: "whompahs are cylindrical tubes with an automatic door - they
+    // have a bottom and a top, though the top won't be used ever"): how far the ground at the
+    // BODY's level runs outward from the pad along `dir`, in 0.5 m steps. The doorway's run
+    // continues out onto the plaza (the whole map is one level); a walled side ends on the
+    // tube's rim within a couple of metres. The deepest run is the door.
+    private float GroundRun(Vector3 pad, Vector3 dir)
+    {
+        var run = 0f;
+        var mesh = _nav.Grid as MeshGrid;
+        for (var t = 0.5f; t <= 12f; t += 0.5f)
+        {
+            var p = pad + dir * t;
+            if (mesh != null)
+            {
+                var floors = mesh.Surfaces(p.X, p.Z);
+                var onLevel = false;
+                foreach (var f in floors)
+                {
+                    if (Math.Abs(f - CurrentPosition.Y) <= 2.5f)
+                    {
+                        onLevel = true;
+                        break;
+                    }
+                }
+
+                if (!onLevel)
+                {
+                    break;
+                }
+            }
+
+            run = t;
+        }
+
+        return run;
+    }
+
+    // The pad's door direction, in WORLD coordinates (not relative to our approach): the
+    // absolute compass direction whose ground run from the pad is deepest. Zero when the
+    // tube has no open face in the 8 directions (every run under 2 m) - no cone then.
+    private Vector3 DoorDir(Vector3 pad)
+    {
+        Vector3 best = Vector3.Zero;
+        var bestRun = -1f;
+        var bestDeg = -1f;
+        var probe = new List<string>();
+        // cardinals before diagonals: a tie (the door face and its corner often run equally
+        // deep) resolves onto the door FACE, not its corner - Tir 20:20: S and SE tied at 12 m
+        // and the SE standoff landed a cell off the door, on the rim's 13 m level.
+        foreach (var deg in new[] { 0f, 90f, 180f, 270f, 45f, 135f, 225f, 315f })
+        {
+            var dir = RotateY(new Vector3(1, 0, 0), deg);
+            var run = GroundRun(pad, dir);
+            probe.Add($"{deg:0}:{run:0.#}");
+            if (run > bestRun + 0.01f)
+            {
+                bestRun = run;
+                bestDeg = deg;
+                best = dir;
+            }
+        }
+
+        _logger.LogDebug(
+            $"TRAVEL: DoorDir pad({pad.X:0.0},{pad.Z:0.0}) y={CurrentPosition.Y:0.0} -> deg {bestDeg:0} " +
+            $"({best.X:+0.00;-0.00}, {best.Z:+0.00;-0.00}) run {bestRun:0.#} - {string.Join(" ", probe)}");
+        return bestRun >= 2f ? best : Vector3.Zero;
+    }
+
+    // Two exits are the same when kind, destination and spot agree: route HOPS are direction-
+    // annotated COPIES of Zoning's cached exits (the Back flag rides the hop), so reference
+    // identity cannot match a leg's exit back to the catalogue - the own-pad exemptions
+    // silently never fired on clones (Tir 18:32: every standoff vetoed by the leg's own
+    // pad's disc, the stage fell back to the wall-side line and the plan held).
+    private static bool SameExit(ZoneExit? a, ZoneExit? b) =>
+        !ReferenceEquals(a, null) && !ReferenceEquals(b, null) &&
+        a.Kind == b.Kind && a.ToPf == b.ToPf && Movement.Flat(a.A, b.A) < 0.5f;
+
+    // A xz direction rotated by degrees about Y (the standoff's rotation around the pad).
+    private static Vector3 RotateY(Vector3 v, float deg)
+    {
+        var r = deg * MathF.PI / 180f;
+        var s = MathF.Sin(r);
+        var c = MathF.Cos(r);
+        return new Vector3(v.X * c + v.Z * s, 0, -v.X * s + v.Z * c);
+    }
+
     private float FloorY(float x, float y, float z)
     {
         var h = RawFloorY(x, y - _yBias, z);
@@ -2360,7 +2657,24 @@ public sealed class MovementController : IPacketConsumer
             h += _yBias;
         }
 
-        return Math.Abs(h - y) > 4f ? y : h; // a jump of more than 4 m is a roof or a cave, not our floor
+        // ASYMMETRIC (the on-top-of-mission-entrance lock, pf 551 2026-10-12 23:25): the old
+        // |h - y| > 4 guard also blocked DESCENTS - zoned in at y 39.81 above the entrance's
+        // 24.8 m floor, every step returned the body's own height and it walked the ROOF forever
+        // (y frozen at 39.81 for the whole capture). Climbing more than 4 m in a step is still a
+        // roof or a cave; descending to the data floor is walking down the slope - outdoors there
+        // is no fall damage. Deep artifacts (mesh slivers at -155 m) get a 15 m/step descent cap
+        // so nothing drills toward them in one claim.
+        if (h - y > 4f)
+        {
+            return y; // a jump UP of more than 4 m: roof or cave, stay on our level
+        }
+
+        if (y - h > 15f)
+        {
+            return y - 15f; // far below: descend toward it, capped per step
+        }
+
+        return h;
     }
 
     // Our data's floor under (x, z) nearest y; NaN when there is none.
@@ -2433,6 +2747,17 @@ public sealed class MovementController : IPacketConsumer
             _yBias = _pendingBias;
             _wetY = pos.Y;
             _wetYAt = _wetClock.Elapsed.TotalSeconds;
+            // THE PROXY DRAG (Andromeda crossing, 2026-10-13 07:18): right after a zone-in the
+            // server animates the body through the crossing corridor with SetPos placements for
+            // up to ~20 s. Fighting the drag was a yank loop - walk in, pulled back, goal
+            // dropped, recross, repeat. Inside the window a placement is not a refusal: the
+            // hold extends and the yank counter stands down; walking resumes when it stops.
+            var nowS = _wetClock.Elapsed.TotalSeconds;
+            if (nowS < _zoneSettleUntil)
+            {
+                yank = false;
+                _holdWalkUntil = Math.Max(_holdWalkUntil, nowS + ZoneSettleSeconds);
+            }
         }
 
         // A REAL CORRECTION BREAKS THE CLEAN WALK (LearnedGround.NoteWalk): anything from 2 m up is the
@@ -2480,7 +2805,11 @@ public sealed class MovementController : IPacketConsumer
             LearnedGround.NoteSnap(_pf, pos.X, pos.Z);
             _holdWalkUntil = _wetClock.Elapsed.TotalSeconds + YankReholdSeconds;
             _movement.Hold(me, SendIntervalMs);
-            _logger.LogInformation($"Movement: the server yanked the walk {yankDist:0.0} m - holding and re-planning (yank {_yanks}/{MaxYanks}).");
+            // WHERE the walk believed it was: on a multi-level cell the divergence is often a
+            // DECK level vs the server's ground - the y alone says which (ICC/Andromeda towers).
+            var at = me.MovementComponent.Position;
+            _logger.LogInformation($"Movement: the server yanked the walk {yankDist:0.0} m - holding and re-planning (yank {_yanks}/{MaxYanks}). " +
+                                   $"Walk was at {at.X:0.0} {at.Y:0.0} {at.Z:0.0} vs server {pos.X:0.0} {pos.Y:0.0} {pos.Z:0.0}.");
         }
 
         // A SetPos STORM: the server re-asserting (nearly) the same spot correction after
@@ -2498,33 +2827,13 @@ public sealed class MovementController : IPacketConsumer
             if (chained)
             {
                 _pins++;
-                // THE DATA MISSED THIS WATER (owner, 2026-10-03, the Varmint Woods river, pinned
-                // at (2541.9,2175.4) under corrections alone): run-mode steps refused with only
-                // SetPos coming back, at a spot the liquids call dry. The gait is the fix, not
-                // the blacklist - enter the swim and cross at the surface the server holds us
-                // at, from the FOURTH chained pin (every extra second pinned is a second lost).
-                // A real wedge (a fence, a crate) gains nothing from the swim, and its pins keep
-                // chaining while Swimming, so the wedge blacklist at eight still gets its turn.
-                if (_pins >= 4 &&
-                    _nav.Nav?.Ground != null &&
-                    !_movement.Swimming &&
-                    double.IsNaN(_nav.Nav.Ground.SwimY(pos.X, pos.Z, WadeDepth)))
-                {
-                    _pins = 0;
-                    // The surface estimate is the pin itself: the server refuses steps ON the
-                    // depth-threshold contour (capture 20261003-152301: the body pinned at bed
-                    // 3.38 with the walked surface at 4.39 = bed + 1.0), so one wade-depth above
-                    // the bed we stand on IS the water level. Corrections re-anchor it from here.
-                    _wetY = pos.Y + WadeDepth;
-                    _wetYAt = now;
-                    _movement.EnterSwim(me, SendIntervalMs);
-                    _logger.LogWarning($"Movement: run steps refused at ({pos.X:0.0} {pos.Z:0.0}) where the liquids say " +
-                                       $"dry - the data missed this water; swimming at the {_wetY:0.0} surface.");
-                    _follow.BreakMirror("server correction");
-                    Movement.SetPose(me, pos, me.MovementComponent.Heading);
-                    _movement.ResetKeepGait();
-                    return; // the correction is applied; the wedge blacklist is not the cure here
-                }
+                // THE SWIM ESCAPE IS GONE (owner, 2026-10-13): four chained pins on ground the
+                // liquids call dry used to enter the swim as "the data missed this water" - but
+                // the liquid planes are complete now, and the branch's own record is dry land that
+                // swam: the ICC mission entrance's door-use pins (2026-10-13 14:47, the server
+                // holding the body at the entrance while the Use processes) swam at a 16.6 m
+                // "surface" on a plaza. A pin storm on dry land is a wedge, and the wedge
+                // blacklist at eight below is the only answer.
 
                 if (_pins >= 8)
                 {
@@ -2587,6 +2896,7 @@ public sealed class MovementController : IPacketConsumer
         // (AOBuddy10 OnServerCorrectedMe broke the mirror here too); the catch-up re-locks.
         _follow.BreakMirror("server correction");
 
+        ReanchorFall(pos); // the server's y is the truth: keep falling from it, or land
         Movement.SetPose(me, pos, me.MovementComponent.Heading);
         _movement.ResetKeepGait(); // a correction is not a gait change (Movement.cs, Newland 21:40)
     }

@@ -196,16 +196,46 @@ namespace AONavExtractor
         public const float WallMinHeight = 1.0f;   // a wall triangle spans at least this much height
 
         /// <summary>AOCL: near-horizontal triangles, int16 centimetres relative to a per-chunk origin, zlib. Returns (kept triangles, chunks).</summary>
-        public static (long kept, int chunks) WriteCollision(string path, List<SurfaceRecord> recs) => WriteAocl(path, recs, false);
+        public static (long kept, int chunks) WriteCollision(string path, List<SurfaceRecord> recs) => WriteAocl(path, recs, KeepFlat);
 
         /// <summary>
         /// walls.bin, the same AOCL layout: the steep triangles collision.bin leaves out (|normal.y| &lt;= 0.5)
         /// that span at least WallMinHeight of height, so walls, doorframes and pillars stay and stair risers
         /// and kerbs do not. A doorway is the gap between them (subway pool pf 351: 1.6 m wide, lintel at 3 m).
         /// </summary>
-        public static (long kept, int chunks) WriteWalls(string path, List<SurfaceRecord> recs) => WriteAocl(path, recs, true);
+        public static (long kept, int chunks) WriteWalls(string path, List<SurfaceRecord> recs) => WriteAocl(path, recs, KeepWall);
 
-        static (long kept, int chunks) WriteAocl(string path, List<SurfaceRecord> recs, bool walls)
+        /// <summary>
+        /// meshes.bin, the same AOCL layout with NO filter: every non-degenerate triangle of the
+        /// record. The split above drops steep triangles shorter than WallMinHeight - which is
+        /// exactly where tree trunks, thin branches and small posts went (owner, 2026-10-12: the
+        /// dense probe at his tree found canopies but no trunk in either file). The Recast nav
+        /// consumes this unfiltered set and classifies slope itself; teleports ride along per
+        /// chunk as they always did.
+        /// </summary>
+        public static (long kept, int chunks) WriteMeshes(string path, List<SurfaceRecord> recs) => WriteAocl(path, recs, null);
+
+        static bool KeepFlat(float[] v, int t)
+        {
+            float ax = v[t + 3] - v[t], ay = v[t + 4] - v[t + 1], az = v[t + 5] - v[t + 2];
+            float bx = v[t + 6] - v[t], by = v[t + 7] - v[t + 1], bz = v[t + 8] - v[t + 2];
+            float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            double len = Math.Sqrt((double)nx * nx + (double)ny * ny + (double)nz * nz);
+            return len > 1e-9 && Math.Abs(ny) / Math.Max(len, 1e-9) > WalkNy;
+        }
+
+        static bool KeepWall(float[] v, int t)
+        {
+            float ax = v[t + 3] - v[t], ay = v[t + 4] - v[t + 1], az = v[t + 5] - v[t + 2];
+            float bx = v[t + 6] - v[t], by = v[t + 7] - v[t + 1], bz = v[t + 8] - v[t + 2];
+            float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            double len = Math.Sqrt((double)nx * nx + (double)ny * ny + (double)nz * nz);
+            if (len <= 1e-9) return false;
+            bool flat = Math.Abs(ny) / Math.Max(len, 1e-9) > WalkNy;
+            return !flat && Math.Max(v[t + 1], Math.Max(v[t + 4], v[t + 7])) - Math.Min(v[t + 1], Math.Min(v[t + 4], v[t + 7])) >= WallMinHeight;
+        }
+
+        static (long kept, int chunks) WriteAocl(string path, List<SurfaceRecord> recs, Func<float[], int, bool> keepTri)
         {
             var body = new MemoryStream();
             var bw = new BinaryWriter(body);
@@ -217,15 +247,19 @@ namespace AONavExtractor
                 float[] v = r.Verts;
                 for (int t = 0; t + 9 <= v.Length; t += 9)
                 {
-                    float ax = v[t + 3] - v[t], ay = v[t + 4] - v[t + 1], az = v[t + 5] - v[t + 2];
-                    float bx = v[t + 6] - v[t], by = v[t + 7] - v[t + 1], bz = v[t + 8] - v[t + 2];
-                    float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-                    double len = Math.Sqrt((double)nx * nx + (double)ny * ny + (double)nz * nz);
-                    if (len <= 1e-9) continue;
-                    bool flat = Math.Abs(ny) / Math.Max(len, 1e-9) > WalkNy;
-                    bool keepIt = !walls ? flat
-                        : !flat && Math.Max(v[t + 1], Math.Max(v[t + 4], v[t + 7])) - Math.Min(v[t + 1], Math.Min(v[t + 4], v[t + 7])) >= WallMinHeight;
-                    if (keepIt) for (int k = 0; k < 9; k++) keep.Add(v[t + k]);
+                    if (keepTri == null)
+                    {
+                        // unfiltered: still drop degenerates (zero-area triangles carry no surface)
+                        float ax = v[t + 3] - v[t], ay = v[t + 4] - v[t + 1], az = v[t + 5] - v[t + 2];
+                        float bx = v[t + 6] - v[t], by = v[t + 7] - v[t + 1], bz = v[t + 8] - v[t + 2];
+                        float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+                        if (Math.Sqrt((double)nx * nx + (double)ny * ny + (double)nz * nz) <= 1e-9) continue;
+                    }
+                    else if (!keepTri(v, t))
+                    {
+                        continue;
+                    }
+                    for (int k = 0; k < 9; k++) keep.Add(v[t + k]);
                 }
                 int ntri = keep.Count / 9;
                 kept += ntri;

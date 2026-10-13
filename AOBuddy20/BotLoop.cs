@@ -45,9 +45,10 @@ public sealed class BotLoop
     private readonly NavController _navMemory;
     private readonly BuffBotController _buffBot;
     private readonly PerkBonuses _perkBonuses;
+    private readonly Network.TeleportWatcher _teleports;
     private bool _running;
 
-    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, BuffBotController buffBot, PerkBonuses perkBonuses, AccountInfo config, ILogger<BotLoop> logger)
+    public BotLoop(ControlArbiter controlArbiter, MissionController missionController, ResupplyController resupply, SellController sell, HealController heal, BrainBank brains, NavController navMemory, Awareness awareness, BuffBotController buffBot, PerkBonuses perkBonuses, Network.TeleportWatcher teleports, AccountInfo config, ILogger<BotLoop> logger)
     {
         _controlArbiter = controlArbiter;
         _missionController = missionController;
@@ -57,6 +58,7 @@ public sealed class BotLoop
         _brains = brains;
         _navMemory = navMemory;
         _perkBonuses = perkBonuses;
+        _teleports = teleports;
         _awareness = awareness;
         _buffBot = buffBot;
         _config = config;
@@ -99,12 +101,15 @@ public sealed class BotLoop
         {
             // NAV memory (AOBuddy10 NavController): record the owner's footsteps and catalogue the
             // playfield's objects and mob spawns, so ground already walked is never guessed again.
-            // Zone transitions are not recorded yet - they need the POSITION-JUMP (teleport)
-            // detection, which is not ported (realCrossing: false).
+            // The zone crossing comes from TeleportWatcher: an N3Teleport (a warp nano) followed by
+            // a pf change is a real crossing at the exit spot we stood on; a pf change with neither
+            // is the desync path and records nothing.
             var me = DynelManager.LocalPlayer;
             if (me != null)
             {
-                _navMemory.SetPlayfield((int)Playfield.ModelId, Playfield.Name, null, realCrossing: false);
+                var warpExit = _teleports.Consume((int)Playfield.ModelId);
+                _navMemory.SetPlayfield((int)Playfield.ModelId, Playfield.Name, warpExit,
+                    realCrossing: warpExit.HasValue, kind: "teleport");
                 var owner = DynelManager.Players.FirstOrDefault(pl =>
                     string.Equals(pl.Name, _config.Owner, StringComparison.OrdinalIgnoreCase));
                 _navMemory.RecordOwner(owner?.Transform.Position ?? default,

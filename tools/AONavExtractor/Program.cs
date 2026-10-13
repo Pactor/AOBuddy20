@@ -128,6 +128,7 @@ namespace AONavExtractor
                     if (ground != null) info.Str("ground.bin");
                     if (dungeon != null) info.Str("rooms.json");
                     if (recs != null) info.Str("collision.bin");
+                    if (recs != null) info.Str("meshes.bin");
                     if (recs != null && (dungeon != null || ground != null)) info.Str("walls.bin");
                     info.End();
                     if (error != null) info.Key("error").Str(error);
@@ -169,6 +170,13 @@ namespace AONavExtractor
                         long total = 0; foreach (var r in recs) total += r.Triangles;
                         info.Key("collision").Obj();
                         info.Key("records").Num(recs.Count); info.Key("trianglesTotal").Num(total); info.Key("trianglesWalkable").Num(kept); info.Key("chunks").Num(chunks);
+                        info.End();
+                        // The unfiltered set (RECAST-NAV-PLAN step 1): the split above drops steep
+                        // triangles < 1 m - tree trunks, thin branches, small posts - and the Recast
+                        // nav consumes everything. Teleports ride along per chunk as always.
+                        var (mk, mc) = TriFile.WriteMeshes(Path.Combine(folder, "meshes.bin"), recs);
+                        info.Key("meshes").Obj();
+                        info.Key("triangles").Num(mk); info.Key("chunks").Num(mc);
                         info.End();
                         if (dungeon != null || ground != null)
                         {

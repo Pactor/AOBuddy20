@@ -163,6 +163,111 @@ public sealed class OverlandGrid : IWalkGrid
     public int BlockedCells { get; private set; }
     public bool HasWalls { get; private set; }
 
+    /// <summary>
+    ///     The grid from a Recast lattice (RECAST-NAV-PLAN: tools/latticebuild's AOCELL1 output,
+    ///     wire-validated 2026-10-12). The lattice already carries every walkable level per cell -
+    ///     terrain, decks, ramps, tree canopies - so the grid is populated straight from it and all
+    ///     of OverlandGrid's machinery (A*, RouteCache, MobDanger, Escape, GeometryLine) runs
+    ///     unchanged. Null when the playfield has no lattice.bin (the caller falls back to Build).
+    /// </summary>
+    public static OverlandGrid FromLattice(string pluginDir, int pf, Action<string> log)
+    {
+        var path = Path.Combine(AOBuddyNav.FolderFor(pluginDir, pf), "lattice.bin");
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        byte[] b;
+        try
+        {
+            b = File.ReadAllBytes(path);
+            if (System.Text.Encoding.ASCII.GetString(b, 0, 7) != "AOCELL1")
+            {
+                log?.Invoke($"LATTICE: {path} is not AOCELL1 - falling back to Build.");
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"LATTICE: read failed: {ex}");
+            return null;
+        }
+
+        try
+        {
+        var pfInFile = BitConverter.ToInt32(b, 7);
+        var cell = BitConverter.ToSingle(b, 11);
+        var w = BitConverter.ToInt32(b, 19);
+        var h = BitConverter.ToInt32(b, 23);
+        var grid = new OverlandGrid(pf, cell, w, h, null);
+        grid._pluginDir = pluginDir;
+        var wp = Path.Combine(AOBuddyNav.FolderFor(pluginDir, pf), "walls.bin");
+        if (File.Exists(wp))
+        {
+            grid._walls = NavCollision.Read(wp); // retained: GeometryLine judges straight lines against it
+            grid.HasWalls = true; // but NOT stamped: the lattice already carries the wall-adjacent walkable levels
+        }
+
+        var p = 27;
+        for (var gz = 0; gz < h; gz++)
+        {
+            for (var gx = 0; gx < w; gx++)
+            {
+                var n = b[p];
+                p += 1;
+                if (n == 0)
+                {
+                    grid._blocked[gz * w + gx] = true;
+                    continue;
+                }
+
+                var lv = new float[n];
+                for (var i = 0; i < n; i++)
+                {
+                    lv[i] = BitConverter.ToInt16(b, p + i * 2) / 100f;
+                }
+
+                p += n * 2;
+                Array.Sort(lv); // spans were written bottom-up; be sure
+                grid._ch[gz * w + gx] = lv[0]; // the lowest level is the cell's terrain floor
+                if (n > 1)
+                {
+                    (grid._extra ??= new Dictionary<int, float[]>())[gz * w + gx] = lv[1..]; // the rest: decks, canopies, structure tops
+                }
+            }
+        }
+
+        grid.StampClearance();
+        try
+        {
+            grid.KeepExitsOpen(pf); // zone-line/proxy discs stay open, LAST so nothing re-seals them
+        }
+        catch (Exception ex)
+        {
+            // Zoning not loaded (bare probes): no exits to keep open - and nothing stamped them shut
+            log?.Invoke($"LATTICE: KeepExitsOpen skipped ({ex.GetType().Name})");
+        }
+        for (var i = 0; i < grid._blocked.Length; i++)
+        {
+            if (grid._blocked[i])
+            {
+                grid.BlockedCells++;
+            }
+        }
+
+        log?.Invoke($"LATTICE: grid for pf {pf}: {w}x{h} cells of {cell:0.#} m from lattice.bin, " +
+                    $"{grid.BlockedCells:,} blocked, {sw.ElapsedMilliseconds} ms");
+        return grid;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke("LATTICE: build failed: " + ex);
+            return null;
+        }
+    }
+
     /// <summary>The grid for an outdoor playfield; null when it has no ground data (dungeons, instances).</summary>
     public static OverlandGrid Build(string pluginDir, int pf, AOBuddyNav nav, Action<string> log)
     {

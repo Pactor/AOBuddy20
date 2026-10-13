@@ -5,6 +5,7 @@
  "files": [
   "rooms.json",
   "collision.bin",
+  "meshes.bin",
   "walls.bin"
  ],
  "kind": "dungeon",
@@ -19,6 +20,10 @@
   "trianglesTotal": 26300,
   "trianglesWalkable": 8782,
   "chunks": 5
+ },
+ "meshes": {
+  "triangles": 26300,
+  "chunks": 106
  },
  "walls": {
   "triangles": 2154,

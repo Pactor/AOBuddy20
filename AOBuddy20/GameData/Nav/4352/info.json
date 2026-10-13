@@ -3,13 +3,18 @@
  "name": "Market",
  "playfieldVersion": 8,
  "files": [
-  "collision.bin"
+  "collision.bin",
+  "meshes.bin"
  ],
  "kind": "none",
  "collision": {
   "records": 1,
   "trianglesTotal": 36,
   "trianglesWalkable": 12,
+  "chunks": 1
+ },
+ "meshes": {
+  "triangles": 36,
   "chunks": 1
  }
 }

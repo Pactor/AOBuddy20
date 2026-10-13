@@ -11,6 +11,7 @@
 
 #nullable disable
 
+using System.Diagnostics;
 using AOBuddy20.Components;
 using AOBuddy20.Configuration;
 using AOBuddy20.Enums;
@@ -23,6 +24,7 @@ using AOBuddy20.Utils;
 using AOSharp.Clientless;
 using AOSharp.Common.GameData;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Serilog.Events;
 using SmokeLounge.AOtomation.Messaging.GameData;
@@ -2591,12 +2593,15 @@ public sealed class MissionController : IPacketConsumer
             // A shut door at the goal gets picked before anything is given up on (owner,
             // 2026-10-09): the yank storm the walk just suffered was the closed leaf bouncing
             // the body, and twenty lockpick tries open it for the re-plan.
+            // NO, a simply SHUT DOOR is not locked! Stupid LLM
+            /*
             var shut = ShutDoorNear(_goalPos);
             if (shut.HasValue)
             {
                 StartPicking(shut.Value);   
                 return;
             }
+            */
 
             if (_pullId != Identity.None && _goalWhat.StartsWith("clear: the pull", StringComparison.Ordinal))
             {
@@ -2670,7 +2675,10 @@ public sealed class MissionController : IPacketConsumer
             if (locked.HasValue)
             {
                 var d = locked.Value;
-                StartPicking((d.room, d.adjoining, d.pos, d.flags));
+                if (d.flags!=0)
+                {
+                    StartPicking((d.room, d.adjoining, d.pos, d.flags));
+                }
                 return;
             }
 

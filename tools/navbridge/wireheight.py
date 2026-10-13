@@ -227,8 +227,8 @@ def _blobs(raw):
 
 READABLE = re.compile(r"^\s*(\d+)/(server|client)\s+(\w+Message)\b(.*)$")
 ORDERED = re.compile(r"^([0-9.]+)\t(\w+)\t(\d+)\t(\w+Message)\t([0-9a-fA-F]+)$")
-BOTRAW = re.compile(r"^#\d+ \S+ \S+ \S+ (S|C) N3/(\w+) len=\d+ hex=([0-9a-fA-F]+)")
-BOTLINE = re.compile(r"^;(ZONE|DYNEL|DOOR) ")
+BOTRAW = re.compile(r"^#\d+ \S+ \S+ (S|C) N3/(\w+) len=\d+ hex=([0-9a-fA-F]+)")
+BOTLINE = re.compile(r"^;(ZONE|DYNEL|DOOR)\s+(.*)$")
 XYZ = re.compile(r"\bX=([-0-9.,]+) Y=([-0-9.,]+) Z=([-0-9.,]+)")
 
 
@@ -273,7 +273,10 @@ def extract(lines):
         m = BOTRAW.match(line)
         if m:
             src = "server" if m.group(1) == "S" else "client"
-            yield from _from_raw(src, m.group(2) + "Message", bytes.fromhex(m.group(3)))
+            try:
+                yield from _from_raw(src, m.group(2) + "Message", bytes.fromhex(m.group(3)))
+            except ValueError:
+                pass
             continue
         m = BOTLINE.match(line)
         if m:
@@ -393,6 +396,32 @@ class Collision:
         return out
 
 
+# ── the lattice side: AOCELL1 (latticebuild output) as a validation source ───────────────
+
+class Lattice:
+    def __init__(self, path):
+        b = open(path, "rb").read()
+        if b[:7] != b"AOCELL1":
+            raise ValueError("no AOCELL1 magic")
+        self.pf = struct.unpack_from("<i", b, 7)[0]
+        self.cs, self.ch = struct.unpack_from("<ff", b, 11)
+        self.w, self.h = struct.unpack_from("<ii", b, 19)
+        p = 27
+        self.cells = [None] * (self.w * self.h)
+        for i in range(self.w * self.h):
+            n = b[p]
+            p += 1
+            if n:
+                self.cells[i] = [v / 100.0 for v in struct.unpack_from("<%dh" % n, b, p)]
+                p += 2 * n
+
+    def surfaces(self, x, z):
+        ix, iz = int(x / self.cs), int(z / self.cs)
+        if ix < 0 or iz < 0 or ix >= self.w or iz >= self.h:
+            return []
+        return self.cells[ix + self.w * iz] or []
+
+
 # ── the comparison ────────────────────────────────────────────────────────────────────────
 
 def fit(terr, pts, cell):
@@ -423,6 +452,7 @@ def main(argv):
     verbose = False
     no_collision = False
     nav_dir = NAV_DIR
+    lattice_path = None
     it = iter(argv[1:])
     for a in it:
         if a == "--db":
@@ -441,6 +471,8 @@ def main(argv):
             no_collision = True
         elif a == "--nav":
             nav_dir = next(it)
+        elif a == "--lattice":
+            lattice_path = next(it)
         elif a == "--verbose":
             verbose = True
         else:
@@ -484,6 +516,13 @@ def main(argv):
     terr0 = Terrain(db, pf)
     rec = terr0.record_modulo
     modulos = [modulo] if modulo else ([rec, 256] if rec not in (0, 256) else [256])
+    lat = None
+    if lattice_path:
+        try:
+            lat = Lattice(lattice_path)
+            print(f"lattice: {lat.w}x{lat.h} cells cs={lat.cs} (AOCELL1 pf {lat.pf})")
+        except (OSError, ValueError) as e:
+            print(f"lattice: unavailable ({e})")
     # the second ground layer: RDB 1000013 near-horizontal triangles (decks, ramps, platforms,
     # AND tree canopies - trees are walkable). There is no single 'top-most' answer: a body
     # under a tree stands on terrain while a canopy floats above. So every wire point is
@@ -497,7 +536,11 @@ def main(argv):
             print("collision: unavailable (%s) - terrain only" % e)
 
     def surfaces(terr, p, cell):
-        """(y, layer) for every surface at the point's x/z: terrain first, then collision."""
+        """(y, layer) candidates at the point's x/z. With a lattice loaded the LATTICE is the
+        sole candidate - it is the distillation of terrain+collision, and the question is
+        whether it alone reproduces the wire. Without one: the raw layers."""
+        if lat:
+            return [(y, "lattice") for y in lat.surfaces(p[2], p[4])]
         out = []
         yt = terr.height(p[2], p[4], cell)
         if yt == yt:

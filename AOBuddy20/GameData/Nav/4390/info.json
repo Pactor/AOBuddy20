@@ -5,6 +5,7 @@
  "files": [
   "ground.bin",
   "collision.bin",
+  "meshes.bin",
   "walls.bin"
  ],
  "kind": "outdoor",
@@ -35,6 +36,10 @@
   "trianglesTotal": 260581,
   "trianglesWalkable": 119215,
   "chunks": 1181
+ },
+ "meshes": {
+  "triangles": 260581,
+  "chunks": 2214
  },
  "walls": {
   "triangles": 111131,

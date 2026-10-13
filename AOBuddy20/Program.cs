@@ -265,6 +265,9 @@ internal class Program
         // DIAGNOSTIC MODE ('diagnostic on|off'): every packet on the wire, raw, into
         // diag-packets.log (overwritten per capture). Off until the owner turns it on.
         services.AddSingleton<PacketRecorder>();
+        // TELEPORT WATCH: N3Teleport (warp nanos) - the pending warp turns the next pf change
+        // into a real crossing for the NAV memory (BotLoop consumes it).
+        services.AddSingleton<Network.TeleportWatcher>();
         services.AddSingleton<Awareness>();
         services.AddSingleton<MovementController>();
         services.AddSingleton<BotLoop>();
@@ -283,6 +286,7 @@ internal class Program
             provider.GetService<ResupplyController>()?.RegisterPackets(router);
             provider.GetService<MissionController>()?.RegisterPackets(router);
             provider.GetService<PacketRecorder>()?.RegisterPackets(router);
+            provider.GetService<Network.TeleportWatcher>()?.RegisterPackets(router);
             provider.GetService<TeamController>()?.RegisterPackets(router); // the routed team invite
             provider.GetService<BuffBotController>()?.RegisterPackets(router);
         }

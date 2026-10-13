@@ -27,9 +27,9 @@ namespace AOBuddy20.Nav;
 ///     This controller NEVER moves the body. It only supplies routes (lists of already-walked points).
 ///     THREADING (owner, 2026-10-01): all state sits under one lock, so RecordOwner/SetPlayfield/Tick may
 ///     run on the update thread while RouteToward/NearestTransition/EntryPoint are read from any other.
-///     AOBuddy10's zone-transition recording needed the POSITION-JUMP detection (a real teleport), which is
-///     not ported yet: SetPlayfield's realCrossing=false path records nothing - transitions arrive when
-///     the teleport detection does.
+///     CROSSINGS (owner, 2026-10-13): TeleportWatcher handles the server's N3Teleport, so a warp nano's
+///     pf change records a Kind="teleport" transition; a pf change with neither a warp nor a crossing
+///     position stays unrecorded (the desync path in SetPlayfield).
 /// </summary>
 public class NavController
 {
@@ -81,8 +81,9 @@ public class NavController
 
     // Called every frame with the live playfield id. No-ops unless it changed. On a change: finalise the
     // current run, record a transition from the old pf's exit spot to the new pf (real crossings only -
-    // see the class note), save the old file, then load the new pf's memory.
-    public void SetPlayfield(int pf, string name, Vector3? crossPos, bool realCrossing)
+    // see the class note), save the old file, then load the new pf's memory. kind names HOW we crossed:
+    // "zone" (a walked crossing) or "teleport" (a warp nano carried us - spot NOT walk-to-useful).
+    public void SetPlayfield(int pf, string name, Vector3? crossPos, bool realCrossing, string kind = "zone")
     {
         if (pf <= 0)
         {
@@ -103,7 +104,7 @@ public class NavController
             {
                 if (realCrossing && oldPf > 0 && crossPos.HasValue)
                 {
-                    _zone.Transitions.Add(new NavTransition { X = crossPos.Value.X, Y = crossPos.Value.Y, Z = crossPos.Value.Z, ToPf = pf, Kind = "zone", Name = "" });
+                    _zone.Transitions.Add(new NavTransition { X = crossPos.Value.X, Y = crossPos.Value.Y, Z = crossPos.Value.Z, ToPf = pf, Kind = kind, Name = "" });
                     _dirty = true;
                 }
                 else if (oldPf > 0)

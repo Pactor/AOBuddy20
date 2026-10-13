@@ -111,9 +111,13 @@ public sealed class NavGridCache
                     }
 
                     var nav = AOBuddyNav.Load(dir, pf);
-                    // The finished grid first from the disk cache (GridCache); only a miss pays the
-                    // 0.6-3.8 s stamping, and a fresh build is saved back for next time.
-                    IWalkGrid grid = GridCache.TryLoad(dir, pf, nav, logger);
+                    // RECAST-NAV-PLAN: the Recast lattice (tools/latticebuild's AOCELL1, wire-validated
+                    // 2026-10-12) wins where it exists - it is the corrected ground model. Everything
+                    // else keeps the old path: disk cache (GridCache), then the 0.6-3.8 s stamping,
+                    // saved back for next time.
+                    IWalkGrid grid = MeshGrid.Load(dir, pf, logger)
+                                    ?? OverlandGrid.FromLattice(dir, pf, logger)
+                                    ?? GridCache.TryLoad(dir, pf, nav, logger);
                     if (grid == null)
                     {
                         grid = (IWalkGrid)OverlandGrid.Build(dir, pf, nav, logger) ?? FloorGrid.Build(dir, pf, nav, logger);
