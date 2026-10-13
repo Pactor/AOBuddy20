@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: MissionController.cs
 //
-// Last modified: 2026-10-09
+// Last modified: 2026-10-13
 // Created:       2026-09-30 00:09
 //
 // Long live OmniCell and AOBuddy
@@ -1161,11 +1161,50 @@ public sealed class MissionController : IPacketConsumer
             }
         }
 
+        // THE BLIND STREAM (owner, 2026-10-13, the droid run: "the door coordinates were x:0 y:0
+        // z:0, then the bot couldn't path to them anyway"): some full updates carry the room pair
+        // and the flags but no coordinate. Stored as they came, the door sits at the world origin
+        // and every gate over _serverDoors measures garbage - the line crossing, the mob-nearest,
+        // the pick's own approach. The position comes from what we know: an already-streamed door
+        // of this room pair keeps its real spot (a state re-stream without the coordinate), else
+        // the placed rooms' doorway answers for the pair; with neither the door is NOT stored - a
+        // door at a wrong place is worse than none.
+        var coord = door.Coordinate;
+        if (coord.X == 0 && coord.Y == 0 && coord.Z == 0)
+        {
+            for (var i = 0; i < _serverDoors.Count; i++)
+            {
+                var d = _serverDoors[i];
+                if (d.room == door.Room && d.adjoining == door.AdjoiningRoom &&
+                    !(d.pos.X == 0 && d.pos.Y == 0 && d.pos.Z == 0))
+                {
+                    _serverDoors[i] = (d.room, d.adjoining, d.pos, d.pf, flags);
+                    _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} re-streamed " +
+                                           $"without a coordinate - {DoorState(flags)} on the known spot.");
+                    return false;
+                }
+            }
+
+            var dw = StaticDoorwayFor(door.Room, door.AdjoiningRoom);
+            if (dw.HasValue)
+            {
+                coord = dw.Value;
+                _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} streamed without a " +
+                                       $"coordinate - placed at ({coord.X:0.0},{coord.Y:0.0},{coord.Z:0.0}) from the doorway.");
+            }
+            else
+            {
+                _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} streamed without a " +
+                                       $"coordinate and no doorway answers for the pair - not kept.");
+                return false;
+            }
+        }
+
         // The same door re-streams on every approach; one copy each keeps the corrector's count
         // honest (it re-applies when the count grows) and the search's door walk deduped. The key
         // is the door's physical identity (room pair + position), pf-less: the pre-compose copy
         // carries 0 and the re-stream the real playfield, and they are one door.
-        var key = DoorKey(door.Room, door.AdjoiningRoom, door.Coordinate);
+        var key = DoorKey(door.Room, door.AdjoiningRoom, coord);
         if (!_doorKeys.Add(key))
         {
             // A re-stream REFRESHES the state: the lockpick beat watches these flags flip to open
@@ -1174,7 +1213,7 @@ public sealed class MissionController : IPacketConsumer
             {
                 var d = _serverDoors[i];
                 if (d.room == door.Room && d.adjoining == door.AdjoiningRoom &&
-                    Movement.Flat(d.pos, door.Coordinate) < 0.5f)
+                    Movement.Flat(d.pos, coord) < 0.5f)
                 {
                     _serverDoors[i] = (d.room, d.adjoining, d.pos, d.pf, flags);
                     break;
@@ -1189,17 +1228,17 @@ public sealed class MissionController : IPacketConsumer
         // the search never checked one). What names the building is OUR compose: store doors under
         // it once composed, under 0 in the pre-compose blind window (OnZoneIn re-keys those).
         var pf = _missionPf >= 0 ? _missionPf : 0;
-        _serverDoors.Add((door.Room, door.AdjoiningRoom, door.Coordinate, pf, flags));
+        _serverDoors.Add((door.Room, door.AdjoiningRoom, coord, pf, flags));
         if (door.Room == -1)
         {
-            _serverExitByPf[pf] = door.Coordinate;
-            _logger.LogInformation($"MISSION: exit door at ({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0}," +
-                                   $"{door.Coordinate.Z:0.0}) {DoorState(flags)} pf {door.Playfield}->{pf}.");
+            _serverExitByPf[pf] = coord;
+            _logger.LogInformation($"MISSION: exit door at ({coord.X:0.0},{coord.Y:0.0}," +
+                                   $"{coord.Z:0.0}) {DoorState(flags)} pf {door.Playfield}->{pf}.");
         }
         else
         {
             _logger.LogInformation($"MISSION: door room {door.Room} adj {door.AdjoiningRoom} at " +
-                                   $"({door.Coordinate.X:0.0},{door.Coordinate.Y:0.0},{door.Coordinate.Z:0.0}) " +
+                                   $"({coord.X:0.0},{coord.Y:0.0},{coord.Z:0.0}) " +
                                    $"{DoorState(flags)} pf {door.Playfield}->{pf}.");
         }
 
@@ -2699,6 +2738,11 @@ public sealed class MissionController : IPacketConsumer
                 }
             }
 
+            // A SHUT door is no obstacle at all (owner, 2026-10-13: "you can go through shut
+            // doors all day, they will open automatically", "only on locked status you need to
+            // lockpick them"): the straight pull walks through it and the leaf opens in passing -
+            // what the pet needs is the body on the mob's side of it. Only a LOCKED door stops
+            // the pull, and the lock gates above take it.
             WalkTo(pos, pick.Transform.Position, PullReach, $"clear: the pull '{pick.Name}'");
             return;
         }
@@ -2946,6 +2990,33 @@ public sealed class MissionController : IPacketConsumer
         }
 
         return best;
+    }
+
+    // The placed doorway of a streamed room pair: this side's socket with the other side's socket
+    // beside it (the same pairing DoorBetween walks) - the position a blind door stream lacks.
+    private Vector3? StaticDoorwayFor(short room, short adjoining)
+    {
+        if (_nav?.MissionDoorways == null)
+        {
+            return null;
+        }
+
+        foreach (var dw in _nav.MissionDoorways)
+        {
+            if (dw.Room != room)
+            {
+                continue;
+            }
+
+            var paired = _nav.MissionDoorways.Any(o => o.Room == adjoining && o.Floor == dw.Floor &&
+                Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
+            if (paired)
+            {
+                return new Vector3((float)dw.X, (float)dw.Y, (float)dw.Z);
+            }
+        }
+
+        return null;
     }
 
     // The LOCKED door standing between the bot and the target: flags 0x40, not open, within
