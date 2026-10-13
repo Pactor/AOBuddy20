@@ -220,6 +220,7 @@ public static class LearnedGround
             s.Last = DateTime.UtcNow;
             Version++;
             RouteCache.DropNear(pf, x, z); // a saved route through the spot is now stale
+            PathCache.DropNear(pf, x, z); // ...and so is a session-cached one
             try
             {
                 File.WriteAllText(Path.Combine(_dir, "snapbacks.json"), JsonConvert.SerializeObject(_snaps, Formatting.Indented));

@@ -3,7 +3,7 @@
 // Project: AOBuddy20
 // Filename: OverlandGrid.cs
 //
-// Last modified: 2026-10-03
+// Last modified: 2026-10-13
 // Created:       2026-10-01 (ported from AOBuddy10 OverlandGrid.cs)
 //
 // Long live OmniCell and AOBuddy
@@ -1364,10 +1364,24 @@ public sealed class OverlandGrid : IWalkGrid
     public List<Vector3> FindPath(Vector3 a, Vector3 b, HashSet<int> extra, float snap, float reach, out string why, float goalY,
         HashSet<int> pricey = null)
     {
+        why = "";
+
+        // THE SESSION PATH CACHE (owner, 2026-10-13): the same start and goal is asked for again -
+        // the travel tick re-setting the identical goal, a re-plan after a yank, the next trip to
+        // the same mission entrance, the legs a multi-zone journey walks twice. The full search of
+        // the zone is the most expensive thing this grid does; a path planned once is served until
+        // the world says otherwise (today's hard blocks checked at serve time, pull-backs dropping
+        // what runs through them). The fixed-object routes below (RouteCache) are the kept memory
+        // across restarts; this is the session's own.
+        var cached = PathCache.Get(this, a, b, reach, goalY, extra);
+        if (cached != null)
+        {
+            return cached;
+        }
+
         // Between two fixed objects (whompahs, grids, doors) the route is planned once and kept
         // (RouteCache, ported 2026-10-03). A saved route was planned without today's mobs: through a
         // hostile spot, plan it afresh.
-        why = "";
         var saved = RouteCache.Get(this, a, b, reach, goalY, extra,
             (p, q) => Search(p, q, extra, snap, 1.5f, false, out _, float.NaN, pricey));
         if (saved != null)
@@ -1386,6 +1400,7 @@ public sealed class OverlandGrid : IWalkGrid
                     ?? Search(a, b, extra, snap, reach, false, out _, goalY, pricey);
         if (route != null)
         {
+            PathCache.Put(Pf, a, b, reach, goalY, route);
             RouteCache.Put(this, a, b, reach, goalY, route);
         }
 

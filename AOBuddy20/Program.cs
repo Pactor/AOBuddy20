@@ -199,6 +199,8 @@ internal class Program
         // objects (RouteCache) and the hostile-mob picture (MobDanger) - the overland planner's memory.
         LearnedGround.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         RouteCache.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
+        // the path memo: one playfield's paths.json in memory at a time, loaded on zone change
+        PathCache.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
         MobDanger.Init(AppDomain.CurrentDomain.BaseDirectory, s => Log.Logger.Information(s));
 
         Client.SuppressItemDataLoad();
