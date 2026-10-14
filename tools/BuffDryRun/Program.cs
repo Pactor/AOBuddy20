@@ -97,6 +97,14 @@ internal static class Program
                 {
                     WriteJson(ctx, AllGates());
                 }
+                else if (ctx.Request.Url.AbsolutePath == "/statnames")
+                {
+                    WriteJson(ctx, StatNames());
+                }
+                else if (ctx.Request.Url.AbsolutePath == "/petnanos")
+                {
+                    WriteJson(ctx, PetNanos());
+                }
                 else if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url.AbsolutePath == "/solve")
                 {
                     using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
@@ -158,9 +166,8 @@ internal static class Program
         public string profession { get; set; } = "Engineer";
         public int level { get; set; } = 50;
         public int maxNcu { get; set; } = 210;
-        public bool paid { get; set; } = true;
-        public int specialization { get; set; } = 0; // highest spec book learned (0-4)
-        public int expansion { get; set; } = 0;       // ExpansionFlags bitmask owned
+        public bool paid { get; set; } = true;         // paid = owns ALL expansions; false = froob (none)
+        public int specialization { get; set; } = 0;   // highest spec book learned (0-4)
         public Dictionary<string, int> stats { get; set; } = new();
         public List<int> wants { get; set; } = new();
     }
@@ -719,6 +726,28 @@ internal static class Program
         return JsonSerializer.Serialize(new { nanos = n, withGates, file = path });
     }
 
+    // Every Stat enum name, for the skill-name dropdown on the page (so a skill can't be mistyped).
+    private static string StatNames()
+    {
+        var names = Enum.GetNames(typeof(Stat))
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return JsonSerializer.Serialize(names);
+    }
+
+    // The pet-summon nanos, for the "wants" dropdown: every formula that actually summons a pet
+    // (SummonPets captured from its effect functions - the precise "summons a pet" test), id + name.
+    private static string PetNanos()
+    {
+        var list = NanoLibrary.Nanos
+            .Where(n => n.SummonPets != null && n.SummonPets.Count > 0)
+            .Select(n => new { id = n.NanoId, name = NanoLibrary.NameOf(n.NanoId) })
+            .Where(x => !string.IsNullOrEmpty(x.name) && !x.name.StartsWith("(nano "))
+            .OrderBy(x => x.name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return JsonSerializer.Serialize(list);
+    }
+
     // ---- NCU tier probe: what BestNcuBuff actually returns at each level ----------------
     private static string NcuTable()
     {
@@ -812,7 +841,12 @@ internal static class Program
         // Specialization is a bitmask: owning book L means bits 0..L-1 set (you earn 1..L in order).
         // "Specialization BitAnd 2" (spec 2) then passes only when L >= 2.
         me.SetStat(Stat.Specialization, req.specialization <= 0 ? 0 : (1 << req.specialization) - 1);
-        me.SetStat(Stat.Expansion, req.expansion);
+
+        // Expansion is froob-vs-paid, nothing in between: every paid account owns EVERY expansion
+        // (owner + Alg, 2026-10-14 - no live account has one expansion and not another). So paid =
+        // all bits set, which satisfies any Expansion-BitAnd gate whatever bit it names (incl. 16,
+        // which the old per-expansion checkboxes did not even offer); froob = 0, which fails them all.
+        me.SetStat(Stat.Expansion, req.paid ? ~0 : 0);
 
         // Typed skills (by Stat name). Always ensure MC/TS exist even if the form omitted one.
         me.SetStat(Stat.MaterialCreation, 0);
@@ -943,22 +977,14 @@ internal static class Program
     <div class="row">
       <div><label>Level</label><input id="level" type="number" value="50"></div>
       <div><label>Max NCU</label><input id="ncu" type="number" value="210"></div>
-      <div><label>Paid (SL)</label><select id="paid"><option value="true">Yes</option><option value="false">No</option></select></div>
+      <div><label>Account</label><select id="paid"><option value="true">Paid (all expansions)</option><option value="false">Froob</option></select></div>
     </div>
     <div class="row">
       <div><label>Specialization (highest book)</label>
         <select id="spec"><option value="0">None</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select>
       </div>
     </div>
-    <label>Expansions owned</label>
-    <div class="mini">A nano gated on an expansion/spec you don't own is NEVER castable.</div>
-    <div id="exp" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:15px">
-      <label style="display:inline-flex;gap:5px;align-items:center;margin:0"><input type="checkbox" data-bit="1" style="width:auto"> Notum Wars</label>
-      <label style="display:inline-flex;gap:5px;align-items:center;margin:0"><input type="checkbox" data-bit="2" checked style="width:auto"> Shadowlands</label>
-      <label style="display:inline-flex;gap:5px;align-items:center;margin:0"><input type="checkbox" data-bit="8" checked style="width:auto"> Alien Invasion</label>
-      <label style="display:inline-flex;gap:5px;align-items:center;margin:0"><input type="checkbox" data-bit="32" checked style="width:auto"> Lost Eden</label>
-      <label style="display:inline-flex;gap:5px;align-items:center;margin:0"><input type="checkbox" data-bit="128" checked style="width:auto"> Legacy of Xan</label>
-    </div>
+    <div class="mini">Account is froob-vs-paid only: every paid account owns all expansions. A froob is blocked from any nano with an expansion gate (e.g. Shadowlands).</div>
 
     <label>Skills (effective, no buffs)</label>
     <div class="mini">Stat name exactly as the game enum: MaterialCreation, SpaceTime, MatterMetamorphosis, BiologicalMetamorphosis, PsychologicalModifications, SensoryImprovement, TimeAndSpace...</div>
@@ -966,8 +992,13 @@ internal static class Program
     <button class="sec" onclick="addStat('','')">+ add skill</button>
 
     <label style="margin-top:14px">Wants - pet/nano ids to attempt (comma separated)</label>
+    <div class="row" style="margin-top:4px">
+      <div><label class="mini" style="margin:0">Add a pet nano</label>
+        <select id="petpick" onchange="addWant(this.value); this.selectedIndex=0"><option value="">- pick a pet summon -</option></select>
+      </div>
+    </div>
     <input id="wants" value="43325">
-    <div class="mini">Summon nano ids (from AODB / itemnames). 43325 = Feeble Automaton (example).</div>
+    <div class="mini">Pick from the dropdown (every pet-summon nano in the data) or type ids directly. 43325 = Feeble Automaton (example).</div>
 
     <button onclick="plan()">Plan</button>
     <button class="sec" onclick="loadExample()">Load example</button>
@@ -979,12 +1010,41 @@ internal static class Program
 </main>
 
 <script>
+let STATS=[];
+function statOptions(sel){
+  return ['<option value="">- stat -</option>']
+    .concat(STATS.map(s=>`<option value="${s}"${s===sel?' selected':''}>${s}</option>`)).join('');
+}
 function addStat(name, val){
   const wrap=document.getElementById('stats');
   const div=document.createElement('div'); div.className='statgrid';
-  div.innerHTML=`<input placeholder="Stat name" value="${name}"><input type="number" placeholder="value" value="${val}"><button class="sec" onclick="this.parentElement.remove()">x</button>`;
+  div.innerHTML=`<select>${statOptions(name)}</select><input type="number" placeholder="value" value="${val}"><button class="sec" onclick="this.parentElement.remove()">x</button>`;
   wrap.appendChild(div);
 }
+function addWant(id){
+  if(!id) return;
+  const w=document.getElementById('wants');
+  const have=w.value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!have.includes(id)){ have.push(id); w.value=have.join(','); }
+}
+// Account froob => no specialization (the spec dropdown is disabled and forced to None).
+function syncSpec(){
+  const paid=document.getElementById('paid').value==='true';
+  const spec=document.getElementById('spec');
+  spec.disabled=!paid;
+  if(!paid) spec.value='0';
+}
+async function loadLists(){
+  try{ STATS=await (await fetch('/statnames')).json(); }catch(e){ STATS=[]; }
+  document.querySelectorAll('#stats .statgrid select').forEach(s=>{const v=s.value;s.innerHTML=statOptions(v);});
+  try{
+    const pets=await (await fetch('/petnanos')).json();
+    const sel=document.getElementById('petpick');
+    pets.forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=`${p.name} (${p.id})`;sel.appendChild(o);});
+  }catch(e){}
+}
+window.addEventListener('DOMContentLoaded',()=>{ syncSpec(); loadLists();
+  document.getElementById('paid').addEventListener('change',syncSpec); });
 function loadExample(){
   document.getElementById('stats').innerHTML='';
   addStat('MaterialCreation','336'); addStat('SpaceTime','336');
@@ -1008,7 +1068,6 @@ async function plan(){
     maxNcu:parseInt(document.getElementById('ncu').value,10)||0,
     paid:document.getElementById('paid').value==='true',
     specialization:parseInt(document.getElementById('spec').value,10)||0,
-    expansion:[...document.querySelectorAll('#exp input:checked')].reduce((a,c)=>a+parseInt(c.dataset.bit,10),0),
     stats:collectStats(),
     wants:document.getElementById('wants').value.split(',').map(s=>parseInt(s.trim(),10)).filter(n=>!isNaN(n))
   };
