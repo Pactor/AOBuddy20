@@ -622,6 +622,22 @@ public sealed class MeshGrid : IWalkGrid
         HashSet<int> pricey = null, HashSet<int> opened = null)
     {
         why = "";
+
+        // THE PATH CACHE (owner, 2026-10-13): the Dijkstra over a zone's mesh is the most
+        // expensive thing the walk thread does - the 19-million-node drain on pf 655 proved it -
+        // and the same plan is asked for again: the travel tick re-setting the identical goal,
+        // the next trip to the same mission entrance, the legs a multi-zone journey walks twice.
+        // The memo lives per playfield in GameData/Nav/<pf>/paths.json, one zone in memory,
+        // loaded on zone change. A hit is served only when the ends still match and the path
+        // crosses none of this walk's hard blocks; the `opened` cone needs no key - its cells
+        // are exempt from extra only while open, and the pad disc sits in extra otherwise, so a
+        // stale path through it fails the overlap and re-plans.
+        var cached = PathCache.Get(this, a, b, reach, float.NaN, extra);
+        if (cached != null)
+        {
+            return cached;
+        }
+
         var startCell = CellOf(a.X, a.Z);
         var goalCell = CellOf(b.X, b.Z);
         var gcx = goalCell % CellsX;
@@ -798,6 +814,7 @@ public sealed class MeshGrid : IWalkGrid
         var sy = startSlot < sFl.Length ? sFl[startSlot] : a.Y;
         path.Add(new Vector3((sx + 0.5f) * Cell, sy, (sz + 0.5f) * Cell));
         path.Reverse();
+        PathCache.Put(Pf, a, b, reach, float.NaN, path);
         return path;
 
         int CellOf(float x, float z) => (int)(z / Cell) * CellsX + (int)(x / Cell);

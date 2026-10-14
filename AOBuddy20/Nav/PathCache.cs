@@ -101,7 +101,7 @@ public static class PathCache
     }
 
     /// <summary>The cached path for a to b, or null (plan it). extra is this walk's hard blocks: a path across one is not this walk's path.</summary>
-    public static List<Vector3> Get(OverlandGrid grid, Vector3 a, Vector3 b, float reach, float goalY, HashSet<int> extra)
+    public static List<Vector3> Get(IWalkGrid grid, Vector3 a, Vector3 b, float reach, float goalY, HashSet<int> extra)
     {
         lock (Gate)
         {
