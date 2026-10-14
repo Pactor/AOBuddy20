@@ -98,7 +98,21 @@ namespace AOBuddy20.Controlling;
 [MinLogLevel(LogEventLevel.Debug)]
 public sealed class MissionController : IPacketConsumer
 {
-    private enum Phase { Idle, ToTerminal, Rolling, AwaitList, Accepting, ToDoor, EnterDoor, Blitz, PickDoor, RewardBag, Leaving, WaitingSell }
+    private enum Phase
+    {
+        Idle,
+        ToTerminal,
+        Rolling,
+        AwaitList,
+        Accepting,
+        ToDoor,
+        EnterDoor,
+        Blitz,
+        PickDoor,
+        RewardBag,
+        Leaving,
+        WaitingSell
+    }
 
     // Mission types (the terminal list's MissionIcon codes).
     public const int TypeFindPerson = 0x2C47;
@@ -130,7 +144,11 @@ public sealed class MissionController : IPacketConsumer
     private const int DoorPickTries = 20;
     private const double DoorPickEverySec = 2.0; // one pick attempt per this (the use takes a beat server-side)
     private const double DoorPickApproachTimeout = 25.0; // the walk to the shut door that never got there
-    private const float DoorPickStandoff = 0.5f; // the approach radius (owner, 2026-10-11): stop 0.5 m short of the door - close enough that proximity doors swing and the pick reaches
+
+    private const float
+        DoorPickStandoff =
+            0.5f; // the approach radius (owner, 2026-10-11): stop 0.5 m short of the door - close enough that proximity doors swing and the pick reaches
+
     private const double SearchHopTimeout = 25.0; // a room walk this long without arriving: next room
     private const int DoorSides = 8; // 45° ladder, this many sides per round
     private const int DoorRounds = 2; // and this many rounds, then the door is given up
@@ -383,8 +401,9 @@ public sealed class MissionController : IPacketConsumer
                 // 'mission clear on|off' (owner 2026-10-09: he typed the natural spelling and the
                 // run blitzed on - this used to fall into the abandon below): the CLEAR MODE
                 // toggle, same as 'mission run clear on|off'.
-                if (parts.Length > 2 && (parts[2].Equals("on", StringComparison.OrdinalIgnoreCase) ||
-                                         parts[2].Equals("off", StringComparison.OrdinalIgnoreCase)))
+                if (parts.Length > 2 &&
+                    (parts[2].Equals("on", StringComparison.OrdinalIgnoreCase) ||
+                     parts[2].Equals("off", StringComparison.OrdinalIgnoreCase)))
                 {
                     ToggleClearMode(parts[2].ToLowerInvariant(), reply);
                     break;
@@ -503,9 +522,12 @@ public sealed class MissionController : IPacketConsumer
               $"({_current.Location.X:0},{_current.Location.Z:0})";
         return _phase switch
         {
-            Phase.Idle => "idle. " + mission + ". Terminal: " + (_savedTerminal != null
-                ? $"pf {_savedTerminal.pf} ({_savedTerminal.x:0},{_savedTerminal.z:0})"
-                : "none saved"),
+            Phase.Idle => "idle. " +
+                          mission +
+                          ". Terminal: " +
+                          (_savedTerminal != null
+                              ? $"pf {_savedTerminal.pf} ({_savedTerminal.x:0},{_savedTerminal.z:0})"
+                              : "none saved"),
             Phase.Blitz => "blitz" + (ClearOn ? $" [clear: {ClearText}]" : "") + RecordText() + ": " + _goalWhat,
             Phase.WaitingSell => "bags full - waiting on the sell run, then back to the terminal.",
             _ => $"{_phase}: {_goalWhat}; {mission}",
@@ -820,7 +842,8 @@ public sealed class MissionController : IPacketConsumer
     private Dynel TerminalWithin(LocalPlayer me, float metres)
     {
         return DynelManager.AllDynels
-            .Where(d => d != null && d.Identity.Type == IdentityType.MissionTerminal &&
+            .Where(d => d != null &&
+                        d.Identity.Type == IdentityType.MissionTerminal &&
                         Movement.Flat(me.Transform.Position, d.Transform.Position) <= metres)
             .OrderBy(d => Movement.Flat(me.Transform.Position, d.Transform.Position))
             .FirstOrDefault();
@@ -832,7 +855,8 @@ public sealed class MissionController : IPacketConsumer
     private Dynel DoorWithin(Vector3 door, float metres)
     {
         return DynelManager.AllDynels
-            .Where(d => d != null && (d.Identity.Type == IdentityType.Door || d.Identity.Type == IdentityType.ACGEntrance) &&
+            .Where(d => d != null &&
+                        (d.Identity.Type == IdentityType.Door || d.Identity.Type == IdentityType.ACGEntrance) &&
                         Movement.Flat(door, d.Transform.Position) <= metres)
             .OrderBy(d => Movement.Flat(door, d.Transform.Position))
             .FirstOrDefault();
@@ -873,8 +897,10 @@ public sealed class MissionController : IPacketConsumer
     /// <summary>The door's physical identity (room pair + position, pf-less) - the dedupe key the
     /// stream handler uses, and the lockpick beat's "this door is a lost cause" key.</summary>
     private static long DoorKey(short room, short adjoining, Vector3 pos) =>
-        ((long)(ushort)room << 40) | ((long)(ushort)adjoining << 24)
-        | ((long)(ushort)(short)Math.Round(pos.X * 2) << 12) | (ushort)(short)Math.Round(pos.Z * 2);
+        ((long)(ushort)room << 40) |
+        ((long)(ushort)adjoining << 24) |
+        ((long)(ushort)(short)Math.Round(pos.X * 2) << 12) |
+        (ushort)(short)Math.Round(pos.Z * 2);
 
     /// <summary>The streamed door of this building that is NOT open and stands within 8 m of the
     /// goal - the one the walk just bounced off. A door the lockpick beat already failed on sits
@@ -1175,7 +1201,8 @@ public sealed class MissionController : IPacketConsumer
             for (var i = 0; i < _serverDoors.Count; i++)
             {
                 var d = _serverDoors[i];
-                if (d.room == door.Room && d.adjoining == door.AdjoiningRoom &&
+                if (d.room == door.Room &&
+                    d.adjoining == door.AdjoiningRoom &&
                     !(d.pos.X == 0 && d.pos.Y == 0 && d.pos.Z == 0))
                 {
                     _serverDoors[i] = (d.room, d.adjoining, d.pos, d.pf, flags);
@@ -1212,7 +1239,8 @@ public sealed class MissionController : IPacketConsumer
             for (var i = 0; i < _serverDoors.Count; i++)
             {
                 var d = _serverDoors[i];
-                if (d.room == door.Room && d.adjoining == door.AdjoiningRoom &&
+                if (d.room == door.Room &&
+                    d.adjoining == door.AdjoiningRoom &&
                     Movement.Flat(d.pos, coord) < 0.5f)
                 {
                     _serverDoors[i] = (d.room, d.adjoining, d.pos, d.pf, flags);
@@ -1293,7 +1321,8 @@ public sealed class MissionController : IPacketConsumer
             var mine = giver.Type == IdentityType.MissionTerminal ||
                        (giver.Type == IdentityType.SimpleChar &&
                         ((_terminal != Identity.None && (giver.Instance & 0xFFFFFF) == (_terminal.Instance & 0xFFFFFF)) ||
-                         (_savedTerminal != null && _savedTerminal.id != 0 &&
+                         (_savedTerminal != null &&
+                          _savedTerminal.id != 0 &&
                           (giver.Instance & 0xFFFFFF) == ((uint)_savedTerminal.id & 0xFFFFFF))));
             if (mine)
             {
@@ -1358,8 +1387,10 @@ public sealed class MissionController : IPacketConsumer
             return false;
         }
 
-        if (it.Identity == Identity.None || it.Identity.Type != IdentityType.Terminal ||
-            it.Position == null || it.Stats == null)
+        if (it.Identity == Identity.None ||
+            it.Identity.Type != IdentityType.Terminal ||
+            it.Position == null ||
+            it.Stats == null)
         {
             return false;
         }
@@ -1866,8 +1897,8 @@ public sealed class MissionController : IPacketConsumer
         if (zones != null && zones.Count > 0)
         {
             var name = Zoning.Name(m.Playfield.Instance);
-            var ok = zones.Any(z => string.Equals(z?.Trim(), name, StringComparison.OrdinalIgnoreCase)
-                                    || (int.TryParse(z, out var id) && id == m.Playfield.Instance));
+            var ok = zones.Any(z =>
+                string.Equals(z?.Trim(), name, StringComparison.OrdinalIgnoreCase) || (int.TryParse(z, out var id) && id == m.Playfield.Instance));
             if (!ok)
             {
                 why = $"{name} is not in MissionZones";
@@ -2041,7 +2072,8 @@ public sealed class MissionController : IPacketConsumer
             return;
         }
 
-        if ((int)Playfield.ModelId == _current.Playfield.Instance && flat > 12f &&
+        if ((int)Playfield.ModelId == _current.Playfield.Instance &&
+            flat > 12f &&
             !_movement.HasGoal(ControlPriority.Travel))
         {
             // In the door's playfield with no leg to walk: the walk gave the final leg up on a
@@ -2205,7 +2237,7 @@ public sealed class MissionController : IPacketConsumer
         {
             // The zone-in also re-sends the quest log; the record lands a beat after we do.
             var fresh = _questRaw;
-                _questRaw = null;
+            _questRaw = null;
             if (fresh != null)
             {
                 _record = ParseRecord(fresh, me.Identity.Instance, _nav.Layout.Instance);
@@ -2274,7 +2306,8 @@ public sealed class MissionController : IPacketConsumer
         // and marked the NEXT room - one room per frame: 21 rooms burned in 0.3 s, the mission
         // dropped before the grid had loaded or the floor's items had landed
         // (owner, 2026-10-03: "nothing left to search" 0.4 s after the zone-in).
-        if (_goalSet && _movement.HasGoal(ControlPriority.Mission) &&
+        if (_goalSet &&
+            _movement.HasGoal(ControlPriority.Mission) &&
             !_movement.IsGoalReached(ControlPriority.Mission) &&
             _phaseTime - _goalAt < SearchHopTimeout)
         {
@@ -2303,7 +2336,9 @@ public sealed class MissionController : IPacketConsumer
         // It must also still POINT at the spot: a wandering pull moves while its label stays the
         // same, and the stale goal reads reached - the dedup then swallowed every re-issue and
         // the bot stood still beside a live mob 16 m off (owner, 2026-10-09 11:41, Shade-Y42).
-        if (_goalSet && _goalWhat == what && _movement.HasGoal(ControlPriority.Mission) &&
+        if (_goalSet &&
+            _goalWhat == what &&
+            _movement.HasGoal(ControlPriority.Mission) &&
             Movement.Flat(_goalPos, to) < 1f)
         {
             return; // already walking there
@@ -2445,10 +2480,10 @@ public sealed class MissionController : IPacketConsumer
             return true;
         }
 
-        return _nav.Dungeon.CellOf(rm, p.X + 2.5, p.Z, out _, out _)
-               || _nav.Dungeon.CellOf(rm, p.X - 2.5, p.Z, out _, out _)
-               || _nav.Dungeon.CellOf(rm, p.X, p.Z + 2.5, out _, out _)
-               || _nav.Dungeon.CellOf(rm, p.X, p.Z - 2.5, out _, out _);
+        return _nav.Dungeon.CellOf(rm, p.X + 2.5, p.Z, out _, out _) ||
+               _nav.Dungeon.CellOf(rm, p.X - 2.5, p.Z, out _, out _) ||
+               _nav.Dungeon.CellOf(rm, p.X, p.Z + 2.5, out _, out _) ||
+               _nav.Dungeon.CellOf(rm, p.X, p.Z - 2.5, out _, out _);
     }
 
     private static long DoorKey(Vector3 p) => (long)Math.Round(p.X * 2) * 10_000_000 + (int)Math.Round(p.Z * 2);
@@ -2542,7 +2577,8 @@ public sealed class MissionController : IPacketConsumer
             ClearOn = v == "on";
         }
 
-        reply("Clear mode: " + (ClearOn ? "ON" : "off") +
+        reply("Clear mode: " +
+              (ClearOn ? "ON" : "off") +
               (Active && ClearPct >= 0 ? $" ({ClearText} of this building)" : "") +
               " - every mob in the building dies before the objective (90% at least). " +
               "'mission clear on|off'.");
@@ -2555,8 +2591,13 @@ public sealed class MissionController : IPacketConsumer
     /// searching for the objective. It holds until the server's share of dead mobs passes
     /// <see cref="ClearDonePct" /> - THE OWNER'S LINE (2026-10-09): the objective waits for 90% at
     /// least, however long the walk takes (the 3x blitz timeout is the backstop).</summary>
-    public bool Clearing => ClearOn && _nav != null && _record != null && !_completed &&
-                            !_clearGaveUp && _phase == Phase.Blitz && ClearPct < ClearDonePct;
+    public bool Clearing => ClearOn &&
+                            _nav != null &&
+                            _record != null &&
+                            !_completed &&
+                            !_clearGaveUp &&
+                            _phase == Phase.Blitz &&
+                            ClearPct < ClearDonePct;
 
     /// <summary>The share of dead mobs the objective waits for (owner, 2026-10-09: the last run
     /// finished after 2-3 kills of many - never again below this line).</summary>
@@ -2637,7 +2678,7 @@ public sealed class MissionController : IPacketConsumer
             var shut = ShutDoorNear(_goalPos);
             if (shut.HasValue)
             {
-                StartPicking(shut.Value);   
+                StartPicking(shut.Value);
                 return;
             }
             */
@@ -2670,7 +2711,8 @@ public sealed class MissionController : IPacketConsumer
         // A hop in flight owns the walk until it lands or times out (the search's gate): reached
         // falls through to the next move; the timeout ends the hop - a pull that never got walked
         // to sits out two minutes, the room in flight counts as walked.
-        if (_goalSet && _movement.HasGoal(ControlPriority.Mission) &&
+        if (_goalSet &&
+            _movement.HasGoal(ControlPriority.Mission) &&
             !_movement.IsGoalReached(ControlPriority.Mission))
         {
             if (_phaseTime - _goalAt < SearchHopTimeout)
@@ -2704,36 +2746,50 @@ public sealed class MissionController : IPacketConsumer
         {
             _currentClearRoom = null;
 
+            // The two rooms of the pull: ours and the mob's (the clear scan's wire room numbers,
+            // the live lookup as the fallback). The approach enters room by room: STEP is the
+            // next room on the placed-socket chain toward the mob - its own room once we are
+            // the neighbour (owner, 2026-10-14: at the far room's own door the bot just stood).
+            var myRoom = RoomIndexAt(pos);
+            var mobRoom = RoomOfMob(pick.Identity, pick.Transform.Position);
+            var roomsApart = myRoom.HasValue && mobRoom.HasValue && myRoom.Value.idx != mobRoom.Value.idx;
+            var step = roomsApart
+                ? NextRoomToward(myRoom.Value.idx, mobRoom.Value.idx) ?? mobRoom.Value.idx
+                : -1;
+
             // THE LOCK GATE (owner, 2026-10-11, 14678927 + the Subway re-run): a mob behind a
             // LOCKED door is unknown to the pet - the attack loops "engagement closed" forever.
-            // Two forms: a locked door ON the bot-to-mob line, and (the passage juts case) the
-            // mob's own room behind its LOCKED entrance door - the locked door nearest the MOB
-            // within 6 m. Stop and run the lockpick beat; the re-stream clears the door.
-            var locked = LockedDoorBetween(pos, pick.Transform.Position)
-                         ?? LockedDoorNearMob(pick.Transform.Position);
+            // Two forms: a locked door ON the bot-to-mob line, and the STEP room behind its
+            // LOCKED entrance door - the locked door of that room nearest the bot, the shortest
+            // path to walk and pick (owner, 2026-10-14: by room, not by a radius around the
+            // mob). Stop and run the lockpick beat; the re-stream clears the door.
+            var locked = LockedDoorBetween(pos, pick.Transform.Position) ??
+                         (roomsApart ? LockedDoorOfRoom(step, pos) : null);
             if (locked.HasValue)
             {
                 var d = locked.Value;
-                if (d.flags!=0)
+                if (d.flags != 0)
                 {
                     StartPicking((d.room, d.adjoining, d.pos, d.flags));
                 }
+
                 return;
             }
 
             // THE DOOR GATE (owner, 2026-10-11, the 14678927 pet pull): a mob in ANOTHER room
             // is behind a door that only opens on player proximity - at pull distance the door
             // never opened and the pet has no knowledge of the mob (the engagement closes
-            // instantly). Walk to that room's door first, approach 0.5 m so the door swings,
-            // then the pull works on the next ticks.
-            var myRoom = RoomIndexAt(pos);
-            (int floor, int idx)? mobRoom = _mobRoom.TryGetValue(pick.Identity, out var mrm) ? mrm : null;
-            if (myRoom.HasValue && mobRoom.HasValue && myRoom.Value != mobRoom.Value)
+            // instantly). Walk to the STEP room's door first, approach 0.5 m so the door
+            // swings, then the pull works on the next ticks. The socket between the two rooms
+            // answers for the pair; no streamed door and no socket (the hop's door not yet in
+            // the stream): the step room's nearest not-open door is the approach - the body
+            // near it opens the leaf and the room's data streams in (owner, 2026-10-14).
+            if (roomsApart)
             {
-                var door = DoorBetween(myRoom.Value.idx, mobRoom.Value.idx, pos);
+                var door = DoorBetween(myRoom.Value.idx, step, pos) ?? ShutDoorOfRoom(step, pos);
                 if (door.HasValue)
                 {
-                    WalkTo(pos, door.Value, 0.5f, $"clear: the door to room {mobRoom.Value.idx}");
+                    WalkTo(pos, door.Value, 0.5f, $"clear: the door to room {step}");
                     return;
                 }
             }
@@ -2751,17 +2807,17 @@ public sealed class MissionController : IPacketConsumer
         // mobs die like the rest, only after every other room is done).
         var myFloor = FloorAt(pos);
         var next = _nav.Dungeon.Rooms
-            .Select((r, i) => (r, i))
-            .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)) && !IsPersonRoom(x.r))
-            .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
-            .Cast<(NavDungeon.Room r, int i)?>()
-            .FirstOrDefault()
-            ?? _nav.Dungeon.Rooms
-                .Select((r, i) => (r, i))
-                .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)))
-                .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
-                .Cast<(NavDungeon.Room r, int i)?>()
-                .FirstOrDefault();
+                       .Select((r, i) => (r, i))
+                       .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)) && !IsPersonRoom(x.r))
+                       .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
+                       .Cast<(NavDungeon.Room r, int i)?>()
+                       .FirstOrDefault() ??
+                   _nav.Dungeon.Rooms
+                       .Select((r, i) => (r, i))
+                       .Where(x => x.r.Floor == myFloor && !_clearVisited.Contains((x.r.Floor, x.i)))
+                       .OrderBy(x => Movement.Flat(pos, new Vector3(x.r.Pos[0], pos.Y, x.r.Pos[2])))
+                       .Cast<(NavDungeon.Room r, int i)?>()
+                       .FirstOrDefault();
         if (next.HasValue)
         {
             var (rm, idx) = next.Value;
@@ -2795,7 +2851,8 @@ public sealed class MissionController : IPacketConsumer
 
         // FLOOR CHANGE: a floor with rooms left is reached by a button, as in the search. (The
         // room walk cleared MY floor: this fires only when another floor still has rooms.)
-        if (_presses < MaxPresses && _nav.Dungeon.Rooms
+        if (_presses < MaxPresses &&
+            _nav.Dungeon.Rooms
                 .Select((r, i) => (r, i))
                 .Any(x => !_clearVisited.Contains((x.r.Floor, x.i))))
         {
@@ -2910,7 +2967,9 @@ public sealed class MissionController : IPacketConsumer
         foreach (var s in _awareness.OnBot.Concat(_awareness.OnPets))
         {
             var n = s.Mob;
-            if (n == null || n.Identity == _personId || DynelManager.Dead.Contains(n.Identity) ||
+            if (n == null ||
+                n.Identity == _personId ||
+                DynelManager.Dead.Contains(n.Identity) ||
                 (n.TryGetStat(Stat.Health, out var hp) && hp <= 0))
             {
                 continue;
@@ -2934,7 +2993,8 @@ public sealed class MissionController : IPacketConsumer
         if (_pullId != Identity.None)
         {
             var held = DynelManager.Find(_pullId, out NpcChar cur) ? cur : null;
-            if (held != null && Pullable(me, held) &&
+            if (held != null &&
+                Pullable(me, held) &&
                 Movement.Flat(pos, held.Transform.Position) <= PullSightMetres + 10f)
             {
                 PullPick = held;
@@ -2974,8 +3034,9 @@ public sealed class MissionController : IPacketConsumer
                 continue;
             }
 
-            var paired = _nav.MissionDoorways.Any(o => o.Room == toRoom && o.Floor == dw.Floor &&
-                Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
+            var paired = _nav.MissionDoorways.Any(o => o.Room == toRoom &&
+                                                       o.Floor == dw.Floor &&
+                                                       Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
             if (!paired)
             {
                 continue;
@@ -3008,8 +3069,9 @@ public sealed class MissionController : IPacketConsumer
                 continue;
             }
 
-            var paired = _nav.MissionDoorways.Any(o => o.Room == adjoining && o.Floor == dw.Floor &&
-                Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
+            var paired = _nav.MissionDoorways.Any(o => o.Room == adjoining &&
+                                                       o.Floor == dw.Floor &&
+                                                       Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) < 2.5);
             if (paired)
             {
                 return new Vector3((float)dw.X, (float)dw.Y, (float)dw.Z);
@@ -3058,27 +3120,166 @@ public sealed class MissionController : IPacketConsumer
         return null;
     }
 
-    // The LOCKED door nearest the MOB (within 6 m): the mob's own room's entrance door - the
-    // mob behind it is unknown to the pet until it opens. Only the streamed doors answer.
-    private (short room, short adjoining, Vector3 pos, uint flags)? LockedDoorNearMob(Vector3 mob)
+    // The pull target's room: the clear scan's book first (the wire room numbers), the live
+    // position lookup as the fallback. Null when the mob sits in no known room.
+    private (int floor, int idx)? RoomOfMob(Identity mob, Vector3 mobPos)
     {
-        return _serverDoors
-            .Where(d => d.pf == _missionPf && (d.flags & 0x40) != 0)
-            .OrderBy(d => Movement.Flat(d.pos, mob))
-            .Select(d => (d.room, d.adjoining, d.pos, d.flags))
-            .FirstOrDefault(d => Movement.Flat(d.pos, mob) <= 6f);
+        if (_mobRoom.TryGetValue(mob, out var mrm))
+        {
+            return mrm;
+        }
+
+        return RoomIndexAt(mobPos);
+    }
+
+    // The NEXT room on the placed-socket graph from our room toward the mob's: the first step
+    // of the shortest hop chain (BFS over the doorway pairing DoorBetween walks - same floor,
+    // the other side's socket beside this one). The approach enters room by room: every door
+    // we then target stands between rooms we are IN, it opens on arrival and streams the next
+    // hop; the mob's own entrance gate only matters once we are its neighbour (owner,
+    // 2026-10-14: walking straight at a far room's door just stood the bot still). Null when
+    // the two rooms are one, or no placed chain answers.
+    private int? NextRoomToward(int fromRoom, int toRoom)
+    {
+        if (fromRoom == toRoom || _nav?.MissionDoorways == null)
+        {
+            return null;
+        }
+
+        var doors = _nav.MissionDoorways;
+        var adjacent = new Dictionary<int, List<int>>();
+        foreach (var dw in doors)
+        {
+            foreach (var o in doors)
+            {
+                if (dw.Room == o.Room || dw.Floor != o.Floor ||
+                    Math.Abs(o.X - dw.X) + Math.Abs(o.Z - dw.Z) >= 2.5)
+                {
+                    continue;
+                }
+
+                if (!adjacent.TryGetValue(dw.Room, out var list))
+                {
+                    adjacent[dw.Room] = list = new List<int>();
+                }
+
+                if (!list.Contains(o.Room))
+                {
+                    list.Add(o.Room);
+                }
+            }
+        }
+
+        if (!adjacent.ContainsKey(fromRoom))
+        {
+            return null;
+        }
+
+        var parents = new Dictionary<int, int> { [fromRoom] = -1 };
+        var queue = new Queue<int>();
+        queue.Enqueue(fromRoom);
+        while (queue.Count > 0)
+        {
+            var room = queue.Dequeue();
+            if (!adjacent.TryGetValue(room, out var nexts))
+            {
+                continue;
+            }
+
+            foreach (var n in nexts)
+            {
+                if (parents.ContainsKey(n))
+                {
+                    continue;
+                }
+
+                parents[n] = room;
+                if (n == toRoom)
+                {
+                    var step = n; // the chain back to the first step off our room
+                    while (parents[step] != fromRoom)
+                    {
+                        step = parents[step];
+                    }
+
+                    return step;
+                }
+
+                queue.Enqueue(n);
+            }
+        }
+
+        return null;
+    }
+
+    // The LOCKED door of a ROOM nearest the bot - the shortest path to walk and pick (owner,
+    // 2026-10-14: by room, not by a 6 m radius around the mob - the radius answered empty for
+    // a mob deeper in, and its FirstOrDefault on a ValueTuple sequence answered DEFAULT: the
+    // all-zero tuple the bot took for a real door and froze on). The room is the truth: the
+    // mob behind its LOCKED entrance door is unknown to the pet until the pick beats. Only
+    // the streamed doors answer.
+    private (short room, short adjoining, Vector3 pos, uint flags)? LockedDoorOfRoom(int room, Vector3 from)
+    {
+        (short room, short adjoining, Vector3 pos, uint flags)? best = null;
+        var bestD = double.MaxValue;
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf != _missionPf ||
+                (d.flags & 0x40) == 0 ||
+                (d.room != room && d.adjoining != room))
+            {
+                continue;
+            }
+
+            var dist = Movement.Flat(from, d.pos);
+            if (dist < bestD)
+            {
+                bestD = dist;
+                best = (d.room, d.adjoining, d.pos, d.flags);
+            }
+        }
+
+        return best;
+    }
+
+    // A room's nearest door that only needs the body NEAR it (not open, not locked - the
+    // locked ones are the pick beat's business): the leaf swings on approach, the next room's
+    // data streams in and the pet gains the mob behind it.
+    private Vector3? ShutDoorOfRoom(int room, Vector3 from)
+    {
+        Vector3? best = null;
+        var bestD = double.MaxValue;
+        foreach (var d in _serverDoors)
+        {
+            if (d.pf != _missionPf ||
+                (d.flags & 0x80) != 0 ||
+                (d.flags & 0x40) != 0 ||
+                (d.room != room && d.adjoining != room))
+            {
+                continue;
+            }
+
+            var dist = Movement.Flat(from, d.pos);
+            if (dist < bestD)
+            {
+                bestD = dist;
+                best = d.pos;
+            }
+        }
+
+        return best;
     }
 
     // Fit to fight: not a pet (ours or anyone's), alive, not the person we came to find, not
     // sitting out a pull refusal.
     private bool Pullable(LocalPlayer me, NpcChar n)
     {
-        return !n.Owner.HasValue
-               && n.Identity != _personId
-               && !me.Pets.Any(p => p.Identity == n.Identity)
-               && !DynelManager.Dead.Contains(n.Identity)
-               && (!n.TryGetStat(Stat.Health, out var hp) || hp > 0)
-               && (!_pullAside.TryGetValue(n.Identity, out var until) || _phaseTime > until);
+        return !n.Owner.HasValue &&
+               n.Identity != _personId &&
+               !me.Pets.Any(p => p.Identity == n.Identity) &&
+               !DynelManager.Dead.Contains(n.Identity) &&
+               (!n.TryGetStat(Stat.Health, out var hp) || hp > 0) &&
+               (!_pullAside.TryGetValue(n.Identity, out var until) || _phaseTime > until);
     }
 
     // Every half second while clearing: the room we stand in counts as walked, every mob in sight
@@ -3100,7 +3301,9 @@ public sealed class MissionController : IPacketConsumer
 
         foreach (var n in DynelManager.Npcs)
         {
-            if (n == null || n.Owner.HasValue || n.Identity == _personId ||
+            if (n == null ||
+                n.Owner.HasValue ||
+                n.Identity == _personId ||
                 me.Pets.Any(p => p.Identity == n.Identity))
             {
                 continue;
@@ -3140,8 +3343,10 @@ public sealed class MissionController : IPacketConsumer
             {
                 // No record id (or not streamed yet): the name-match rule FindTarget uses.
                 var text = _record.Text ?? "";
-                person = DynelManager.Npcs.FirstOrDefault(npc => npc != null && !npc.Owner.HasValue &&
-                                                                 !string.IsNullOrEmpty(npc.Name) && npc.Name.Length >= 4 &&
+                person = DynelManager.Npcs.FirstOrDefault(npc => npc != null &&
+                                                                 !npc.Owner.HasValue &&
+                                                                 !string.IsNullOrEmpty(npc.Name) &&
+                                                                 npc.Name.Length >= 4 &&
                                                                  text.IndexOf(npc.Name, StringComparison.OrdinalIgnoreCase) >= 0);
             }
 
@@ -3185,7 +3390,8 @@ public sealed class MissionController : IPacketConsumer
         {
             var rm = rooms[i];
             var y = _nav.Dungeon.FloorHeight(rm, p.X, p.Z);
-            if (double.IsNaN(y) || Math.Abs(y - p.Y) > bestY + 1.0 ||
+            if (double.IsNaN(y) ||
+                Math.Abs(y - p.Y) > bestY + 1.0 ||
                 !_nav.Dungeon.CellOf(rm, p.X, p.Z, out _, out _))
             {
                 continue;
@@ -3562,7 +3768,8 @@ public sealed class MissionController : IPacketConsumer
     {
         // The SDK's view of a bag is from when it was opened - a bag our own last move filled still
         // reads as having room. The item still in the inventory two seconds later is the refusal.
-        var still = Inventory.Items.Any(i => i != null && i.UniqueIdentity == _stashing.UniqueIdentity &&
+        var still = Inventory.Items.Any(i => i != null &&
+                                             i.UniqueIdentity == _stashing.UniqueIdentity &&
                                              i.Slot.Type == IdentityType.Inventory);
         if (!still)
         {
@@ -3585,7 +3792,8 @@ public sealed class MissionController : IPacketConsumer
 
     private IEnumerable<Item> RewardsInInventory()
     {
-        return Inventory.Items.Where(i => i != null && i.Slot.Type == IdentityType.Inventory &&
+        return Inventory.Items.Where(i => i != null &&
+                                          i.Slot.Type == IdentityType.Inventory &&
                                           i.UniqueIdentity.Type != IdentityType.MissionKey &&
                                           _rewardIds.Any(r => i.Id == r.low || i.HighId == r.high || i.Id == r.high));
     }
@@ -3636,8 +3844,10 @@ public sealed class MissionController : IPacketConsumer
     private List<Item> LootBagsOnMe()
     {
         return Inventory.Items
-            .Where(i => i != null && i.Slot.Type == IdentityType.Inventory &&
-                        i.UniqueIdentity.Type == IdentityType.Container && _lootBags.IsLootBag(i.UniqueIdentity))
+            .Where(i => i != null &&
+                        i.Slot.Type == IdentityType.Inventory &&
+                        i.UniqueIdentity.Type == IdentityType.Container &&
+                        _lootBags.IsLootBag(i.UniqueIdentity))
             .OrderBy(i => i.Slot.Instance)
             .ToList();
     }
@@ -3832,7 +4042,9 @@ public sealed class MissionController : IPacketConsumer
             MissionItemData = quest.MissionItemData ?? Array.Empty<MissionItemReward>(),
             Location = door?.at ?? new Vector3(0, 0, 0),
         };
-        _logger.LogInformation("MISSION: the quest log holds " + Line(m) + $" [{m.MissionIdentity}]" +
+        _logger.LogInformation("MISSION: the quest log holds " +
+                               Line(m) +
+                               $" [{m.MissionIdentity}]" +
                                (quest.MissionItemData == null || quest.MissionItemData.Length == 0
                                    ? " (no reward items in the log entry)."
                                    : $", rewards: {string.Join(", ", quest.MissionItemData.Select(RewardName))}."));
@@ -4081,8 +4293,9 @@ public sealed class MissionController : IPacketConsumer
     /// <summary>Nano crystals by name: the reward item the runs collect for a nano.</summary>
     private static bool IsNanoCrystal(string name)
     {
-        return name != null && (name.StartsWith("Nano Crystal", StringComparison.OrdinalIgnoreCase) ||
-                                name.StartsWith("NanoCrystal", StringComparison.OrdinalIgnoreCase));
+        return name != null &&
+               (name.StartsWith("Nano Crystal", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("NanoCrystal", StringComparison.OrdinalIgnoreCase));
     }
 
     // Wanted items never sell (wired into the SellController from the constructor): nano crystals
@@ -4090,8 +4303,9 @@ public sealed class MissionController : IPacketConsumer
     // Bankable rule, minus the implant/name rules that were a separate feature there).
     private bool KeptFromSale(Item i)
     {
-        return i != null && (IsNanoCrystal(i.Name) ||
-                             (_wants != null && _wants.Entries.Any(e => WantList.Fits(e, i.Id, i.Ql))));
+        return i != null &&
+               (IsNanoCrystal(i.Name) ||
+                (_wants != null && _wants.Entries.Any(e => WantList.Fits(e, i.Id, i.Ql))));
     }
 
     /// <summary>Templates he holds: inventory, bags, and the bank as last seen.</summary>
@@ -4368,7 +4582,8 @@ public sealed class MissionController : IPacketConsumer
 
         _wantDifficulty = d;
         _logger.LogInformation($"MISSION: aiming for {e}: difficulty {d}" +
-                               (ql.HasValue ? $" (mission QL {ql})" : " (trying it)") + ".");
+                               (ql.HasValue ? $" (mission QL {ql})" : " (trying it)") +
+                               ".");
     }
 
     // ---- Offered rewards (owner, 2026-09-25: "some of these may not be rollable, but I don't know which")
@@ -4542,13 +4757,15 @@ public sealed class MissionController : IPacketConsumer
 
             var all = WantList.NanosFor(r.e).Count;
             var left = r.left.Count > 0 && r.left.Count <= 8
-                ? " (left: " + string.Join(", ", r.left.Select(c =>
-                {
-                    var nano = WantData.NanoOf(c);
-                    var seen = NanoOffered(nano);
-                    var nm = (WantList.NameOf(c) ?? c.ToString()).Replace("Nano Crystal (", "").TrimEnd(')');
-                    return seen > 0 ? $"{nm} [offered {seen}x]" : $"{nm} [never offered in {RollsNear(c)} rolls at its QL]";
-                })) + ")"
+                ? " (left: " +
+                  string.Join(", ", r.left.Select(c =>
+                  {
+                      var nano = WantData.NanoOf(c);
+                      var seen = NanoOffered(nano);
+                      var nm = (WantList.NameOf(c) ?? c.ToString()).Replace("Nano Crystal (", "").TrimEnd(')');
+                      return seen > 0 ? $"{nm} [offered {seen}x]" : $"{nm} [never offered in {RollsNear(c)} rolls at its QL]";
+                  })) +
+                  ")"
                 : "";
             var dropped = WantList.NanosFor(r.e).Count(c => _notRollable.Contains(WantData.NanoOf(c)));
             parts.Add($"{r.e}: {all - r.left.Count - dropped} of {all} had{(dropped > 0 ? $", {dropped} not rollable" : "")}{left}");
@@ -4591,7 +4808,8 @@ public sealed class MissionController : IPacketConsumer
         // The ordinary pool (blitzable, zone-allowed) for the cap fallback: AOBuddy10's WantFilter
         // ran on the already-Fits-filtered list, so its "ordinary mission" was one it could take.
         var all = _offered.Where(m => Allowed(m, out _)).ToList();
-        _offered.RemoveAll(m => !Allowed(m, out _) || m.MissionItemData == null ||
+        _offered.RemoveAll(m => !Allowed(m, out _) ||
+                                m.MissionItemData == null ||
                                 !m.MissionItemData.Any(r => w.Wanted(r.LowId, r.Ql, held) != null));
         if (_offered.Count > 0)
         {
@@ -4693,7 +4911,8 @@ public sealed class MissionController : IPacketConsumer
         }
 
         var sb = new System.Text.StringBuilder();
-        sb.Append($"probe ({px:0.0},{pz:0.0}) y {py:0.0} - rooms here: {(roomsHere.Count == 0 ? "NONE (void between rooms)" : string.Join(", ", roomsHere))}");
+        sb.Append(
+            $"probe ({px:0.0},{pz:0.0}) y {py:0.0} - rooms here: {(roomsHere.Count == 0 ? "NONE (void between rooms)" : string.Join(", ", roomsHere))}");
         sb.Append($"; ~3 m east: {(roomsEast.Count == 0 ? "nothing tiled" : string.Join(", ", roomsEast))}");
 
         // Every probe leaves the full composed layout behind: rooms, doors and server doors in
@@ -4703,7 +4922,8 @@ public sealed class MissionController : IPacketConsumer
         {
             var dump = new System.Text.StringBuilder();
             dump.AppendLine($"layout {_nav.Name} pf {_missionPf}, {_nav.Dungeon.Rooms.Count} room(s)" +
-                            (_nav.Layout != null ? $" w {_nav.Layout.Width} h {_nav.Layout.Height} wh {_nav.Layout.WorldHeight}" : "") + ":");
+                            (_nav.Layout != null ? $" w {_nav.Layout.Width} h {_nav.Layout.Height} wh {_nav.Layout.WorldHeight}" : "") +
+                            ":");
             foreach (var rm in _nav.Dungeon.Rooms)
             {
                 // slot (X,Z) = the zone-in room table's own grid cell - the exact placement seed,
@@ -4716,8 +4936,10 @@ public sealed class MissionController : IPacketConsumer
                     (rm.Slot != null ? $" slot ({rm.Slot[0]},{rm.Slot[1]})" : ""));
             }
 
-            dump.AppendLine($"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Y:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
-            dump.AppendLine($"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Y:0.0},{sd.pos.Z:0.0}) {DoorState(sd.flags)}"))}");
+            dump.AppendLine(
+                $"doorways: {string.Join(" | ", _nav.MissionDoorways.Select(dw => $"({dw.X:0.0},{dw.Y:0.0},{dw.Z:0.0}) n({dw.Nx:0.0},{dw.Nz:0.0}) f{dw.Floor}"))}");
+            dump.AppendLine(
+                $"server doors: {string.Join(" | ", _serverDoors.Select(sd => $"Room={sd.room} Adj={sd.adjoining} ({sd.pos.X:0.0},{sd.pos.Y:0.0},{sd.pos.Z:0.0}) {DoorState(sd.flags)}"))}");
             dump.AppendLine($"server exit: {(_serverExitByPf.TryGetValue(_missionPf, out var sx) ? $"{sx.X:0.0},{sx.Z:0.0}" : "none seen")}");
             dump.AppendLine($"target: {(TryGetTargetPos(out var tp) ? $"{tp.X:0.0},{tp.Z:0.0}" : "not seen")}");
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"mission-layout-{_missionPf}.txt"), dump.ToString());
@@ -4732,6 +4954,7 @@ public sealed class MissionController : IPacketConsumer
         {
             // a dump must never break a probe
         }
+
         foreach (var (label, dx, dz) in new[] { ("east(+x)", 1f, 0f), ("west(-x)", -1f, 0f), ("south(+z)", 0f, 1f), ("north(-z)", 0f, -1f) })
         {
             sb.Append($" | {label}: ");
